@@ -55,7 +55,7 @@ def test_template_sources_are_zero_terminal(template):
 # Layer 2: rendered pages (worst-case gate states and both onboarding modes)
 # ---------------------------------------------------------------------------
 
-PAGES = ["/", "/jobs", "/runs", "/onboarding", "/engine", "/settings"]
+PAGES = ["/", "/jobs", "/runs", "/onboarding", "/engine", "/settings", "/system-check"]
 
 
 def _patch_gates_worst_case(monkeypatch):
