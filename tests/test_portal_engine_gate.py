@@ -153,3 +153,100 @@ def test_login_error_renders_on_page(portal_client, monkeypatch):
     r = client.get("/engine", params={"login_error": "boom happened"})
     assert r.status_code == 200
     assert "boom happened" in r.text
+
+
+# ---------------------------------------------------------------------------
+# Onboarding parses the login outcome contract (the dropped-params bug)
+# ---------------------------------------------------------------------------
+
+def _login_with_url(url: str) -> engine_auth.LoginProcess:
+    """A registry entry whose captured output carries the OAuth URL."""
+    login = engine_auth.LoginProcess(proc=object())
+    login.output.append(f"Sign in: {url}\n")
+    return login
+
+
+def test_onboarding_renders_login_error(portal_client, monkeypatch):
+    """The regression for the dead-button bug: /engine/login redirects here
+    with ?login_error=, which this page used to silently drop."""
+    client, _ = portal_client
+    patch_gates(monkeypatch)
+    r = client.get("/onboarding", params={"login_error": "boom happened"})
+    assert r.status_code == 200
+    assert "boom happened" in r.text
+
+
+def test_onboarding_renders_waiting_state_after_login_start(portal_client, monkeypatch):
+    client, _ = portal_client
+    patch_gates(monkeypatch)
+    r = client.get("/onboarding", params={"login": 1, "t0": time.time()})
+    assert r.status_code == 200
+    assert "Waiting for you to finish the Claude sign-in" in r.text
+    assert "boom" not in r.text  # no error alert on the success path
+
+
+def test_onboarding_accepts_t0_without_timeout_state(portal_client, monkeypatch):
+    """t0 parses (the shared contract) but onboarding keeps no timeout
+    machinery — its SSE channel flips the gate on the sign-in itself."""
+    client, _ = portal_client
+    patch_gates(monkeypatch)
+    stale = time.time() - 10_000
+    r = client.get("/onboarding", params={"login": 1, "t0": stale})
+    assert r.status_code == 200
+    assert "didn't complete" not in r.text
+
+
+def test_failed_login_followed_to_onboarding_shows_error(portal_client, monkeypatch):
+    """End-to-end over the redirect seam — POST, 303, GET — the exact path
+    the owner's click takes; a param-name drift between emitter and page
+    fails here."""
+    client, _ = portal_client
+    monkeypatch.setattr(engine_auth, "start_login", lambda: (None, "could not start"))
+    patch_gates(monkeypatch)
+    r = client.post("/engine/login", data={"next": "/onboarding"}, follow_redirects=True)
+    assert r.status_code == 200
+    assert "could not start" in r.text
+
+
+# ---------------------------------------------------------------------------
+# Headless OAuth link — the captured URL renders on both gate pages
+# ---------------------------------------------------------------------------
+
+CAPTURED_URL = "https://claude.ai/oauth/authorize?code=abc123&state=xyz"
+# Jinja autoescapes & to &amp; inside attribute values (XSS-safe rendering).
+ESCAPED_HREF = f'href="{CAPTURED_URL.replace("&", "&amp;")}"'
+
+
+def test_gate_page_renders_captured_oauth_link(portal_client, monkeypatch):
+    client, _ = portal_client
+    patch_gates(monkeypatch)
+    monkeypatch.setattr(engine_auth, "_active_login", _login_with_url(CAPTURED_URL))
+    r = client.get("/engine")
+    assert r.status_code == 200
+    assert ESCAPED_HREF in r.text
+    assert "No browser window opened?" in r.text
+
+
+def test_gate_page_hides_oauth_link_when_signed_in(portal_client, monkeypatch):
+    client, _ = portal_client
+    patch_gates(monkeypatch, claude=SIGNED_IN)
+    monkeypatch.setattr(engine_auth, "_active_login", _login_with_url(CAPTURED_URL))
+    r = client.get("/engine")
+    assert CAPTURED_URL not in r.text  # signed in — no sign-in link left around
+
+
+def test_gate_page_without_captured_login_has_no_link(portal_client, monkeypatch):
+    client, _ = portal_client
+    patch_gates(monkeypatch)
+    r = client.get("/engine")
+    assert "No browser window opened?" not in r.text
+
+
+def test_onboarding_renders_captured_oauth_link_and_waiting_state(portal_client, monkeypatch):
+    client, _ = portal_client
+    patch_gates(monkeypatch)
+    monkeypatch.setattr(engine_auth, "_active_login", _login_with_url(CAPTURED_URL))
+    r = client.get("/onboarding", params={"login": 1, "t0": time.time()})
+    assert r.status_code == 200
+    assert ESCAPED_HREF in r.text
+    assert "Waiting for you to finish the Claude sign-in" in r.text

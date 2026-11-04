@@ -16,7 +16,16 @@
 </div>
 {% endmacro %}
 
+{# Headless sign-in path: the spawned CLI printed its OAuth URL, so it is
+   offered as a plain link (the portal has no browser of its own). #}
+{% macro signin_link(url) %}
+{% if url %}<p class="dim">No browser window opened? Open
+   <a href="{{ url }}" rel="noopener noreferrer">{{ url }}</a> — this page updates when you're done.</p>
+{% endif %}
+{% endmacro %}
+
 {% if error %}<p class="alert error">{{ error }}</p>{% endif %}
+{% if login_error %}<p class="alert error">{{ login_error }}</p>{% endif %}
 
 <ol class="onboard-steps">
   <li class="{{ 'done' if (ready.can_start_claude or provider_ready) else 'active' }}">Agent account</li>
@@ -27,6 +36,17 @@
 
 {% if state is none %}
   {# ---- No interview yet: gate or choice ---- #}
+  {# The button becomes a waiting state while a sign-in is in flight; the
+     SSE channel (already polling claude_status in its signature) flips
+     this surface to the ready card the moment the sign-in completes. #}
+  {% set card_link = none if login_started else login_url %}
+  {% if login_started and ready.claude and ready.claude.state == "signed_out" %}
+    <section class="panel">
+      <p><strong>Waiting for you to finish the Claude sign-in…</strong>
+         <span class="dim">This page updates automatically once you're signed in.</span></p>
+      {{ signin_link(login_url) }}
+    </section>
+  {% endif %}
   {% if ready.can_start_claude %}
     <section class="panel">
       <h2>Interview agent ready</h2>
@@ -51,6 +71,7 @@
           <button class="secondary">Use the configured provider instead</button>
         </form>
       </div>
+      {{ signin_link(card_link) }}
     </section>
   {% else %}
     <section class="panel">
@@ -64,6 +85,7 @@
         </form>
         <a class="button-link secondary" href="/settings">Or configure a provider in Settings</a>
       </div>
+      {{ signin_link(card_link) }}
       <details class="terminal-fallback">
         <summary>Prefer your terminal? Run this instead</summary>
         <pre>claude auth login</pre>

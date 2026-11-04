@@ -408,8 +408,16 @@ def create_app() -> FastAPI:
     # the gate flips — it is the cross-tab/poll freshness channel.
     # ------------------------------------------------------------------
     @app.get("/onboarding", response_class=HTMLResponse)
-    async def onboarding_page(request: Request, error: str = ""):
-        return _render(request, "onboarding.html", **_onboarding_context(error=error))
+    async def onboarding_page(request: Request, error: str = "", login_error: str = "",
+                              login: int = 0, t0: float | None = None):
+        # Parses the engine-login outcome contract exactly as /engine does —
+        # ignoring these redirect params is what made a failed sign-in look
+        # like a dead button. t0 exists for that contract only; the
+        # onboarding surface keeps no timeout state (the SSE channel flips
+        # the gate the moment claude_status() does).
+        return _render(request, "onboarding.html",
+                       **_onboarding_context(error=error, login_error=login_error,
+                                             login=login, t0=t0))
 
     @app.get("/onboarding/chat", response_class=HTMLResponse)
     async def onboarding_chat(request: Request, error: str = ""):
@@ -701,6 +709,7 @@ def _engine_gate_context(t0: float | None, login_started: bool) -> dict:
     """
     claude = engine_auth.claude_status()
     droid = engine_auth.droid_status()
+    login = engine_auth.active_login()
     now = time.time()
     window_start = t0 if t0 else now
     waiting = claude.state == engine_auth.SIGNED_OUT or droid.state == engine_auth.SIGNED_OUT
@@ -714,11 +723,22 @@ def _engine_gate_context(t0: float | None, login_started: bool) -> dict:
         "timed_out": timed_out,
         "polling": waiting and not timed_out,
         "login_timeout_min": int(LOGIN_TIMEOUT_SECONDS // 60),
+        # The spawned `claude auth login`'s captured OAuth URL, when one has
+        # appeared — the headless sign-in path.
+        "login_url": login.oauth_url() if login is not None else None,
     }
 
 
-def _onboarding_context(error: str = "") -> dict:
-    """Shared context for the onboarding chat partial (page, posts, SSE)."""
+def _onboarding_context(error: str = "", login_error: str = "", login: int = 0,
+                        t0: float | None = None) -> dict:
+    """Shared context for the onboarding chat partial (page, posts, SSE).
+
+    `login_error`/`login`/`t0` are the engine-login outcome params — the
+    same contract every gate page parses. SSE re-renders omit them: the
+    waiting hint then survives only until the signature changes, and the
+    only in-wait signature change is the sign-in flip itself, which swaps
+    the gate card for the ready card anyway.
+    """
     state = onboarding.load_state()
     ready = onboarding.readiness()
     in_review = state is not None and state.phase == onboarding.REVIEW
@@ -726,6 +746,7 @@ def _onboarding_context(error: str = "") -> dict:
     if in_review and state.profile_draft:
         profile_md = onboarding.render_profile_md(
             state.profile_draft, state.profile_draft.get("_applypilot_search", {}))
+    login_process = engine_auth.active_login()
     return {
         "state": state,
         "ready": ready,
@@ -733,6 +754,9 @@ def _onboarding_context(error: str = "") -> dict:
         "missing": onboarding.missing_review_fields(state.profile_draft) if in_review else [],
         "profile_md": profile_md,
         "error": error,
+        "login_error": login_error,
+        "login_started": bool(login) and not ready["can_start_claude"],
+        "login_url": login_process.oauth_url() if login_process is not None else None,
     }
 
 

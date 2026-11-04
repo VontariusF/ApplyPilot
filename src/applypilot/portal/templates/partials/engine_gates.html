@@ -15,6 +15,12 @@
         <p class="alert error">Automatic sign-in didn't complete within {{ login_timeout_min }} minutes.
            Finish it from your own terminal, or check again.</p>
       {% endif %}
+      {% if login_url %}
+        {# Headless path: the spawned CLI printed its OAuth URL — offer it here. #}
+        <p class="alert">No browser window opened? Open
+           <a href="{{ login_url }}" rel="noopener noreferrer">{{ login_url }}</a>
+           to finish signing in — this page picks it up automatically.</p>
+      {% endif %}
       <div class="gate-actions">
         {% if login_started and not timed_out %}
           <span class="dim">Waiting for you to finish in the browser window…</span>
