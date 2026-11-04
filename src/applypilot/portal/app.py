@@ -26,6 +26,7 @@ from applypilot import config, database, engine_auth, onboarding
 from applypilot.apply.launcher import mark_job, reset_failed
 from applypilot.llm import ModelListError, list_models
 from applypilot.portal import auth, queries, runner
+from applypilot.portal import automation as automation_mod
 from applypilot.portal import settings as settings_mod
 from applypilot.scoring.scorer import run_scoring
 
@@ -80,6 +81,7 @@ def create_app() -> FastAPI:
     database.init_db()
     runner.init_registry()
     runner.sweep_orphans()
+    automation_mod.start_scheduler()
     token = auth.get_or_create_token()
     auth.install_access_log_redaction()
 
@@ -217,6 +219,22 @@ def create_app() -> FastAPI:
         return RedirectResponse(f"/jobs/detail?url={quote(url, safe='')}",
                                 status_code=303)
 
+    @app.post("/jobs/tailor-now")
+    async def jobs_tailor_now(request: Request):
+        """Tailor now (spec Jobs panel): reset this job's tailoring state and
+        immediately run a one-job tailor subprocess, tracked in the registry."""
+        form = await request.form()
+        url = str(form.get("url", "")).strip()
+        if not url:
+            return PlainTextResponse("invalid tailor-now request", status_code=400)
+        include_cover = str(form.get("include_cover", "")).strip() in ("1", "on", "true")
+        try:
+            automation_mod.start_single_job_tailor(url, include_cover=include_cover)
+        except runner.ParamError as e:
+            return RedirectResponse(f"/jobs?error={quote(str(e))}", status_code=303)
+        return RedirectResponse(f"/jobs/detail?url={quote(url, safe='')}",
+                                status_code=303)
+
     @app.post("/jobs/reset-failed")
     async def jobs_reset_failed():
         reset_failed()
@@ -335,6 +353,15 @@ def create_app() -> FastAPI:
     @app.post("/runs/cancel/{run_id}")
     async def runs_cancel(run_id: str):
         runner.cancel_run(run_id)
+        return RedirectResponse("/runs", status_code=303)
+
+    @app.post("/runs/retry/{run_id}")
+    async def runs_retry(run_id: str):
+        """Re-run a failed run with identical parameters (spec Automation)."""
+        try:
+            runner.retry_run(run_id)
+        except runner.ParamError as e:
+            return RedirectResponse(f"/runs?error={quote(str(e))}", status_code=303)
         return RedirectResponse("/runs", status_code=303)
 
     @app.get("/runs/{run_id}/log", response_class=HTMLResponse)

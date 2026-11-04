@@ -98,6 +98,14 @@ def run(
             "lenient: banned words ignored, LLM judge skipped (fastest, fewest API calls)."
         ),
     ),
+    url: Optional[str] = typer.Option(
+        None, "--url",
+        help="Scope tailor/cover stages to this exact job URL (single-job runs).",
+    ),
+    results_per_site: Optional[int] = typer.Option(
+        None, "--results-per-site",
+        help="Override discovery's results per board for this run (Find jobs preset knob).",
+    ),
 ) -> None:
     """Run pipeline stages: discover, enrich, score, tailor, cover, pdf."""
     _bootstrap()
@@ -137,6 +145,8 @@ def run(
         stream=stream,
         workers=workers,
         validation_mode=validation,
+        url=url,
+        results_per_site=results_per_site,
     )
 
     if result.get("errors"):

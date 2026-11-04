@@ -416,7 +416,8 @@ def _full_crawl(
 
 # -- Public entry point ------------------------------------------------------
 
-def run_discovery(cfg: dict | None = None) -> dict:
+def run_discovery(cfg: dict | None = None,
+                  results_per_site: int | None = None) -> dict:
     """Main entry point for JobSpy-based job discovery.
 
     Loads search queries and locations from the user's search config YAML,
@@ -425,6 +426,8 @@ def run_discovery(cfg: dict | None = None) -> dict:
     Args:
         cfg: Override the search configuration dict. If None, loads from
              the user's searches.yaml file.
+        results_per_site: Override the config's defaults.results_per_site
+             (the Find jobs preset's result-level knob).
 
     Returns:
         Dict with stats: new, existing, errors, db_total, queries.
@@ -438,7 +441,8 @@ def run_discovery(cfg: dict | None = None) -> dict:
 
     proxy = cfg.get("proxy")
     sites = cfg.get("sites")
-    results_per_site = cfg.get("defaults", {}).get("results_per_site", 100)
+    if results_per_site is None:
+        results_per_site = cfg.get("defaults", {}).get("results_per_site", 100)
     hours_old = cfg.get("defaults", {}).get("hours_old", 72)
     tiers = cfg.get("tiers")
     locations = cfg.get("location_labels")
