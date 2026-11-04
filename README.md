@@ -102,6 +102,7 @@ Each stage is independent. Run them all or pick what you need.
 |-----------|-------------|
 | Factory Droid CLI | Alternative auto-apply engine (`applypilot apply --engine droid`). Authenticates with `FACTORY_API_KEY`. Claude Code remains the default |
 | CapSolver API key | Solves CAPTCHAs during auto-apply (hCaptcha, reCAPTCHA, Turnstile, FunCaptcha). Without it, CAPTCHA-blocked applications just fail gracefully |
+| Composio API key | Extra discovery source: web3.career listings via the Composio v3.1 API. Set `COMPOSIO_API_KEY` and connect the `web3_career` toolkit (see [Composio discovery](#composio-discovery-web3career)) |
 
 > **Note:** python-jobspy is installed separately with `--no-deps` because it pins an exact numpy version in its metadata that conflicts with pip's resolver. It works fine with modern numpy at runtime.
 
@@ -118,7 +119,7 @@ Your personal data in one structured file: contact info, work authorization, com
 Job search queries, target titles, locations, boards. Run multiple searches with different parameters.
 
 ### `.env`
-API keys and runtime config: `GEMINI_API_KEY`, `LLM_MODEL`, `CAPSOLVER_API_KEY` (optional).
+API keys and runtime config: `GEMINI_API_KEY`, `LLM_MODEL`, `CAPSOLVER_API_KEY` (optional), `COMPOSIO_API_KEY` (optional, enables the Composio discovery source).
 
 ### LLM providers
 
@@ -143,6 +144,41 @@ models (the `o*`/`gpt-5*` reasoning families) reject it in favor of
 `max_completion_tokens` — if you target those, prefer a model id that still
 accepts `max_tokens` on your endpoint.
 
+### Composio discovery (web3.career)
+
+An optional discovery source that pulls the newest web3.career listings into
+the same store as the other boards, via the Composio v3.1 tool API
+(`WEB3_CAREER_LIST_JOBS`). Enablement matches the other sources: set
+`COMPOSIO_API_KEY` in `.env` (the wizard's optional Composio step writes it,
+masked at input) and it runs as part of `applypilot run discover`.
+
+| Env var | Meaning |
+|---------|---------|
+| `COMPOSIO_API_KEY` | Composio API key — enables the source. Never logged; `applypilot doctor` masks it to the last 4 |
+| `COMPOSIO_TOOLKITS` | Comma list of toolkits (default `web3_career`) |
+| `COMPOSIO_USER_ID` | Composio user namespace the ACTIVE connection lives under (default `applypilot-spike`) |
+| `COMPOSIO_CONNECTED_ACCOUNT_ID` | Optional explicit connected-account id; otherwise Composio resolves your connection by user id + toolkit |
+
+Behavior notes (from live-verified behavior, not Composio's docs):
+
+- **Connection first:** the toolkit needs an ACTIVE connection (web3.career
+  API key inside Composio — see their dashboard). ApplyPilot never creates or
+  recreates connections; a missing one surfaces as a degraded-source error in
+  the discovery summary.
+- **Apply links are verbatim:** the provider's terms require each job's
+  `apply_url` to be used unchanged — no tracking parameters, no rewrites.
+  It is also the dedupe key (when descriptions are disabled the provider
+  nulls ids and company names).
+- **No pagination:** the provider serves the newest 100 listings per search
+  (`limit` 1–100). Repeat runs dedupe on the apply URL.
+- **Search parameters** live in the optional `composio:` block of
+  `searches.yaml` (see `searches.example.yaml`): `tag`, `limit`, `country`,
+  `remote_only`, `include_description`. Invalid values come back as
+  source errors, not crashes.
+- The `[composio]` extra (`pip install -e ".[composio]"`) ships the
+  `composio-core` SDK for one-off account management; the discovery source
+  itself uses plain HTTP and the base install is unaffected either way.
+
 ### Package configs (shipped with ApplyPilot)
 - `config/employers.yaml` - Workday employer registry (48 preconfigured)
 - `config/sites.yaml` - Direct career sites (30+), blocked sites, base URLs, manual ATS domains
@@ -164,7 +200,7 @@ To opt down:
 ## How Stages Work
 
 ### Discover
-Queries Indeed, LinkedIn, Glassdoor, ZipRecruiter, Google Jobs via JobSpy. Scrapes 48 Workday employer portals (configurable in `employers.yaml`). Hits 30 direct career sites with custom extractors. Deduplicates by URL.
+Queries Indeed, LinkedIn, Glassdoor, ZipRecruiter, Google Jobs via JobSpy. Scrapes 48 Workday employer portals (configurable in `employers.yaml`). Hits 30 direct career sites with custom extractors. Pulls the newest web3.career listings via Composio (optional, `COMPOSIO_API_KEY`). Deduplicates by URL.
 
 ### Enrich
 Visits each job URL and extracts the full description. 3-tier cascade: JSON-LD structured data, then CSS selector patterns, then AI-powered extraction for unknown layouts.
