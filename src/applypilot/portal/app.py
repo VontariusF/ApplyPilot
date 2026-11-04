@@ -46,6 +46,14 @@ IDLE_POLLS_BEFORE_CLOSE = 4  # ~2s with no data after the run ends
 # through the quiet stretch (~10 min at POLL_SECONDS), then let the client
 # reconnect.
 BOARD_IDLE_POLLS_BEFORE_CLOSE = 1200
+# Page-level streams (automation cards, jobs progress strip) are ended by
+# the client's disconnect, not by idleness: a short idle close plus the
+# browser's automatic reconnect opens downtime windows in which a
+# scheduler-driven change (a cap pause) is recorded while no stream is
+# listening — the reconnect's fresh baseline then swallows it and the page
+# stays stale forever. A long bound keeps the page live; the first event
+# on (re)connect re-syncs it.
+PAGE_IDLE_POLLS_BEFORE_CLOSE = BOARD_IDLE_POLLS_BEFORE_CLOSE
 BACKFILL_BYTES = 16 * 1024  # initial tail bound for long logs
 
 # Agent sign-in gate: how long the cards poll `claude auth status` after a
@@ -545,13 +553,17 @@ def create_app() -> FastAPI:
         Emits `board-changed` whenever anything visible on the board may
         have changed: runs starting/stopping (a single-job tailor/apply run
         finishing means documents are ready) or the job store growing.
-        Clients refetch the board on the event. Closes after a quiet window;
+        Clients refetch the board on the event. One event is emitted at
+        connect so a reconnecting client refetches the current board: a
+        change recorded while the stream was down must not be swallowed by
+        the reconnect's fresh baseline. Closes after a quiet window;
         the browser's EventSource reconnects automatically.
         """
 
         async def gen() -> AsyncIterator[dict]:
             last = await asyncio.to_thread(_board_snapshot)
             idle = 0
+            yield {"event": "board-changed", "data": "changed"}
             while idle < BOARD_IDLE_POLLS_BEFORE_CLOSE:
                 await asyncio.sleep(POLL_SECONDS)
                 snapshot = await asyncio.to_thread(_board_snapshot)
@@ -1445,13 +1457,16 @@ def _automation_signature() -> tuple:
 async def _stream_cards(last: tuple) -> AsyncIterator[dict]:
     """SSE generator: the automation cards partial, re-pushed on any change.
 
-    Mirrors _stream_chat: the route renders the current surface server-side
-    at connect time and the stream pushes only changes, so a scheduler
-    pause or a run start/end reaches every open Automation page without a
-    reload. Idle-closes a few seconds after the last change.
+    The first event carries the current cards: a page reconnecting after
+    a downtime gap must re-sync to the present, because the reconnect's
+    fresh baseline would otherwise swallow any change recorded while no
+    stream was listening (a scheduler cap pause). Afterwards the stream
+    pushes only changes, so a run start/end reaches every open Automation
+    page without a reload.
     """
+    yield {"event": "cards", "data": _automation_cards_html()}
     idle = 0
-    while idle < IDLE_POLLS_BEFORE_CLOSE:
+    while idle < PAGE_IDLE_POLLS_BEFORE_CLOSE:
         await asyncio.sleep(POLL_SECONDS)
         sig = _automation_signature()
         if sig != last:
@@ -1489,10 +1504,11 @@ async def _stream_progress(last: tuple) -> AsyncIterator[dict]:
 
     Mirrors _stream_cards: pushes only changes, so a run start, count
     tick, or completion reaches every open jobs board without a reload.
-    Idle-closes a few seconds after the last change.
+    The first event re-syncs a reconnecting page (see _stream_cards).
     """
+    yield {"event": "progress", "data": _progress_html()}
     idle = 0
-    while idle < IDLE_POLLS_BEFORE_CLOSE:
+    while idle < PAGE_IDLE_POLLS_BEFORE_CLOSE:
         await asyncio.sleep(POLL_SECONDS)
         sig = _progress_signature()
         if sig != last:
