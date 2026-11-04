@@ -29,6 +29,11 @@ _MODEL_CHARS = {c for c in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ
 
 CANCEL_GRACE_SECONDS = 5.0
 
+# Slack (seconds) when comparing a live process's /proc start time against
+# the identity recorded at spawn — clock-tick rounding plus the gap between
+# Popen and the /proc read must never read as a pid reuse.
+_IDENTITY_SLACK_SECONDS = 5.0
+
 
 class ParamError(ValueError):
     """A run form submitted an invalid value."""
@@ -122,6 +127,8 @@ def init_registry() -> None:
             status      TEXT NOT NULL,
             pid         INTEGER,
             pgid        INTEGER,
+            pid_start_time REAL,
+            pid_cmdline TEXT,
             started_at  TEXT NOT NULL,
             ended_at    TEXT,
             exit_code   INTEGER,
@@ -129,6 +136,13 @@ def init_registry() -> None:
             event_path  TEXT
         )
     """)
+    # Forward migration: registries created before identity recording (the
+    # PID-reuse fix) get the new columns; rows keep NULL = unchecked.
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(runs)").fetchall()}
+    if "pid_start_time" not in cols:
+        conn.execute("ALTER TABLE runs ADD COLUMN pid_start_time REAL")
+    if "pid_cmdline" not in cols:
+        conn.execute("ALTER TABLE runs ADD COLUMN pid_cmdline TEXT")
     conn.commit()
 
 
@@ -170,6 +184,98 @@ def try_claim_terminal(run_id: str, status: str, exit_code: int | None = None) -
     return cursor.rowcount > 0
 
 
+# ---------------------------------------------------------------------------
+# PID-reuse identity checks
+#
+# A stored pid is only a handle: after the run's child exits, the kernel can
+# hand the same pid to an unrelated process. Everything that signals or
+# judges a stored pid first asks whether the live process still matches the
+# identity recorded at spawn (or, for legacy rows, whether its start time
+# predates the registry row — a child can never start after it was inserted).
+# ---------------------------------------------------------------------------
+
+def _proc_start_time(pid: int | None) -> float | None:
+    """Wall-clock epoch seconds when `pid` started (Linux /proc; None elsewhere)."""
+    if not pid:
+        return None
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        boot = None
+        for line in Path("/proc/stat").read_text().splitlines():
+            if line.startswith("btime "):
+                boot = float(line.split()[1])
+                break
+        if boot is None:
+            return None
+        # comm can contain spaces/parens — fields after the last ')' start at #3,
+        # so starttime (field 22) is index 19 of the remainder.
+        ticks = float(stat.rsplit(")", 1)[1].split()[19])
+        clk_tck = os.sysconf("SC_CLK_TCK") or 100
+        return boot + ticks / clk_tck
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _proc_cmdline(pid: int | None) -> list[str] | None:
+    """The process's argv (Linux /proc); None when unreadable, empty (zombie), or off-Linux."""
+    if not pid:
+        return None
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    return [part.decode(errors="replace") for part in raw.split(b"\0") if part]
+
+
+def _parse_iso(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _process_matches_row(row: dict, pid: int | None) -> bool | None:
+    """Can the live process at `pid` still be this run's child?
+
+    Returns True when identity confirms the child, False when it contradicts
+    (the pid was reused by an unrelated process), or None when identity can't
+    be checked — no /proc, or a legacy row with nothing comparable. Callers
+    keep the pre-identity behavior on None.
+    """
+    live_start = _proc_start_time(pid)
+    live_cmdline = _proc_cmdline(pid)
+    if live_start is None and live_cmdline is None:
+        return None  # no /proc (or already reaped) — nothing to compare
+
+    recorded_cmdline = None
+    if row.get("pid_cmdline"):
+        try:
+            recorded_cmdline = json.loads(row["pid_cmdline"])
+        except ValueError:
+            recorded_cmdline = None
+
+    # argv recorded at spawn is a strong signal: a reused pid almost never
+    # runs the exact same argv as our child.
+    if recorded_cmdline is not None and live_cmdline is not None and live_cmdline != recorded_cmdline:
+        return False
+
+    recorded_start = row.get("pid_start_time")
+    if recorded_start is not None and live_start is not None:
+        return abs(live_start - recorded_start) <= _IDENTITY_SLACK_SECONDS
+
+    # Legacy row (spawned before identity was recorded): the run's child
+    # cannot have started after the registry row was written.
+    started_at = _parse_iso(row.get("started_at"))
+    if live_start is not None and started_at is not None:
+        return live_start <= started_at + _IDENTITY_SLACK_SECONDS
+
+    return None
+
+
 def _pid_alive(pid: int | None) -> bool:
     if not pid:
         return False
@@ -192,7 +298,10 @@ def sweep_orphans() -> list[str]:
     """
     swept: list[str] = []
     for row in running_runs():
-        if not _pid_alive(row["pid"]):
+        pid = row["pid"]
+        # A live pid that fails the identity check is a reuse: the row would
+        # stay 'running' forever (its real child is gone), so sweep it.
+        if not _pid_alive(pid) or _process_matches_row(row, pid) is False:
             try_claim_terminal(row["id"], "failed")
             swept.append(row["id"])
     return swept
@@ -266,9 +375,11 @@ def start_run(kind: str, params: dict, command: list[str] | None = None,
 
     conn = get_connection()
     conn.execute(
-        "INSERT INTO runs (id, kind, params, status, pid, pgid, started_at, log_path, event_path) "
-        "VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)",
-        (run_id, kind, json.dumps(params), proc.pid, proc.pid, _now(),
+        "INSERT INTO runs (id, kind, params, status, pid, pgid, pid_start_time, pid_cmdline, "
+        "started_at, log_path, event_path) "
+        "VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)",
+        (run_id, kind, json.dumps(params), proc.pid, proc.pid,
+         _proc_start_time(proc.pid), json.dumps(command), _now(),
          str(log_path), str(event_path) if env.get("APPLYPILOT_EVENT_LOG") else None),
     )
     conn.commit()
@@ -313,6 +424,13 @@ def cancel_run(run_id: str) -> bool:
         return False
 
     pgid = row["pgid"] or row["pid"]
+    if _process_matches_row(row, pgid) is False:
+        # PID reuse: the group leader is not the child we spawned — signalling
+        # it would kill an unrelated process. The run is already terminal.
+        _append_run_event(row["event_path"],
+                          "cancel skipped: recorded pid was reused by an unrelated process")
+        return True
+
     _signal_group(pgid, signal.SIGTERM)
     deadline = time.time() + CANCEL_GRACE_SECONDS
     while time.time() < deadline:
