@@ -205,7 +205,8 @@ def create_app() -> FastAPI:
         if status not in ("applied", "failed") or not url:
             return PlainTextResponse("invalid mark request", status_code=400)
         mark_job(url, status, reason)
-        return RedirectResponse(f"/jobs/detail?url={url}", status_code=303)
+        return RedirectResponse(f"/jobs/detail?url={quote(url, safe='')}",
+                                status_code=303)
 
     @app.post("/jobs/regenerate")
     async def jobs_regenerate(request: Request):
@@ -215,7 +216,8 @@ def create_app() -> FastAPI:
             return PlainTextResponse("invalid regenerate request", status_code=400)
         include_cover = str(form.get("include_cover", "")).strip() in ("1", "on", "true")
         database.reset_job_tailoring(database.get_connection(), url, include_cover=include_cover)
-        return RedirectResponse(f"/jobs/detail?url={url}", status_code=303)
+        return RedirectResponse(f"/jobs/detail?url={quote(url, safe='')}",
+                                status_code=303)
 
     @app.post("/jobs/reset-failed")
     async def jobs_reset_failed():
@@ -234,7 +236,8 @@ def create_app() -> FastAPI:
         if not url:
             return PlainTextResponse("missing url", status_code=400)
         run_scoring(url=url)
-        return RedirectResponse(f"/jobs/detail?url={url}", status_code=303)
+        return RedirectResponse(f"/jobs/detail?url={quote(url, safe='')}",
+                                status_code=303)
 
     @app.post("/jobs/rescore-all")
     async def jobs_rescore_all():
