@@ -16,6 +16,7 @@ from jobspy import scrape_jobs
 
 from applypilot import config
 from applypilot.database import get_connection, init_db, store_jobs
+from applypilot.discovery.filters import location_filters, location_ok as _location_ok
 
 log = logging.getLogger(__name__)
 
@@ -77,42 +78,8 @@ def _scrape_with_retry(kwargs: dict, max_retries: int = 2, backoff: float = 5.0)
 # -- Location filtering ------------------------------------------------------
 
 def _load_location_config(search_cfg: dict) -> tuple[list[str], list[str]]:
-    """Extract accept/reject location lists from search config.
-
-    Falls back to sensible defaults if not defined in the YAML.
-    """
-    accept = search_cfg.get("location_accept", [])
-    reject = search_cfg.get("location_reject_non_remote", [])
-    return accept, reject
-
-
-def _location_ok(location: str | None, accept: list[str], reject: list[str]) -> bool:
-    """Check if a job location passes the user's location filter.
-
-    Remote jobs are always accepted. Non-remote jobs must match an accept
-    pattern and not match a reject pattern.
-    """
-    if not location:
-        return True  # unknown location -- keep it, let scorer decide
-
-    loc = location.lower()
-
-    # Remote jobs always OK
-    if any(r in loc for r in ("remote", "anywhere", "work from home", "wfh", "distributed")):
-        return True
-
-    # Reject non-remote matches
-    for r in reject:
-        if r.lower() in loc:
-            return False
-
-    # Accept matches
-    for a in accept:
-        if a.lower() in loc:
-            return True
-
-    # No match -- reject unknown
-    return False
+    """Extract accept/reject location lists from search config (shared impl)."""
+    return location_filters(search_cfg)
 
 
 # -- DB storage (JobSpy DataFrame -> SQLite) ---------------------------------
@@ -133,18 +100,24 @@ def store_jobspy_results(conn: sqlite3.Connection, df, source_label: str) -> tup
         location_str = str(row.get("location", "")) if str(row.get("location", "")) != "nan" else None
 
         # Build salary string from min/max
+        # B10: one malformed salary cell must not abort the whole batch —
+        # guard the parse per row and keep the job with salary=None.
         salary = None
         min_amt = row.get("min_amount")
         max_amt = row.get("max_amount")
         interval = str(row.get("interval", "")) if str(row.get("interval", "")) != "nan" else ""
         currency = str(row.get("currency", "")) if str(row.get("currency", "")) != "nan" else ""
-        if min_amt and str(min_amt) != "nan":
-            if max_amt and str(max_amt) != "nan":
-                salary = f"{currency}{int(float(min_amt)):,}-{currency}{int(float(max_amt)):,}"
-            else:
-                salary = f"{currency}{int(float(min_amt)):,}"
-            if interval:
-                salary += f"/{interval}"
+        try:
+            if min_amt and str(min_amt) != "nan":
+                if max_amt and str(max_amt) != "nan":
+                    salary = f"{currency}{int(float(min_amt)):,}-{currency}{int(float(max_amt)):,}"
+                else:
+                    salary = f"{currency}{int(float(min_amt)):,}"
+                if interval:
+                    salary += f"/{interval}"
+        except (TypeError, ValueError):
+            log.debug("Skipping unparseable salary for %s: min=%r max=%r", url, min_amt, max_amt)
+            salary = None
 
         description = str(row.get("description", "")) if str(row.get("description", "")) != "nan" else None
         site_name = str(row.get("site", source_label))

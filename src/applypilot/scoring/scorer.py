@@ -97,8 +97,10 @@ def score_job(resume_text: str, job: dict) -> dict:
         response = client.chat(messages, max_tokens=512, temperature=0.2)
         return _parse_score_response(response)
     except Exception as e:
-        log.error("LLM error scoring job '%s': %s", job.get("title", "?"), e)
-        return {"score": 0, "keywords": "", "reasoning": f"LLM error: {e}"}
+        log.error("LLM error scoring job '%s': %s", job.get("title") or "?", e)
+        # B2: mark the result as an error so run_scoring leaves fit_score NULL
+        # (the job stays in the retry queue) instead of persisting 0.
+        return {"score": 0, "keywords": "", "reasoning": f"LLM error: {e}", "error": str(e)}
 
 
 def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
@@ -142,19 +144,29 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
         result["url"] = job["url"]
         completed += 1
 
-        if result["score"] == 0:
+        if result.get("error"):
             errors += 1
+            # B2: errored jobs keep fit_score NULL so they reappear in the
+            # pending-score queue on the next run; the error is logged per job.
+            log.error(
+                "Score FAILED for '%s' (%s): %s",
+                job.get("title") or "?", job["url"], result["error"],
+            )
+            results.append(result)
+            continue
 
         results.append(result)
 
         log.info(
             "[%d/%d] score=%d  %s",
-            completed, len(jobs), result["score"], job.get("title", "?")[:60],
+            completed, len(jobs), result["score"], (job.get("title") or "?")[:60],
         )
 
-    # Write scores to DB
+    # Write scores to DB — only for jobs that scored successfully (B2)
     now = datetime.now(timezone.utc).isoformat()
     for r in results:
+        if r.get("error"):
+            continue
         conn.execute(
             "UPDATE jobs SET fit_score = ?, score_reasoning = ?, scored_at = ? WHERE url = ?",
             (r["score"], f"{r['keywords']}\n{r['reasoning']}", now, r["url"]),

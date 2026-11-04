@@ -243,6 +243,10 @@ _PENDING_SQL: dict[str, str] = {
 # How long to sleep between polling loops in streaming mode (seconds)
 _STREAM_POLL_INTERVAL = 10
 
+# B6: maximum consecutive failed runner passes before a streaming stage gives
+# up and reports an error, instead of spinning on a poison job forever.
+_MAX_ERROR_PASSES = 3
+
 
 def _count_pending(stage: str, min_score: int = 7) -> int:
     """Count pending work items for a stage."""
@@ -291,6 +295,8 @@ def _run_stage_streaming(
 
     # For downstream stages: loop until upstream done + no pending work
     passes = 0
+    consecutive_errors = 0
+    last_error: str | None = None
     while not stop_event.is_set():
         # Wait for upstream to start producing work (first pass only)
         if passes == 0 and upstream and not tracker.is_done(upstream):
@@ -302,10 +308,27 @@ def _run_stage_streaming(
         if pending > 0:
             try:
                 runner(**kwargs)
+                consecutive_errors = 0
                 passes += 1
             except Exception as e:
                 log.error("Stage '%s' error (pass %d): %s", stage, passes, e)
                 passes += 1
+                consecutive_errors += 1
+                last_error = str(e)
+                if consecutive_errors >= _MAX_ERROR_PASSES:
+                    # B6: a poison job crashes every pass — stop after a bounded
+                    # number of retries instead of looping forever.
+                    # B7: record the failure so the summary and exit code see it.
+                    log.error(
+                        "Stage '%s' failed %d consecutive passes: %s",
+                        stage, consecutive_errors, last_error,
+                    )
+                    tracker.mark_done(stage, {
+                        "status": f"error: {last_error}",
+                        "passes": passes,
+                        "consecutive_errors": consecutive_errors,
+                    })
+                    return
         else:
             # No work right now
             upstream_done = upstream is None or tracker.is_done(upstream)
@@ -316,7 +339,12 @@ def _run_stage_streaming(
             if stop_event.wait(timeout=_STREAM_POLL_INTERVAL):
                 break  # Stop requested
 
-    tracker.mark_done(stage, {"status": "ok", "passes": passes})
+    # B7: a stage that saw errors (but was interrupted by stop/upstream-done
+    # before the cap) still reports the failure, not a false "ok".
+    if last_error is not None:
+        tracker.mark_done(stage, {"status": f"error: {last_error}", "passes": passes})
+    else:
+        tracker.mark_done(stage, {"status": "ok", "passes": passes})
 
 
 # ---------------------------------------------------------------------------

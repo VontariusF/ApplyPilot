@@ -22,6 +22,7 @@ import yaml
 from applypilot import config
 from applypilot.config import CONFIG_DIR
 from applypilot.database import get_connection, init_db
+from applypilot.discovery.filters import location_filters, location_ok as _location_ok
 
 log = logging.getLogger(__name__)
 
@@ -41,34 +42,10 @@ def load_employers() -> dict:
 # -- Location filtering from search config -----------------------------------
 
 def _load_location_filter(search_cfg: dict | None = None):
-    """Load location accept/reject lists from search config."""
+    """Load location accept/reject lists from search config (shared impl)."""
     if search_cfg is None:
         search_cfg = config.load_search_config()
-
-    accept = search_cfg.get("location_accept", [])
-    reject = search_cfg.get("location_reject_non_remote", [])
-    return accept, reject
-
-
-def _location_ok(location: str | None, accept: list[str], reject: list[str]) -> bool:
-    """Check if a job location passes the user's location filter."""
-    if not location:
-        return True
-
-    loc = location.lower()
-
-    if any(r in loc for r in ("remote", "anywhere", "work from home", "wfh", "distributed")):
-        return True
-
-    for r in reject:
-        if r.lower() in loc:
-            return False
-
-    for a in accept:
-        if a.lower() in loc:
-            return True
-
-    return False
+    return location_filters(search_cfg)
 
 
 # -- HTML stripper -----------------------------------------------------------
@@ -153,6 +130,40 @@ def _urlopen(req, timeout=30):
 
 # -- Workday API -------------------------------------------------------------
 
+# B14: retry policy for Workday API calls. _RETRY_DELAY is the base backoff
+# in seconds; tests monkeypatch it to 0.
+_RETRY_ATTEMPTS = 3
+_RETRY_DELAY = 1.0
+_RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+
+
+def _open_with_retry(req: urllib.request.Request, timeout: float) -> "object":
+    """Open a Workday request with exponential backoff on transient failures.
+
+    Honors 429 and 5xx responses plus network-level URLError; other HTTP
+    errors (e.g. 404) are raised immediately.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(_RETRY_ATTEMPTS):
+        try:
+            with _urlopen(req, timeout=timeout) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as e:
+            if e.code not in _RETRYABLE_STATUS_CODES:
+                raise
+            last_exc = e
+            log.warning("Workday API returned %d (attempt %d/%d): %s",
+                        e.code, attempt + 1, _RETRY_ATTEMPTS, e.url)
+        except urllib.error.URLError as e:
+            last_exc = e
+            log.warning("Workday API network error (attempt %d/%d): %s",
+                        attempt + 1, _RETRY_ATTEMPTS, e.reason)
+        if attempt + 1 < _RETRY_ATTEMPTS:
+            time.sleep(_RETRY_DELAY * (2 ** attempt))
+    assert last_exc is not None
+    raise last_exc
+
+
 def workday_search(employer: dict, search_text: str, limit: int = 20, offset: int = 0) -> dict:
     """Search jobs via Workday CXS API. Returns JSON with total + jobPostings."""
     url = f"{employer['base_url']}/wday/cxs/{employer['tenant']}/{employer['site_id']}/jobs"
@@ -168,8 +179,8 @@ def workday_search(employer: dict, search_text: str, limit: int = 20, offset: in
     req.add_header("Accept", "application/json")
     req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 
-    with _urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read())
+    body = _open_with_retry(req, timeout=30)
+    return json.loads(body)
 
 
 def workday_detail(employer: dict, external_path: str) -> dict:
@@ -180,8 +191,8 @@ def workday_detail(employer: dict, external_path: str) -> dict:
     req.add_header("Accept", "application/json")
     req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 
-    with _urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read())
+    body = _open_with_retry(req, timeout=30)
+    return json.loads(body)
 
 
 # -- Search + paginate -------------------------------------------------------
@@ -208,7 +219,13 @@ def search_employer(
         try:
             data = workday_search(employer, search_text, limit=page_size, offset=offset)
         except Exception as e:
-            log.error("%s: API error at offset %d: %s", employer["name"], offset, e)
+            # B14: after retries are exhausted, surface the truncation loudly
+            # instead of silently treating partial results as complete.
+            log.warning(
+                "%s: pagination FAILED at offset %d after retries: %s — "
+                "returning %d PARTIAL results",
+                employer["name"], offset, e, len(all_jobs),
+            )
             break
 
         if total is None:
