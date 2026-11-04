@@ -1,0 +1,24 @@
+<div id="jobs-board">
+  <p class="result-count">{{ total }} job{{ "" if total == 1 else "s" }} in this view</p>
+  {% if jobs %}
+  <div class="card-grid">
+    {% for job in jobs %}{% include "partials/job_card.html" %}{% endfor %}
+  </div>
+  {% elif total_jobs == 0 %}
+  <div class="empty-state">
+    <p><strong>No jobs found yet.</strong> Let’s find your first jobs — the first discovery run takes a few minutes.</p>
+    <form method="post" action="/runs/start" class="inline-form"
+          hx-post="/runs/start" hx-target="#jobs-board" hx-swap="outerHTML">
+      <input type="hidden" name="kind" value="pipeline">
+      <button>Find jobs now</button>
+    </form>
+  </div>
+  {% elif has_filters %}
+  <div class="empty-state">
+    <p>No jobs match this filter.</p>
+    <a class="button secondary-button" href="/jobs">Clear filters</a>
+  </div>
+  {% else %}
+  <p class="empty">Nothing on the board right now.</p>
+  {% endif %}
+</div>

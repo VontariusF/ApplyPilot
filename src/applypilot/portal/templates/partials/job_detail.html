@@ -5,8 +5,8 @@
     </h1>
     <p class="dim">
       {{ job.site or "unknown site" }} · {{ job.location or "location unknown" }}
-      {% if job.salary %} · {{ job.salary }}{% endif %}
     </p>
+    <p class="salary-line">{{ job.salary or "Pay not listed" }}</p>
     <p><a href="{{ job.url }}" rel="noreferrer noopener" target="_blank">{{ job.url }}</a></p>
     {% if job.application_url and job.application_url != job.url %}
     <p class="dim">Application URL: {{ job.application_url }}</p>
@@ -29,7 +29,7 @@
     {% for keyword in keywords.split(",") %}{% if keyword.strip() %}<span class="chip">{{ keyword.strip() }}</span>{% endif %}{% endfor %}
   </div>
   {% endif %}
-  <pre class="reasoning">{{ reasoning or "No reasoning captured." }}</pre>
+  <p class="fit-summary"><strong>Why it’s {{ "an" if job.fit_score in (8, 11, 18) else "a" }} {{ job.fit_score }}/10:</strong> {{ reasoning or "No reasoning captured." }}</p>
   {% endif %}
 </section>
 

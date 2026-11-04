@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncIterator
 from urllib.parse import quote
@@ -61,6 +62,41 @@ CHAT_IDLE_POLLS_BEFORE_CLOSE = 4
 templates = Jinja2Templates(directory=str(PORTAL_DIR / "templates"))
 
 
+def _relative_age(iso: str | None) -> str:
+    """Plain-language age of a stored timestamp ("3 days ago"), for cards.
+
+    The board shows how old a listing is, not the raw discovered_at
+    timestamp. Unparseable or missing values render empty (the card omits
+    the line) — never a fabricated date.
+    """
+    if not iso:
+        return ""
+    try:
+        then = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    seconds = max(0.0, datetime.now(timezone.utc).timestamp() - then.timestamp())
+    minute, hour, day = 60, 3600, 24 * 3600
+    if seconds < minute:
+        return "just now"
+    if seconds < hour:
+        n = int(seconds // minute)
+        return f"{n} minute{'s' if n != 1 else ''} ago"
+    if seconds < day:
+        n = int(seconds // hour)
+        return f"{n} hour{'s' if n != 1 else ''} ago"
+    n = int(seconds // day)
+    if n < 14:
+        return f"{n} day{'s' if n != 1 else ''} ago"
+    if n < 60:
+        weeks = n // 7
+        return f"{weeks} week{'s' if weeks != 1 else ''} ago"
+    months = max(1, n // 30)
+    return f"{months} month{'s' if months != 1 else ''} ago"
+
+
 def _render(request: Request, name: str, status_code: int = 200, **ctx) -> HTMLResponse:
     # Explicit ?theme=light|dark pins the CSS theme (render tests, screenshots);
     # unset follows the OS preference inside portal.css.
@@ -89,6 +125,8 @@ def create_app() -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.state.token = token
     templates.env.globals["run_summary"] = automation_mod.run_summary
+    templates.env.globals["params_summary"] = _params_summary
+    templates.env.filters["age"] = _relative_age
 
     # ------------------------------------------------------------------
     # Auth middleware: every route requires the token; non-localhost Host
@@ -163,15 +201,14 @@ def create_app() -> FastAPI:
                         discovered_from: str = "", discovered_to: str = "",
                         apply_status: str = "", remote: str = "",
                         min_salary: str = ""):
-        filters = _jobs_filters(stage, min_score, limit, site, location,
-                                discovered_from, discovered_to, apply_status,
-                                remote, min_salary)
-        rows = queries.filtered_jobs(**filters)
-        return _render(request, "jobs.html", jobs=rows, total=len(rows),
-                       total_jobs=queries.count_jobs(), stages=queries.STAGES,
+        return _render(request, "jobs.html",
+                       stages=queries.STAGES,
                        sites=queries.distinct_sites(),
                        statuses=queries.distinct_apply_statuses(),
-                       progress=_jobs_progress(), **filters)
+                       progress=_jobs_progress(),
+                       **_jobs_board_context(stage, min_score, limit, site, location,
+                                             discovered_from, discovered_to,
+                                             apply_status, remote, min_salary))
 
     @app.get("/jobs/table", response_class=HTMLResponse)
     async def jobs_table(request: Request, stage: str = "scored", min_score: int = 7,
@@ -179,12 +216,10 @@ def create_app() -> FastAPI:
                          discovered_from: str = "", discovered_to: str = "",
                          apply_status: str = "", remote: str = "",
                          min_salary: str = ""):
-        filters = _jobs_filters(stage, min_score, limit, site, location,
-                                discovered_from, discovered_to, apply_status,
-                                remote, min_salary)
-        rows = queries.filtered_jobs(**filters)
-        return _render(request, "partials/jobs_table.html", jobs=rows,
-                       total=len(rows), total_jobs=queries.count_jobs(), **filters)
+        return _render(request, "partials/jobs_board.html",
+                       **_jobs_board_context(stage, min_score, limit, site, location,
+                                             discovered_from, discovered_to,
+                                             apply_status, remote, min_salary))
 
     @app.get("/jobs/detail", response_class=HTMLResponse)
     async def jobs_detail(request: Request, url: str):
@@ -359,8 +394,18 @@ def create_app() -> FastAPI:
         try:
             runner.start_run(kind, params)
         except runner.ParamError as e:
+            if request.headers.get("HX-Request"):
+                # In-context failure feedback on the board itself (the empty
+                # state's Find-jobs button), not a dead-end /runs redirect.
+                return _render(request, "partials/jobs_board.html",
+                               toast_message=str(e), toast_kind="error",
+                               **_jobs_board_context())
             return RedirectResponse(f"{target}?error={quote(str(e))}",
                                     status_code=303)
+        if request.headers.get("HX-Request") and target == "/runs":
+            # In-context discovery (jobs board empty state): the board itself
+            # shows the run — no dead-end redirect to /runs.
+            return _render(request, "partials/jobs_board.html", **_jobs_board_context())
         return RedirectResponse(target, status_code=303)
 
     @app.post("/runs/cancel/{run_id}")
@@ -759,6 +804,27 @@ def _jobs_filters(stage: str, min_score: int, limit: int, site: str,
         "apply_status": apply_status.strip(),
         "remote": remote.strip() if remote.strip() in queries.REMOTE_VALUES else "",
         "min_salary": _opt_float(min_salary),
+    }
+
+
+def _jobs_board_context(stage: str = "scored", min_score: int = 7, limit: int = 50,
+                        site: str = "", location: str = "", discovered_from: str = "",
+                        discovered_to: str = "", apply_status: str = "",
+                        remote: str = "", min_salary: str = "") -> dict:
+    """Context for the jobs-board partial (grid, count, empty states)."""
+    filters = _jobs_filters(stage, min_score, limit, site, location,
+                            discovered_from, discovered_to, apply_status,
+                            remote, min_salary)
+    rows = queries.filtered_jobs(**filters)
+    return {
+        "jobs": rows,
+        "total": len(rows),
+        "total_jobs": queries.count_jobs(),
+        "has_filters": bool(site.strip() or location.strip() or discovered_from.strip()
+                            or discovered_to.strip() or apply_status.strip()
+                            or (remote.strip() if remote.strip() in queries.REMOTE_VALUES else "")
+                            or filters["min_salary"] is not None),
+        **filters,
     }
 
 

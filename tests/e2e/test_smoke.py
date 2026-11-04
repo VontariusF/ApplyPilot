@@ -28,9 +28,9 @@ def test_login_dashboard_and_jobs(run_journey, chromium, portal_server, seeded_j
             assert await page.locator("html").get_attribute("data-theme") == theme
             assert await page.locator("h1").inner_text() == "Dashboard"
 
-            # 3. Jobs board renders with the seeded job row.
+            # 3. Jobs board renders with the seeded job card.
             await page.goto(f"{base}/jobs?theme={theme}")
             assert await page.locator("h1").inner_text() == "Jobs"
-            assert await page.locator("#jobs-table").get_by_text("Pwidget Engineer").count() == 1
+            assert await page.locator("#jobs-board").get_by_text("Pwidget Engineer").count() == 1
 
     run_journey(journey())

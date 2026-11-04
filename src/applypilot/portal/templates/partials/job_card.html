@@ -1,0 +1,20 @@
+<article class="job-card">
+  <header class="card-head">
+    {% if job.score_error %}
+    <span class="badge failed" title="Scoring failed for this listing — see its detail page">score failed</span>
+    {% elif job.fit_score is not none %}
+    <span class="score-pill {{ 'hot' if job.fit_score >= 8 else 'warm' if job.fit_score >= 6 else 'cool' }}">{{ job.fit_score }}/10</span>
+    {% endif %}
+    {% if job.apply_status %}<span class="badge {{ job.apply_status | lower }}">{{ job.apply_status }}</span>{% endif %}
+  </header>
+  <h3 class="card-title"><a href="/jobs/detail?url={{ job.url | urlencode }}">{{ job.title or "(untitled)" }}</a></h3>
+  <p class="card-meta">
+    <span class="card-site">{{ job.site or "Unknown site" }}</span>
+    {% if job.location %}<span> · {{ job.location }}</span>{% endif %}
+    {% if job.is_remote %}<span class="remote-flag" title="(inferred) — guessed from the listing text, not site data">Remote</span>{% endif %}
+  </p>
+  <p class="card-facts">
+    <span class="card-salary">{{ job.salary or "Pay not listed" }}</span>
+    {% if job.discovered_at %}<span class="card-age dim">{{ job.discovered_at | age }}</span>{% endif %}
+  </p>
+</article>

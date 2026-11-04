@@ -61,7 +61,7 @@
   </div>
 </div>
 
-<div id="jobs-table">
-  {% include "partials/jobs_table.html" %}
+<div hx-ext="sse" sse-connect="/events/board">
+  {% include "partials/jobs_board.html" %}
 </div>
 {% endblock %}
