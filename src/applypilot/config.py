@@ -256,6 +256,44 @@ def load_env():
     load_dotenv()
 
 
+# Secret env keys whose values must never reach disk surfaces (prompt logs,
+# the portal log viewer). S2/F1: the apply prompt embeds the CapSolver key
+# verbatim, and provider keys can enter prompt text through custom-endpoint
+# diagnostics -- so redaction boundaries need the actual configured values.
+# Kept here so every consumer (apply path, portal) reads one list.
+SECRET_ENV_KEYS = (
+    "CAPSOLVER_API_KEY",
+    "GEMINI_API_KEY",
+    "OPENAI_API_KEY",
+    "LLM_API_KEY",
+    "FACTORY_API_KEY",
+)
+
+
+def collect_secret_values() -> list[str]:
+    """Values of the known secret env keys, for redaction boundaries.
+
+    Reads both the live environment and the .env file: a running process
+    may hold stale or missing values for keys the file has since acquired.
+    Empty values are skipped; duplicates across sources collapse.
+    """
+    seen: set[str] = set()
+    values: list[str] = []
+    sources: list[dict[str, str]] = [dict(os.environ)]
+    if ENV_PATH.exists():
+        from dotenv import dotenv_values
+
+        file_values = dotenv_values(ENV_PATH)
+        if file_values:
+            sources.append(file_values)
+    for source in sources:
+        for key, val in source.items():
+            if key in SECRET_ENV_KEYS and val and val not in seen:
+                seen.add(val)
+                values.append(val)
+    return values
+
+
 # ---------------------------------------------------------------------------
 # Tier system — feature gating by installed dependencies
 # ---------------------------------------------------------------------------
