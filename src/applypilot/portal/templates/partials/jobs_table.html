@@ -1,5 +1,6 @@
 <p class="result-count">{{ total }} job{{ "" if total == 1 else "s" }} in this view</p>
 {% if jobs %}
+<div class="table-wrap">
 <table>
   <thead><tr><th>Job</th><th>Site</th><th>Location</th><th title="Inferred from listing text, not site data">Remote</th><th>Score</th><th>Apply status</th><th>Discovered</th></tr></thead>
   <tbody>
@@ -9,7 +10,7 @@
         <span class="dim url-cell">{{ job.url[:80] }}</span></td>
       <td>{{ job.site or "—" }}</td>
       <td>{{ job.location or "—" }}</td>
-      <td>{% if job.is_remote %}<span title="inferred from listing text">✓</span> <span class="dim">(inferred)</span>{% else %}—{% endif %}</td>
+      <td>{% if job.is_remote %}<span title="inferred from listing text">Yes</span> <span class="dim">(inferred)</span>{% else %}—{% endif %}</td>
       <td>{% if job.score_error %}<span class="badge failed">score failed</span>{% elif job.fit_score is not none %}{{ job.fit_score }}{% else %}—{% endif %}</td>
       <td>{% if job.apply_status %}<span class="badge {{ job.apply_status | lower }}">{{ job.apply_status }}</span>{% else %}—{% endif %}</td>
       <td class="dim">{{ (job.discovered_at or "")[:19] }}</td>
@@ -17,6 +18,7 @@
     {% endfor %}
   </tbody>
 </table>
+</div>
 {% elif total_jobs == 0 %}
 <div class="empty-state">
   <p>No jobs found yet. The first discovery run takes a few minutes.</p>

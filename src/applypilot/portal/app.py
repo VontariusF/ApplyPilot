@@ -46,6 +46,11 @@ LOGIN_TIMEOUT_SECONDS = 300.0
 # Onboarding: resume uploads (PDF or text) are capped before they touch disk.
 MAX_RESUME_UPLOAD_BYTES = 5 * 1024 * 1024
 
+# Document preview (spec PR G): kinds served by /jobs/preview + /jobs/download,
+# and a read cap so a pathologically large stored file cannot stall a render.
+DOCUMENT_KINDS = ("resume", "cover")
+MAX_PREVIEW_CHARS = 262_144
+
 # The chat SSE stream polls slower than run streams — each tick runs
 # `claude auth status` for the gate card, a real subprocess.
 CHAT_POLL_SECONDS = 2.0
@@ -55,7 +60,13 @@ templates = Jinja2Templates(directory=str(PORTAL_DIR / "templates"))
 
 
 def _render(request: Request, name: str, status_code: int = 200, **ctx) -> HTMLResponse:
-    return templates.TemplateResponse(request, name, ctx, status_code=status_code)
+    # Explicit ?theme=light|dark pins the CSS theme (render tests, screenshots);
+    # unset follows the OS preference inside portal.css.
+    theme = request.query_params.get("theme") or ""
+    if theme not in ("light", "dark"):
+        theme = ""
+    return templates.TemplateResponse(request, name, ctx | {"theme": theme},
+                                      status_code=status_code)
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +189,12 @@ def create_app() -> FastAPI:
         job = queries.job_detail(url)
         if job is None:
             return _render(request, "partials/job_missing.html", url=url, status_code=404)
-        return _render(request, "partials/job_detail.html", job=job)
+        # The store keeps one score_reasoning blob ("keywords\nreasoning",
+        # scorer.py); the detail page presents the two parts separately.
+        keywords, reasoning = queries.split_score_reasoning(job.get("score_reasoning"))
+        return _render(request, "partials/job_detail.html", job=job,
+                       keywords=keywords, reasoning=reasoning,
+                       docs=_document_links(job))
 
     @app.post("/jobs/mark")
     async def jobs_mark(request: Request):
@@ -225,6 +241,73 @@ def create_app() -> FastAPI:
         """Re-score every described job as a tracked subprocess."""
         runner.start_run("rescore", {})
         return RedirectResponse("/runs", status_code=303)
+
+    # ------------------------------------------------------------------
+    # Document preview / download / version history (spec PR G)
+    # ------------------------------------------------------------------
+    @app.get("/jobs/preview", response_class=HTMLResponse)
+    async def jobs_preview(request: Request, url: str, doc: str = "resume"):
+        """In-page preview of a job's generated document (spec PR G).
+
+        Renders the stored text with preserved line breaks; download links
+        cover the exact bytes (.txt and, when present, the PDF sibling).
+        """
+        job = queries.job_detail(url)
+        if job is None:
+            return _render(request, "partials/job_missing.html", url=url, status_code=404)
+        if doc not in DOCUMENT_KINDS:
+            return PlainTextResponse("unknown document kind", status_code=404)
+        path = _document_path(job, doc)
+        pdf_exists = path is not None and _pdf_sibling(path).is_file()
+        if path is None or not path.is_file():
+            return _render(request, "preview.html", job=job, doc=doc, missing=True,
+                           text="", pdf_exists=False, status_code=404)
+        text = path.read_text(encoding="utf-8", errors="replace")[:MAX_PREVIEW_CHARS]
+        return _render(request, "preview.html", job=job, doc=doc, missing=False,
+                       text=text, pdf_exists=pdf_exists, docs_path=str(path))
+
+    @app.get("/jobs/download")
+    async def jobs_download(url: str, doc: str = "resume", format: str = "txt"):
+        """Stream the job's stored document as an attachment (localhost only).
+
+        The path always comes from the job row, and _document_path confines
+        it to the two document output dirs — no request-controlled paths.
+        `format=pdf` serves the PDF sibling the pipeline generated, when one
+        exists; there is never an on-demand conversion.
+        """
+        job = queries.job_detail(url)
+        if job is None:
+            return PlainTextResponse("job not found", status_code=404)
+        if doc not in DOCUMENT_KINDS:
+            return PlainTextResponse("unknown document kind", status_code=404)
+        path = _document_path(job, doc)
+        if path is None or not path.is_file():
+            return PlainTextResponse("document not found", status_code=404)
+        if format == "pdf":
+            path = _pdf_sibling(path)
+            if not path.is_file():
+                return PlainTextResponse("no PDF was generated for this document",
+                                         status_code=404)
+        return FileResponse(path, filename=path.name,
+                            headers={"Cache-Control": "no-store"})
+
+    @app.get("/jobs/versions", response_class=HTMLResponse)
+    async def jobs_versions(request: Request, url: str):
+        """Per-job version history page (spec PR G, D2)."""
+        job = queries.job_detail(url)
+        if job is None:
+            return _render(request, "partials/job_missing.html", url=url, status_code=404)
+        versions = database.get_document_versions(job_url=url)
+        current = {
+            database.KIND_RESUME: job.get("tailored_resume_path"),
+            database.KIND_COVER_LETTER: job.get("cover_letter_path"),
+        }
+        return _render(request, "versions.html", job=job, versions=versions,
+                       current=current,
+                       snapshot_ids={
+                           "resume": job.get("applied_resume_version_id"),
+                           "cover_letter": job.get("applied_cover_version_id"),
+                       })
 
     # ------------------------------------------------------------------
     # Runs
@@ -505,6 +588,69 @@ def _bearer(header: str | None) -> str | None:
     if header and header.lower().startswith("bearer "):
         return header[7:].strip()
     return None
+
+
+# ---------------------------------------------------------------------------
+# Document preview helpers (spec PR G)
+# ---------------------------------------------------------------------------
+
+def _document_field(doc: str) -> str:
+    """The jobs-table column holding the kind's current document path."""
+    return "tailored_resume_path" if doc == "resume" else "cover_letter_path"
+
+
+def _under_document_dirs(path: Path) -> bool:
+    """True when path resolves inside one of the two document output dirs.
+
+    The preview/download routes derive paths from the store's job row; this
+    keeps a tampered row from turning them into an arbitrary-file read.
+    """
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    return any(resolved.is_relative_to(root) for root in (config.TAILORED_DIR, config.COVER_LETTER_DIR))
+
+
+def _document_path(job: dict, doc: str) -> Path | None:
+    """The job's stored document path for kind 'resume'|'cover', or None.
+
+    Returns None when the job has no document, the kind is unknown, or the
+    stored path escapes the document dirs (legacy rows are all inside them).
+    """
+    if doc not in DOCUMENT_KINDS:
+        return None
+    raw = job.get(_document_field(doc))
+    if not raw:
+        return None
+    path = Path(raw)
+    if not _under_document_dirs(path):
+        return None
+    return path
+
+
+def _pdf_sibling(path: Path) -> Path:
+    """The PDF sibling of a generated .txt document ({stem}.pdf)."""
+    return path.with_suffix(".pdf")
+
+
+def _document_links(job: dict) -> dict:
+    """Per-kind document link context for the detail page.
+
+    Keys are DOCUMENT_KINDS; each entry carries the contained path (None
+    when the job has no usable document), whether the file is on disk, and
+    whether its PDF sibling exists.
+    """
+    links: dict[str, dict] = {}
+    for doc in DOCUMENT_KINDS:
+        path = _document_path(job, doc)
+        links[doc] = {
+            "path": path,
+            "exists": path is not None and path.is_file(),
+            "pdf_exists": path is not None and _pdf_sibling(path).is_file(),
+            "raw": job.get(_document_field(doc)),
+        }
+    return links
 
 
 def _fetch_model_choices(timeout: float = 2.0) -> list[str]:

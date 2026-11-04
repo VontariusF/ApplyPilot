@@ -1,61 +1,99 @@
-<section class="panel job-detail">
-  <h2>{{ job.title or "(untitled)" }}
-    {% if job.fit_score is not none %}<span class="score-pill {{ 'hot' if job.fit_score >= 8 else 'warm' if job.fit_score >= 6 else 'cool' }}">{{ job.fit_score }}/10</span>{% endif %}
-  </h2>
-  <p class="dim">
-    {{ job.site or "unknown site" }} · {{ job.location or "location unknown" }}
-    {% if job.salary %} · {{ job.salary }}{% endif %}
-  </p>
-  <p><a href="{{ job.url }}" rel="noreferrer noopener" target="_blank">{{ job.url }}</a></p>
-  {% if job.application_url and job.application_url != job.url %}
-  <p class="dim">Application URL: {{ job.application_url }}</p>
-  {% endif %}
+<div class="page-head job-head">
+  <div>
+    <h1>{{ job.title or "(untitled)" }}
+      {% if job.fit_score is not none %}<span class="score-pill {{ 'hot' if job.fit_score >= 8 else 'warm' if job.fit_score >= 6 else 'cool' }}">{{ job.fit_score }}/10</span>{% endif %}
+    </h1>
+    <p class="dim">
+      {{ job.site or "unknown site" }} · {{ job.location or "location unknown" }}
+      {% if job.salary %} · {{ job.salary }}{% endif %}
+    </p>
+    <p><a href="{{ job.url }}" rel="noreferrer noopener" target="_blank">{{ job.url }}</a></p>
+    {% if job.application_url and job.application_url != job.url %}
+    <p class="dim">Application URL: {{ job.application_url }}</p>
+    {% endif %}
+  </div>
+</div>
 
-  <h3>Score reasoning</h3>
+<section class="panel">
+  <h2>Fit assessment</h2>
   {% if job.score_error %}
   <div class="alert error">
     <strong>Scoring failed:</strong> {{ job.score_error }}
     <span class="hint">Use Rescore to try again once the problem is fixed.</span>
   </div>
   {% elif job.fit_score is none %}
-  <pre class="reasoning">Not scored yet.</pre>
+  <p class="empty">Not scored yet. Run the score stage, or use Rescore below.</p>
   {% else %}
-  <pre class="reasoning">{{ job.score_reasoning or "No reasoning captured." }}</pre>
+  {% if keywords %}
+  <div class="keyword-chips">
+    {% for keyword in keywords.split(",") %}{% if keyword.strip() %}<span class="chip">{{ keyword.strip() }}</span>{% endif %}{% endfor %}
+  </div>
   {% endif %}
+  <pre class="reasoning">{{ reasoning or "No reasoning captured." }}</pre>
+  {% endif %}
+</section>
 
-  <h3>Documents</h3>
-  <ul>
-    <li>Tailored resume: {% if job.tailored_resume_path %}<code>{{ job.tailored_resume_path }}</code>{% else %}—{% endif %}</li>
-    <li>Cover letter: {% if job.cover_letter_path %}<code>{{ job.cover_letter_path }}</code>{% else %}—{% endif %}</li>
-  </ul>
+<section class="panel">
+  <h2>Documents</h2>
+  {% if docs.resume.raw or docs.cover.raw %}
+  <div class="doc-list">
+    {% for label, d in [("Tailored resume", docs.resume), ("Cover letter", docs.cover)] %}
+    {% if d.raw %}
+    <div class="doc-item">
+      <div class="doc-info">
+        <span class="doc-kind">{{ label }}</span>
+        <span class="doc-path">{{ d.raw }}</span>
+      </div>
+      {% if d.exists %}
+      <div class="doc-actions">
+        <a class="button" href="/jobs/preview?url={{ job.url | urlencode }}&amp;doc={{ "resume" if label == "Tailored resume" else "cover" }}">Preview</a>
+        <a class="button secondary-button" href="/jobs/download?url={{ job.url | urlencode }}&amp;doc={{ "resume" if label == "Tailored resume" else "cover" }}">Download .txt</a>
+        {% if d.pdf_exists %}
+        <a class="button secondary-button" href="/jobs/download?url={{ job.url | urlencode }}&amp;doc={{ "resume" if label == "Tailored resume" else "cover" }}&amp;format=pdf">Download PDF</a>
+        {% endif %}
+      </div>
+      {% else %}
+      <span class="badge failed">file missing on disk</span>
+      {% endif %}
+    </div>
+    {% endif %}
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="empty">No documents generated yet. Run the tailor stage, or use Regenerate below.</p>
+  {% endif %}
+  <p><a href="/jobs/versions?url={{ job.url | urlencode }}">Version history</a> — every generated version, with the one uploaded at apply time marked.</p>
+</section>
 
-  <h3>Apply state</h3>
+<section class="panel">
+  <h2>Apply state</h2>
   <ul class="kv">
     <li><span>Status</span> <span>{% if job.apply_status %}<span class="badge {{ job.apply_status | lower }}">{{ job.apply_status }}</span>{% else %}—{% endif %}</span></li>
     <li><span>Applied at</span> <span>{{ job.applied_at or "—" }}</span></li>
     <li><span>Attempts</span> <span>{{ job.apply_attempts or 0 }}</span></li>
     <li><span>Last attempted</span> <span>{{ job.last_attempted_at or "—" }}</span></li>
+    {% if job.applied_resume_version_id %}<li><span>Resume uploaded</span> <span>version #{{ job.applied_resume_version_id }}</span></li>{% endif %}
+    {% if job.applied_cover_version_id %}<li><span>Cover letter uploaded</span> <span>version #{{ job.applied_cover_version_id }}</span></li>{% endif %}
     {% if job.apply_error %}<li><span>Error</span> <span class="error-text">{{ job.apply_error }}</span></li>{% endif %}
     {% if job.agent_id %}<li><span>Agent</span> <span>{{ job.agent_id }}</span></li>{% endif %}
   </ul>
+</section>
 
-  <h3>Regenerate</h3>
-  <form method="post" action="/jobs/regenerate" class="inline-form">
-    <input type="hidden" name="url" value="{{ job.url }}">
-    <label><input type="checkbox" name="include_cover" value="1"> include cover letter</label>
-    <button type="submit">Regenerate</button>
-  </form>
-  <p class="dim">Clears tailoring state and re-enqueues this job for the tailor stage on the next run. Existing documents stay on disk.</p>
-
-  <h3>Description</h3>
-  <pre class="description">{{ (job.full_description or job.description or "No description captured.") }}</pre>
-
-  <h3>Manual override</h3>
+<section class="panel">
+  <h2>Actions</h2>
   <div class="mark-actions">
     <form method="post" action="/jobs/rescore" class="inline-form">
       <input type="hidden" name="url" value="{{ job.url }}">
       <button type="submit" class="secondary">Rescore</button>
     </form>
+    <form method="post" action="/jobs/regenerate" class="inline-form">
+      <input type="hidden" name="url" value="{{ job.url }}">
+      <label><input type="checkbox" name="include_cover" value="1"> include cover letter</label>
+      <button type="submit" class="secondary">Regenerate</button>
+    </form>
+  </div>
+  <p class="dim">Regenerate clears tailoring state and re-enqueues this job for the tailor stage on the next run. Existing documents stay on disk and remain in version history.</p>
+  <div class="mark-actions">
     <form method="post" action="/jobs/mark" class="inline-form">
       <input type="hidden" name="url" value="{{ job.url }}">
       <input type="hidden" name="status" value="applied">
@@ -68,4 +106,9 @@
       <button type="submit" class="danger">Mark failed</button>
     </form>
   </div>
+</section>
+
+<section class="panel">
+  <h2>Description</h2>
+  <pre class="description">{{ (job.full_description or job.description or "No description captured.") }}</pre>
 </section>

@@ -1,7 +1,10 @@
 {% extends "base.html" %}
 {% block title %}Runs · ApplyPilot Portal{% endblock %}
 {% block content %}
-<h1>Runs</h1>
+<div class="page-head">
+  <h1>Runs</h1>
+  <p class="dim">Pipeline and apply runs execute as separate processes; logs stream while they work.</p>
+</div>
 
 {% if error %}<p class="alert error">{{ error }}</p>{% endif %}
 

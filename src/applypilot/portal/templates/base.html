@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" {% if theme %}data-theme="{{ theme }}"{% endif %}>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -9,20 +9,26 @@
   <script src="/static/ext-sse.js" defer></script>
 </head>
 <body>
-  <nav class="nav">
-    <a class="brand" href="/">✈️ ApplyPilot</a>
-    <div class="nav-links">
-      <a href="/" {% if request.url.path == "/" %}class="active"{% endif %}>Dashboard</a>
-      <a href="/onboarding" {% if request.url.path.startswith("/onboarding") %}class="active"{% endif %}>Onboarding</a>
-      <a href="/engine" {% if request.url.path.startswith("/engine") %}class="active"{% endif %}>Agent</a>
-      <a href="/jobs" {% if request.url.path.startswith("/jobs") %}class="active"{% endif %}>Jobs</a>
-      <a href="/runs" {% if request.url.path.startswith("/runs") %}class="active"{% endif %}>Runs</a>
-      <a href="/settings" {% if request.url.path.startswith("/settings") %}class="active"{% endif %}>Settings</a>
-    </div>
-    <span class="localhost-note">localhost only</span>
-  </nav>
-  <main class="container">
-    {% block content %}{% endblock %}
-  </main>
+  <div class="shell">
+    <aside class="sidebar">
+      <a class="sidebar-brand" href="/">Apply<span class="brand-pilot">Pilot</span></a>
+      <nav class="side-nav" aria-label="Main">
+        <a href="/jobs" {% if request.url.path.startswith("/jobs") %}class="active" aria-current="page"{% endif %}>Jobs</a>
+        <a href="/" {% if request.url.path == "/" %}class="active" aria-current="page"{% endif %}>Dashboard</a>
+        <a href="/runs" {% if request.url.path.startswith("/runs") %}class="active" aria-current="page"{% endif %}>Runs</a>
+        <a href="/onboarding" {% if request.url.path.startswith("/onboarding") %}class="active" aria-current="page"{% endif %}>Onboarding</a>
+        <a href="/engine" {% if request.url.path.startswith("/engine") %}class="active" aria-current="page"{% endif %}>Agent</a>
+        <a href="/settings" {% if request.url.path.startswith("/settings") %}class="active" aria-current="page"{% endif %}>Settings</a>
+      </nav>
+      <div class="side-footer">
+        Local portal · your data stays on this machine.
+      </div>
+    </aside>
+    <main class="content">
+      <div class="page-inner">
+        {% block content %}{% endblock %}
+      </div>
+    </main>
+  </div>
 </body>
 </html>

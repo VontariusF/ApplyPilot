@@ -40,6 +40,22 @@ def job_detail(url: str) -> dict | None:
     return dict(row) if row else None
 
 
+def split_score_reasoning(stored: str | None) -> tuple[str, str]:
+    """Split the stored score_reasoning blob into (keywords, reasoning).
+
+    scorer.py persists f"{keywords}\\n{reasoning}" — the first line is the
+    comma-separated ATS keyword list, the remainder the reasoning prose.
+    Legacy rows (or empty keyword lists) degrade honestly: no newline means
+    everything is reasoning; an empty first line means no keywords.
+    """
+    if not stored:
+        return "", ""
+    first, sep, rest = stored.partition("\n")
+    if not sep:
+        return "", first.strip()
+    return first.strip(), rest.strip()
+
+
 # ---------------------------------------------------------------------------
 # Jobs board filters (spec PR D)
 # ---------------------------------------------------------------------------

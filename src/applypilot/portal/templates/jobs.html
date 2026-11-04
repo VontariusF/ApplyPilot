@@ -1,7 +1,10 @@
 {% extends "base.html" %}
 {% block title %}Jobs · ApplyPilot Portal{% endblock %}
 {% block content %}
-<h1>Jobs</h1>
+<div class="page-head">
+  <h1>Jobs</h1>
+  <p class="dim">Every discovered listing, with fit scores and application state. Use the filters to narrow the board.</p>
+</div>
 
 <section class="panel">
   <form class="filter-bar" hx-get="/jobs/table" hx-target="#jobs-table" hx-trigger="change, submit">

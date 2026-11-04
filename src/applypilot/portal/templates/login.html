@@ -1,14 +1,9 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ApplyPilot Portal — Sign in</title>
-  <link rel="stylesheet" href="/static/portal.css">
-</head>
-<body class="login-body">
-  <main class="login-card">
-    <h1>✈️ ApplyPilot Portal</h1>
+{% extends "base.html" %}
+{% block title %}ApplyPilot Portal — Sign in{% endblock %}
+{% block content %}
+<div class="login-shell">
+  <section class="login-card">
+    <h1>Sign in</h1>
     <p>Enter the portal token to continue. It was printed when the portal
        started (<code>~/.applypilot/portal_token</code>).</p>
     <form method="post" action="/login">
@@ -16,6 +11,6 @@
       <button type="submit">Open portal</button>
     </form>
     <p class="hint">401 — every route requires the token.</p>
-  </main>
-</body>
-</html>
+  </section>
+</div>
+{% endblock %}

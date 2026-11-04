@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Version history · {{ job.title or "(untitled)" }} · ApplyPilot{% endblock %}
+{% block content %}
+<p class="breadcrumb"><a href="/jobs/detail?url={{ job.url | urlencode }}">← {{ job.title or "(untitled)" }}</a></p>
+
+<div class="page-head">
+  <h1>Version history</h1>
+  <p class="dim">Every generated document for this job is kept as a separate version
+     and never overwritten. The version uploaded with an application is marked.</p>
+</div>
+
+{% set kind_labels = {"resume": "Tailored resume", "cover_letter": "Cover letter"} %}
+
+{% for kind in ["resume", "cover_letter"] %}
+<section class="panel">
+  <h2>{{ kind_labels[kind] }}</h2>
+  {% set kind_versions = versions | selectattr("kind", "equalto", kind) | list %}
+  {% if kind_versions %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Version</th><th>Generated</th><th>Validation</th><th>State</th></tr>
+      </thead>
+      <tbody>
+        {% for v in kind_versions | sort(attribute="version") | reverse %}
+        <tr>
+          <td>v{{ v.version }}</td>
+          <td>{{ v.created_at or "unknown" }}</td>
+          <td>
+            {% if v.validation_status %}
+            <span class="badge {{ v.validation_status }}">{{ v.validation_status.replace("_", " ") }}</span>
+            {% else %}<span class="dim">—</span>{% endif %}
+          </td>
+          <td>
+            {% if current[kind] == v.file_path %}
+            <span class="badge current">current</span>
+            {% endif %}
+            {% if snapshot_ids[kind] == v.id %}
+            <span class="badge uploaded">uploaded with application</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">No {{ kind_labels[kind] | lower }} versions recorded yet. History begins
+     with the next generation or regeneration of this document.</p>
+  {% endif %}
+</section>
+{% endfor %}
+{% endblock %}
