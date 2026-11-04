@@ -19,6 +19,7 @@ from pathlib import Path
 from applypilot.config import RESUME_PATH, TAILORED_DIR, load_profile
 from applypilot.database import get_connection, get_jobs_by_stage
 from applypilot.llm import get_client
+from applypilot.scoring import docs
 from applypilot.scoring.validator import (
     BANNED_WORDS,
     FABRICATION_WATCHLIST,
@@ -490,10 +491,9 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
             tailored, report = tailor_resume(resume_text, job, profile,
                                              validation_mode=validation_mode)
 
-            # Build safe filename prefix (B12: title is nullable — guard)
-            safe_title = re.sub(r"[^\w\s-]", "", job.get("title") or "untitled")[:50].strip().replace(" ", "_")
-            safe_site = re.sub(r"[^\w\s-]", "", job["site"])[:20].strip().replace(" ", "_")
-            prefix = f"{safe_site}_{safe_title}"
+            # Build safe filename prefix (B3: URL-hash suffix ends same-site/
+            # title collisions; B12: title is nullable — guard)
+            prefix = docs.output_prefix(job)
 
             # Save tailored resume text
             txt_path = TAILORED_DIR / f"{prefix}.txt"
