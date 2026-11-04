@@ -141,3 +141,67 @@ def test_stream_route_serves_events_end_to_end(portal_client, portal_env):
     assert "Route Job" in text
     assert "route event one" in text
     assert "event: end" in text
+
+
+def test_stream_events_recovers_after_rotation(portal_env):
+    """S3: a reader mid-stream keeps consuming after the log rotates.
+
+    The reader's offset points near the old file's bound; once the live
+    file restarts from empty, seeking there used to read past EOF
+    forever and strand the panel for the rest of the run.
+    """
+    log = portal_env / "runs" / "rotsse.jsonl"
+    writer = eventlog.EventLogWriter(log)
+    for i in range(10):
+        writer.emit_event(f"pre-rotation message {i}")
+    old_size = log.stat().st_size
+
+    polls: list[int] = []
+
+    def fake_run():
+        polls.append(1)
+        if len(polls) == 2:
+            # Rotate mid-stream and write into the fresh generation, so
+            # the reader's offset now sits past the new file's end.
+            eventlog.EventLogWriter(log, max_bytes=1).emit_event("rotation trigger")
+            writer.emit_event("post-rotation message")
+            return {"status": "running"}
+        if len(polls) > 2:
+            return {"status": "completed"}
+        return {"status": "running"}
+
+    events = collect(_stream_events(log, fake_run))
+    payloads = "\n".join(e["data"] for e in events if e["event"] == "event")
+    assert "pre-rotation message 0" in payloads  # backfill intact
+    assert "post-rotation message" in payloads
+    # Sanity: the scenario really leaves the new file smaller than the
+    # offset a pre-fix reader holds, i.e. it really strands.
+    assert log.stat().st_size < old_size
+
+
+def test_stream_log_lines_recovers_after_rotation(portal_env):
+    """S3: the run-log stream recovers after rotation the same way."""
+    log = portal_env / "runs" / "rotlog.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("\n".join(f"pre-rotation line {i}" for i in range(10)) + "\n")
+    old_size = log.stat().st_size
+
+    polls: list[int] = []
+
+    def fake_run():
+        polls.append(1)
+        if len(polls) == 2:
+            rotated = log.with_suffix(".log.1")
+            rotated.unlink(missing_ok=True)
+            log.rename(rotated)
+            log.write_text("post-rotation line\n")
+            return {"status": "running"}
+        if len(polls) > 2:
+            return {"status": "completed"}
+        return {"status": "running"}
+
+    events = collect(_stream_log_lines(log, fake_run))
+    datas = "\n".join(e["data"] for e in events if e["event"] == "log")
+    assert "pre-rotation line 0" in datas
+    assert "post-rotation line" in datas
+    assert log.stat().st_size < old_size

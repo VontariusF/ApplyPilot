@@ -855,6 +855,12 @@ def _read_log_tail(path: Path) -> str:
 
 def _read_from(path: Path, offset: int) -> tuple[bytes, int]:
     with open(path, "rb") as f:
+        size = f.seek(0, 2)
+        if offset > size:
+            # S3: the event log rotated mid-stream — the live file
+            # restarted from empty, so an offset near the old bound would
+            # seek past EOF forever and strand the stream. Restart from 0.
+            offset = 0
         f.seek(offset)
         data = f.read()
     return data, offset + len(data)

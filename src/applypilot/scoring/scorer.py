@@ -51,21 +51,33 @@ def _parse_score_response(response: str) -> dict:
         {"score": int, "keywords": str, "reasoning": str}
     """
     score = 0
-    keywords = ""
-    reasoning = response
+    keywords_lines: list[str] = []
+    reasoning_lines: list[str] = []
+    # Continuation lines belong to the last marker seen — models wrap
+    # KEYWORDS/REASONING prose across lines routinely, so accumulate
+    # until the next marker instead of overwriting per line.
+    current: list[str] | None = None
 
     for line in response.split("\n"):
         line = line.strip()
         if line.startswith("SCORE:"):
+            current = None
             try:
                 score = int(re.search(r"\d+", line).group())
                 score = max(1, min(10, score))
             except (AttributeError, ValueError):
                 score = 0
         elif line.startswith("KEYWORDS:"):
-            keywords = line.replace("KEYWORDS:", "").strip()
+            keywords_lines = [line.replace("KEYWORDS:", "").strip()]
+            current = keywords_lines
         elif line.startswith("REASONING:"):
-            reasoning = line.replace("REASONING:", "").strip()
+            reasoning_lines = [line.replace("REASONING:", "").strip()]
+            current = reasoning_lines
+        elif current is not None:
+            current.append(line)
+
+    keywords = " ".join(part for part in keywords_lines if part)
+    reasoning = "\n".join(reasoning_lines).strip() if reasoning_lines else response
 
     return {"score": score, "keywords": keywords, "reasoning": reasoning}
 

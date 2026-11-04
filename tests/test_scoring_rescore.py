@@ -15,10 +15,68 @@ import pytest
 from typer.testing import CliRunner
 
 from applypilot import database
+from applypilot.portal import queries as portal_queries
 from applypilot.scoring import scorer
 
 GOOD = "SCORE: 8\nKEYWORDS: python, llm\nREASONING: Solid match on core skills."
 MALFORMED = "I think this candidate looks like a great fit for the role overall."
+
+
+# ---------------------------------------------------------------------------
+# Response parser
+# ---------------------------------------------------------------------------
+
+def test_parse_score_response_multiline_reasoning():
+    """S3: wrapped REASONING prose renders fully, not just its first line."""
+    response = (
+        "SCORE: 7\n"
+        "KEYWORDS: python, llm\n"
+        "REASONING: Strong overlap on backend skills.\n"
+        "The candidate has shipped production LLM features.\n"
+        "Missing depth on data engineering."
+    )
+    parsed = scorer._parse_score_response(response)
+    assert parsed["score"] == 7
+    assert parsed["keywords"] == "python, llm"
+    assert parsed["reasoning"] == (
+        "Strong overlap on backend skills.\n"
+        "The candidate has shipped production LLM features.\n"
+        "Missing depth on data engineering."
+    )
+    # The persisted blob round-trips through the portal's split, which
+    # takes the first line as keywords and keeps the full remainder.
+    keywords, reasoning = portal_queries.split_score_reasoning(
+        f"{parsed['keywords']}\n{parsed['reasoning']}"
+    )
+    assert keywords == "python, llm"
+    assert reasoning == parsed["reasoning"]
+
+
+def test_parse_score_response_wrapped_keywords():
+    """S3: continuation lines after KEYWORDS: join instead of vanishing."""
+    response = (
+        "SCORE: 9\n"
+        "KEYWORDS: python, llm, playwright,\n"
+        "fastapi, sqlite\n"
+        "REASONING: Excellent match."
+    )
+    parsed = scorer._parse_score_response(response)
+    assert parsed["keywords"] == "python, llm, playwright, fastapi, sqlite"
+    assert parsed["reasoning"] == "Excellent match."
+
+
+def test_parse_score_response_continuation_ends_at_next_marker():
+    """Continuation lines stop at the next marker; unmarked text stays raw."""
+    response = (
+        "REASONING: First line.\n"
+        "SCORE: 4"
+    )
+    parsed = scorer._parse_score_response(response)
+    assert parsed["score"] == 4
+    assert parsed["reasoning"] == "First line."
+    # No REASONING marker at all -> the legacy whole-response fallback.
+    parsed = scorer._parse_score_response(MALFORMED)
+    assert parsed["reasoning"] == MALFORMED
 
 
 class FakeClient:
