@@ -394,3 +394,99 @@ def test_retry_error_surfaces_on_runs_page(portal_client):
     assert "error=" in r.headers["location"]
     page = client.get(r.headers["location"])
     assert "only failed runs can be retried" in page.text
+
+
+# ---------------------------------------------------------------------------
+# Jobs-board progress strip
+# ---------------------------------------------------------------------------
+
+def seed_job_discovered(url: str, when: str) -> None:
+    conn = init_db()
+    conn.execute(
+        "INSERT OR REPLACE INTO jobs (url, title, site, description, "
+        "discovered_at) VALUES (?, ?, ?, ?, ?)",
+        (url, "Pwidget Engineer", "ExampleBoard", "short desc", when))
+    conn.commit()
+
+
+def test_progress_strip_shows_working_label_and_count(portal_client):
+    """Active pipeline run -> 'Working: Finding jobs — N found so far'."""
+    seed_run("r11", "pipeline", {}, status="running", pid=1)
+    now = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+    seed_job_discovered("https://jobs.example/a", now)
+    seed_job_discovered("https://jobs.example/b", now)
+    client, _ = portal_client
+    r = client.get("/jobs")
+    assert 'data-testid="jobs-progress"' in r.text
+    assert "Working: Finding jobs — 2 found so far" in r.text
+
+
+def test_progress_strip_counts_rescored_jobs(portal_client):
+    seed_run("r12", "rescore", {}, status="running", pid=1)
+    conn = init_db()
+    now = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+    conn.execute(
+        "INSERT OR REPLACE INTO jobs (url, title, site, description, "
+        "scored_at) VALUES (?, ?, ?, ?, ?)",
+        ("https://jobs.example/c", "Pwidget Engineer", "ExampleBoard",
+         "short desc", now))
+    conn.commit()
+    client, _ = portal_client
+    r = client.get("/jobs")
+    assert "Working: Refreshing scores — 1 refreshed so far" in r.text
+
+
+def test_progress_strip_hidden_when_idle(portal_client):
+    seed_job_discovered("https://jobs.example/d",
+                        time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()))
+    client, _ = portal_client
+    r = client.get("/jobs")
+    assert "Working:" not in r.text
+
+
+def test_rescore_all_returns_to_the_jobs_board(portal_client, real_spawns):
+    client, _ = portal_client
+    r = client.post("/jobs/rescore-all", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/jobs"
+    runs = runner.list_runs()
+    assert len(runs) == 1 and runs[0]["kind"] == "rescore"
+
+
+def test_find_jobs_empty_state_returns_to_the_board(portal_client, real_spawns):
+    client, _ = portal_client
+    r = client.post("/runs/start",
+                    data={"kind": "pipeline", "next": "/jobs"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/jobs"
+
+
+def test_runs_start_rejects_offsite_next_targets(portal_client, real_spawns):
+    client, _ = portal_client
+    for next_ in ("//evil.example", "https://evil.example", "relative"):
+        r = client.post("/runs/start",
+                        data={"kind": "pipeline", "next": next_},
+                        follow_redirects=False)
+        assert r.headers["location"] == "/runs" or \
+            r.headers["location"].startswith("/runs?error=")
+
+
+def test_progress_stream_pushes_on_change(portal_client):
+    """Run start since connect is pushed as the strip partial."""
+    from applypilot.portal import app as portal_app
+
+    last = portal_app._progress_signature()
+    assert last == ("idle", None)
+    seed_run("r13", "apply", {}, status="running", pid=1)
+
+    async def first_event():
+        gen = portal_app._stream_progress(last)
+        try:
+            return await gen.__anext__()
+        finally:
+            await gen.aclose()
+
+    event = asyncio.run(first_event())
+    assert event["event"] == "progress"
+    assert "Working: Applying" in event["data"]

@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from applypilot import config, database
-from applypilot.database import count_applications_on
+from applypilot.database import count_applications_on, get_connection
 from applypilot.portal import runner
 
 log = logging.getLogger(__name__)
@@ -177,6 +177,27 @@ def run_summary(run: dict) -> str:
         if params.get("continuous"):
             return f"{label} — keeps going"
     return label
+
+
+def progress_for_run(run: dict) -> dict:
+    """Plain-language progress for the jobs-board strip.
+
+    Counts store rows stamped since the run started (discovered,
+    scored, or applied, by kind). Store timestamps are UTC isoformat,
+    so a 19-char prefix keeps string comparison consistent.
+    """
+    started = (run["started_at"] or "")[:19]
+    column_unit = {"pipeline": ("discovered_at", "found"),
+                   "rescore": ("scored_at", "refreshed"),
+                   "apply": ("applied_at", "applied")}
+    if run["kind"] not in column_unit:
+        return {"count": None, "unit": "done"}
+    column, unit = column_unit[run["kind"]]
+    conn = get_connection()
+    count = conn.execute(
+        f"SELECT COUNT(*) FROM jobs WHERE substr({column}, 1, 19) >= ?",
+        (started,)).fetchone()[0]
+    return {"label": run_summary(run), "count": count, "unit": unit}
 
 
 # ---------------------------------------------------------------------------

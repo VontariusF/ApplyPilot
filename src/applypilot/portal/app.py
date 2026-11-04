@@ -169,7 +169,8 @@ def create_app() -> FastAPI:
         return _render(request, "jobs.html", jobs=rows, total=len(rows),
                        total_jobs=queries.count_jobs(), stages=queries.STAGES,
                        sites=queries.distinct_sites(),
-                       statuses=queries.distinct_apply_statuses(), **filters)
+                       statuses=queries.distinct_apply_statuses(),
+                       progress=_jobs_progress(), **filters)
 
     @app.get("/jobs/table", response_class=HTMLResponse)
     async def jobs_table(request: Request, stage: str = "scored", min_score: int = 7,
@@ -260,9 +261,14 @@ def create_app() -> FastAPI:
 
     @app.post("/jobs/rescore-all")
     async def jobs_rescore_all():
-        """Re-score every described job as a tracked subprocess."""
+        """Re-score every described job as a tracked subprocess.
+
+        Back to the board: the progress strip (same SSE partial pattern
+        as the Automation cards) shows live counts — no dead-end
+        redirect to /runs.
+        """
         runner.start_run("rescore", {})
-        return RedirectResponse("/runs", status_code=303)
+        return RedirectResponse("/jobs", status_code=303)
 
     # ------------------------------------------------------------------
     # Document preview / download / version history (spec PR G)
@@ -343,12 +349,18 @@ def create_app() -> FastAPI:
     async def runs_start(request: Request):
         form = {k: str(v) for k, v in (await request.form()).items()}
         kind = form.pop("kind", "")
+        # Optional landing page: the jobs board sends next=/jobs so its
+        # progress strip takes over instead of a dead-end /runs redirect.
+        next_ = form.pop("next", "")
+        target = next_ if next_.startswith("/") and not next_.startswith("//") \
+            else "/runs"
         params = {k: v for k, v in form.items() if v}
         try:
             runner.start_run(kind, params)
         except runner.ParamError as e:
-            return RedirectResponse(f"/runs?error={quote(str(e))}", status_code=303)
-        return RedirectResponse("/runs", status_code=303)
+            return RedirectResponse(f"{target}?error={quote(str(e))}",
+                                    status_code=303)
+        return RedirectResponse(target, status_code=303)
 
     @app.post("/runs/cancel/{run_id}")
     async def runs_cancel(run_id: str):
@@ -459,6 +471,11 @@ def create_app() -> FastAPI:
         """Push the automation cards partial when anything on them changes."""
         baseline = _automation_signature()
         return EventSourceResponse(_stream_cards(baseline))
+
+    @app.get("/jobs/progress/stream")
+    async def jobs_progress_stream():
+        """Push the jobs-board progress strip when run state or count changes."""
+        return EventSourceResponse(_stream_progress(_progress_signature()))
 
     # ------------------------------------------------------------------
     # Agent sign-in (onboarding step 1): the engine gate cards. Status
@@ -611,11 +628,12 @@ def create_app() -> FastAPI:
     async def onboarding_find_jobs():
         """Find-jobs-now handoff (spec journey step 5): kick off discovery.
 
-        The confirm/done card offers this; the run goes through the same
-        subprocess runner as the Runs page, so progress streams there too.
+        Lands on the jobs board, where the live progress strip (same SSE
+        partial pattern as the Automation cards) shows the run working —
+        no dead-end redirect to /runs.
         """
         runner.start_run("pipeline", {})
-        return RedirectResponse("/runs", status_code=303)
+        return RedirectResponse("/jobs", status_code=303)
 
     @app.post("/onboarding/keep-editing")
     async def onboarding_keep_editing(request: Request):
@@ -960,6 +978,47 @@ async def _stream_cards(last: tuple) -> AsyncIterator[dict]:
         if sig != last:
             last, idle = sig, 0
             yield {"event": "cards", "data": _automation_cards_html()}
+        else:
+            idle += 1
+    yield {"event": "end", "data": "closed"}
+
+
+def _jobs_progress() -> dict | None:
+    """Strip context for the jobs board: the active run's plain progress."""
+    run = _active_stream_run()
+    if run is None:
+        return None
+    return automation_mod.progress_for_run(run)
+
+
+def _progress_signature() -> tuple:
+    """Cheap fingerprint of the strip inputs (run identity + count)."""
+    run = _active_stream_run()
+    if run is None:
+        return ("idle", None)
+    return (run["id"], automation_mod.progress_for_run(run)["count"])
+
+
+def _progress_html() -> str:
+    """Render the jobs-board progress strip partial (no request context)."""
+    return templates.get_template("partials/jobs_progress.html").render(
+        progress=_jobs_progress())
+
+
+async def _stream_progress(last: tuple) -> AsyncIterator[dict]:
+    """SSE generator: the jobs-board strip, re-pushed on any change.
+
+    Mirrors _stream_cards: pushes only changes, so a run start, count
+    tick, or completion reaches every open jobs board without a reload.
+    Idle-closes a few seconds after the last change.
+    """
+    idle = 0
+    while idle < IDLE_POLLS_BEFORE_CLOSE:
+        await asyncio.sleep(POLL_SECONDS)
+        sig = _progress_signature()
+        if sig != last:
+            last, idle = sig, 0
+            yield {"event": "progress", "data": _progress_html()}
         else:
             idle += 1
     yield {"event": "end", "data": "closed"}

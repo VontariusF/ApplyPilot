@@ -55,6 +55,12 @@
   </form>
 </section>
 
+<div id="jobs-progress" hx-ext="sse" sse-connect="/jobs/progress/stream">
+  <div sse-swap="progress" hx-swap="innerHTML">
+    {% include "partials/jobs_progress.html" %}
+  </div>
+</div>
+
 <div id="jobs-table">
   {% include "partials/jobs_table.html" %}
 </div>

@@ -251,7 +251,7 @@ def test_onboarding_find_jobs_starts_pipeline_run(portal_client, seeded_profile,
     monkeypatch.setattr(runner_mod, "start_run", fake_start)
     r = client.post("/onboarding/find-jobs", follow_redirects=False)
     assert r.status_code == 303
-    assert r.headers["location"] == "/runs"
+    assert r.headers["location"] == "/jobs"
 
     runs = runner_mod.list_runs()
     assert len(runs) == 1
