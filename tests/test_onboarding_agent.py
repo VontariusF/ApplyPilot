@@ -77,6 +77,15 @@ if os.environ.get("FAKE_CLAUDE_MODE") == "unsigned_in":
     # The real envelope observed live on an unsigned-in CLI (exit 1).
     envelope("Not logged in · Please run /login", is_error=True)
     sys.exit(1)
+if os.environ.get("FAKE_CLAUDE_MODE") == "wizard":
+    # Guided-choice acks: one short reply per turn; the fenced-JSON
+    # envelope only when the prompt carries the explicit fallback marker
+    # (answers-driven completion must not depend on the agent emitting it).
+    if "AGENT_JSON_FALLBACK" in prompt:
+        envelope("Understood. " + PROFILE_BLOCK)
+    else:
+        envelope("Noted — thanks!")
+    sys.exit(0)
 if "opened onboarding" in prompt:       # turn 1: kickoff
     envelope("Hello! Tell me about your background.")
 elif resume == "fake-session-1":        # turn 2+: resumed session
