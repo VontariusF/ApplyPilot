@@ -16,7 +16,7 @@ import stat
 import pytest
 
 from applypilot import config
-from applypilot.llm import _detect_provider, describe_provider, mask_key
+from applypilot.llm import ModelListError, _detect_provider, describe_provider, mask_key
 
 GEMINI_COMPAT = "https://generativelanguage.googleapis.com/v1beta/openai"
 OPENAI_BASE = "https://api.openai.com/v1"
@@ -315,6 +315,12 @@ def _install_wizard_fakes(monkeypatch, answers):
 
     monkeypatch.setattr(wizard, "Prompt", _FakePrompt)
     monkeypatch.setattr(wizard, "Confirm", _FakeConfirm)
+    # Hermetic: the model-select step must not touch the network — force the
+    # free-text fallback these tests were written against.
+    def _no_model_list(*args, **kwargs):
+        raise ModelListError("mocked unreachable")
+
+    monkeypatch.setattr(wizard, "list_models", _no_model_list)
     return wizard
 
 

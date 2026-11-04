@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Settings · ApplyPilot Portal{% endblock %}
 
-{% macro field_row(field) %}
+{% macro field_row(field, model_choices = []) %}
 <div class="field">
   <label for="f-{{ field.key }}">{{ field.label }}</label>
   {% if field.is_secret %}
@@ -17,6 +17,14 @@
       <option value="{{ choice }}" {{ 'selected' if choice == field.masked }}>{{ choice or "(unset)" }}</option>
       {% endfor %}
     </select>
+  {% elif field.datalist %}
+    <input type="text" id="f-{{ field.key }}" name="{{ field.key }}" value="{{ field.masked }}"
+           list="dl-{{ field.key }}" autocomplete="off">
+    <datalist id="dl-{{ field.key }}" data-model-list>
+      {% for model_id in model_choices %}
+      <option value="{{ model_id }}"></option>
+      {% endfor %}
+    </datalist>
   {% else %}
     <input type="text" id="f-{{ field.key }}" name="{{ field.key }}" value="{{ field.masked }}" autocomplete="off">
   {% endif %}
@@ -31,9 +39,12 @@
 
 <form method="post" action="/settings" class="settings-form">
   <section class="panel">
-    <h2>LLM provider</h2>
+    <h2>LLM provider
+      <button type="button" class="secondary" onclick="refreshModelLists()"
+              title="Re-fetch the model ids from GET {base}/models">Refresh model list</button>
+    </h2>
     {% for field in fields if field.key.startswith("LLM_") %}
-      {{ field_row(field) }}
+      {{ field_row(field, model_choices) }}
     {% endfor %}
   </section>
 
@@ -47,11 +58,26 @@
   <section class="panel">
     <h2>Auto-apply</h2>
     {% for field in fields if field.key in ("CAPSOLVER_API_KEY", "FACTORY_API_KEY", "AUTOAPPLY_MODEL", "AUTOAPPLY_ENGINE") %}
-      {{ field_row(field) }}
+      {{ field_row(field, model_choices) }}
     {% endfor %}
   </section>
 
   <button type="submit" class="primary">Save settings</button>
 </form>
+
+<script>
+async function refreshModelLists() {
+  const resp = await fetch('/settings/models');
+  if (!resp.ok) return;
+  const data = await resp.json();
+  for (const dl of document.querySelectorAll('datalist[data-model-list]')) {
+    dl.replaceChildren(...(data.models || []).map(id => {
+      const opt = document.createElement('option');
+      opt.value = id;
+      return opt;
+    }));
+  }
+}
+</script>
 {% endblock %}
 

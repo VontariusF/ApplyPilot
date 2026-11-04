@@ -141,6 +141,85 @@ def mask_key(api_key: str | None) -> str:
     return f"(ending {api_key[-4:]})"
 
 
+class ModelListError(RuntimeError):
+    """Raised when GET {base}/models fails or returns an unparseable shape.
+
+    Callers (wizard, portal) fall back to free-text model entry with a
+    one-line warning — the id is always typable, the list is an affordance.
+    """
+
+
+def _parse_model_ids(payload: object) -> list[str]:
+    """Extract model ids from an OpenAI-style or plain-list response.
+
+    Tolerated shapes: {"data": [{"id": ...}, ...]}, [{"id": ...}, ...], and
+    bare string entries. Gemini's OpenAI-compat route returns bare ids in
+    data[].id, so no models/ prefix handling is needed.
+    """
+    if isinstance(payload, dict):
+        entries = payload.get("data")
+    elif isinstance(payload, list):
+        entries = payload
+    else:
+        entries = None
+    if not isinstance(entries, list):
+        raise ModelListError(
+            f"unexpected /models response shape: {str(payload)[:120]}"
+        )
+
+    ids: list[str] = []
+    seen: set[str] = set()
+    for entry in entries:
+        if isinstance(entry, str):
+            candidate = entry
+        elif isinstance(entry, dict) and isinstance(entry.get("id"), str):
+            candidate = entry["id"]
+        else:
+            continue
+        candidate = candidate.strip()
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            ids.append(candidate)
+    return ids
+
+
+def list_models(
+    base_url: str | None = None,
+    api_key: str | None = None,
+    timeout: float = 5.0,
+) -> list[str]:
+    """Fetch the model ids offered at GET {base}/models.
+
+    Resolves the currently configured provider's base when base_url is not
+    given (the same resolution chat uses, so the list always matches the
+    endpoint that will serve the model). Local servers are keyless: a
+    header goes out only when a key is available. api_key=None means "use
+    the detected key"; pass "" to force keyless against an explicit base.
+
+    Raises ModelListError on any HTTP, connection, or parse failure —
+    never returns a guessed partial list.
+    """
+    if base_url is None:
+        base_url, _model, detected_key = _detect_provider()
+        if api_key is None:
+            api_key = detected_key
+
+    url = f"{base_url.rstrip('/')}/models"
+    headers: dict[str, str] = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    try:
+        resp = httpx.get(url, headers=headers, timeout=timeout)
+        resp.raise_for_status()
+        payload = resp.json()
+    except ValueError as exc:
+        raise ModelListError(f"{url} returned a non-JSON body: {exc}") from exc
+    except httpx.HTTPError as exc:
+        raise ModelListError(f"model list request to {url} failed: {exc}") from exc
+    return _parse_model_ids(payload)
+
+
 def _provider_label(base_url: str) -> str:
     """Human-readable provider name for logs and diagnostics."""
     explicit = os.environ.get("LLM_PROVIDER", "").strip().lower()
