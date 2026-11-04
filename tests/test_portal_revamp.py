@@ -273,5 +273,7 @@ def test_job_detail_shows_keywords_and_reasoning_separately(portal_client):
     assert "keyword-chips" in r.text
     assert '<span class="chip">python</span>' in r.text
     assert '<span class="chip">kubernetes</span>' in r.text
-    # Exact pre content proves the keyword line did not leak into the reasoning.
-    assert '<pre class="reasoning">Solid fit for the platform team.</pre>' in r.text
+    # Exact paragraph content proves the keyword line did not leak into the
+    # plain-language fit summary.
+    assert ('<p class="fit-summary"><strong>Why it’s a 9/10:</strong> '
+            'Solid fit for the platform team.</p>') in r.text

@@ -5,8 +5,8 @@
     </h1>
     <p class="dim">
       {{ job.site or "unknown site" }} · {{ job.location or "location unknown" }}
-      {% if job.salary %} · {{ job.salary }}{% endif %}
     </p>
+    <p class="salary-line">{{ job.salary or "Pay not listed" }}</p>
     <p><a href="{{ job.url }}" rel="noreferrer noopener" target="_blank">{{ job.url }}</a></p>
     {% if job.application_url and job.application_url != job.url %}
     <p class="dim">Application URL: {{ job.application_url }}</p>
@@ -14,24 +14,7 @@
   </div>
 </div>
 
-<section class="panel">
-  <h2>Fit assessment</h2>
-  {% if job.score_error %}
-  <div class="alert error">
-    <strong>Scoring failed:</strong> {{ job.score_error }}
-    <span class="hint">Use Rescore to try again once the problem is fixed.</span>
-  </div>
-  {% elif job.fit_score is none %}
-  <p class="empty">Not scored yet. Run the score stage, or use Rescore below.</p>
-  {% else %}
-  {% if keywords %}
-  <div class="keyword-chips">
-    {% for keyword in keywords.split(",") %}{% if keyword.strip() %}<span class="chip">{{ keyword.strip() }}</span>{% endif %}{% endfor %}
-  </div>
-  {% endif %}
-  <pre class="reasoning">{{ reasoning or "No reasoning captured." }}</pre>
-  {% endif %}
-</section>
+{% include "partials/fit_assessment.html" %}
 
 <section class="panel">
   <h2>Documents</h2>
@@ -82,10 +65,6 @@
 <section class="panel">
   <h2>Actions</h2>
   <div class="mark-actions">
-    <form method="post" action="/jobs/rescore" class="inline-form">
-      <input type="hidden" name="url" value="{{ job.url }}">
-      <button type="submit" class="secondary">Rescore</button>
-    </form>
     <form method="post" action="/jobs/regenerate" class="inline-form">
       <input type="hidden" name="url" value="{{ job.url }}">
       <label><input type="checkbox" name="include_cover" value="1"> include cover letter</label>

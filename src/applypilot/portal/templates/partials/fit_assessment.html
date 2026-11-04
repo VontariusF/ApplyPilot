@@ -1,0 +1,26 @@
+{# Fit assessment panel — also the swap target for inline rescore feedback:
+   POST /jobs/rescore re-renders this section with the fresh score. #}
+<section class="panel" id="fit-assessment">
+  <h2>Fit assessment</h2>
+  {% if job.score_error %}
+  <div class="alert error">
+    <strong>Scoring failed:</strong> {{ job.score_error }}
+    <span class="hint">Use Rescore to try again once the problem is fixed.</span>
+  </div>
+  {% elif job.fit_score is none %}
+  <p class="empty">Not scored yet. Run the score stage, or use Rescore below.</p>
+  {% else %}
+  {% if keywords %}
+  <div class="keyword-chips">
+    {% for keyword in keywords.split(",") %}{% if keyword.strip() %}<span class="chip">{{ keyword.strip() }}</span>{% endif %}{% endfor %}
+  </div>
+  {% endif %}
+  <p class="fit-summary"><strong>Why it’s {{ "an" if job.fit_score in (8, 11, 18) else "a" }} {{ job.fit_score }}/10:</strong> {{ reasoning or "No reasoning captured." }}</p>
+  {% endif %}
+  {% if rescored %}<p class="inline-note">Score updated just now.</p>{% endif %}
+  <form class="inline-form rescore-form" hx-post="/jobs/rescore" hx-target="#fit-assessment" hx-swap="outerHTML">
+    <input type="hidden" name="url" value="{{ job.url }}">
+    <button type="submit" class="secondary">Rescore</button>
+    <span class="rescore-busy"><span class="spinner" role="status" aria-label="scoring"></span> Scoring — this can take a couple of minutes.</span>
+  </form>
+</section>

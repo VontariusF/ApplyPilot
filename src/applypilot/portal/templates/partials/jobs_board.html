@@ -1,0 +1,58 @@
+<div id="jobs-board" hx-get="/jobs/table{% if board_qs %}?{{ board_qs }}{% endif %}"
+     hx-trigger="sse:board-changed" hx-target="#jobs-board" hx-swap="outerHTML">
+  {% if toast_message %}
+  <div class="toast {{ toast_kind or 'info' }}" role="status">{{ toast_message }}</div>
+  {% endif %}
+  {% if discovery_active %}
+  <div class="live-strip" role="status">
+    <span class="spinner" role="presentation"></span>
+    Finding jobs… {{ total_jobs }} found so far. The board updates as they come in.
+  </div>
+  {% endif %}
+  {% if active_filters %}
+  <div class="chip-row" aria-label="Active filters">
+    {% for f in active_filters %}
+    <a class="chip chip-active" href="{{ f.href }}" title="Remove this filter">{{ f.label }} ✕</a>
+    {% endfor %}
+  </div>
+  {% endif %}
+  <p class="result-count">{{ total_matching }} job{{ "" if total_matching == 1 else "s" }} in this view</p>
+  {% if jobs %}
+  <div class="card-grid">
+    {% for job in jobs %}{% with card_mode = "main", uid = "main-" ~ loop.index %}{% include "partials/job_card.html" %}{% endwith %}{% endfor %}
+  </div>
+  {% elif total_jobs == 0 %}
+  <div class="empty-state">
+    <p><strong>No jobs found yet.</strong> Let’s find your first jobs — the first discovery run takes a few minutes.</p>
+    <form method="post" action="/runs/start" class="inline-form"
+          hx-post="/runs/start" hx-target="#jobs-board" hx-swap="outerHTML">
+      <input type="hidden" name="kind" value="pipeline">
+      <button>Find jobs now</button>
+    </form>
+  </div>
+  {% elif has_filters %}
+  <div class="empty-state">
+    <p>No jobs match this filter.</p>
+    <a class="button secondary-button" href="/jobs">Clear filters</a>
+  </div>
+  {% else %}
+  <p class="empty">Nothing on the board right now.</p>
+  {% endif %}
+  {% if dismissed_jobs %}
+  <details class="dismissed-section">
+    <summary>Dismissed ({{ dismissed_jobs | length }})</summary>
+    <div class="card-grid">
+      {% for job in dismissed_jobs %}{% with card_mode = "dismissed", uid = "dismissed-" ~ loop.index %}{% include "partials/job_card.html" %}{% endwith %}{% endfor %}
+    </div>
+  </details>
+  {% endif %}
+  {% if pagination and pagination.total_pages > 1 %}
+  <nav class="pagination" aria-label="Board pages">
+    {% if pagination.prev_url %}<a href="{{ pagination.prev_url }}">← Previous</a>
+    {% else %}<span class="page-disabled" aria-hidden="true">← Previous</span>{% endif %}
+    <span class="page-status">Page {{ pagination.page }} of {{ pagination.total_pages }} · {{ pagination.total_matching }} job{{ "" if pagination.total_matching == 1 else "s" }}</span>
+    {% if pagination.next_url %}<a href="{{ pagination.next_url }}">Next →</a>
+    {% else %}<span class="page-disabled" aria-hidden="true">Next →</span>{% endif %}
+  </nav>
+  {% endif %}
+</div>

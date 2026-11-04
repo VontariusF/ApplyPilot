@@ -1,0 +1,84 @@
+{# One job card (spec Jobs panel). card_mode: "main" (default) or
+   "dismissed" (Undo section — View + Undo only, no apply/tailor verbs).
+   The parent loop passes `uid` — loop vars are not visible inside includes. #}
+{% set card_mode = card_mode or "main" %}
+{% set uid = uid | default(card_mode ~ "-0") %}
+<article class="job-card">
+  <header class="card-head">
+    {% if job.score_error %}
+    <span class="badge failed" title="Scoring failed for this listing — see its detail page">score failed</span>
+    {% elif job.fit_score is not none %}
+    <span class="score-pill {{ 'hot' if job.fit_score >= 8 else 'warm' if job.fit_score >= 6 else 'cool' }}">{{ job.fit_score }}/10</span>
+    {% endif %}
+    {% if job.apply_status %}<span class="badge {{ job.apply_status | lower }}">{{ job.apply_status }}</span>{% endif %}
+  </header>
+  <h3 class="card-title"><a href="/jobs/detail?url={{ job.url | urlencode }}">{{ job.title or "(untitled)" }}</a></h3>
+  <p class="card-meta">
+    <span class="card-site">{{ job.site or "Unknown site" }}</span>
+    {% if job.location %}<span> · {{ job.location }}</span>{% endif %}
+    {% if job.is_remote %}<span class="remote-flag" title="(inferred) — guessed from the listing text, not site data">Remote</span>{% endif %}
+  </p>
+  <p class="card-facts">
+    <span class="card-salary">{{ job.salary or "Pay not listed" }}</span>
+    {% if job.discovered_at %}<span class="card-age dim">{{ job.discovered_at | age }}</span>{% endif %}
+  </p>
+  {% set verb = busy.get(job.url) if busy else none %}
+  {% if card_mode == "dismissed" %}
+  <div class="card-actions">
+    <a class="button secondary-button" href="/jobs/detail?url={{ job.url | urlencode }}">View</a>
+    <form hx-post="/jobs/undismiss" hx-target="#jobs-board" hx-swap="outerHTML">
+      {% include "partials/board_view_params.html" %}
+      <input type="hidden" name="url" value="{{ job.url }}">
+      <button type="submit" class="secondary">Undo</button>
+    </form>
+  </div>
+  {% elif verb %}
+  {# A single-job tailor/apply run for this card is executing; the SSE board
+     feed refreshes the board when the run finishes. #}
+  <div class="card-busy">
+    <span class="spinner" role="status" aria-label="working"></span>
+    <span>{{ "Tailoring documents…" if verb == "tailor" else "Submitting your application…" }}</span>
+    <p class="dim">This runs in the background — the card updates automatically when it finishes.</p>
+  </div>
+  {% else %}
+  <div class="card-actions">
+    <a class="button secondary-button" href="/jobs/detail?url={{ job.url | urlencode }}">View</a>
+    {% if job.tailored_resume_path %}
+    {# Confirmation card first: say exactly what will be submitted. #}
+    <input type="checkbox" id="apply-confirm-{{ uid }}" class="modal-toggle">
+    <label for="apply-confirm-{{ uid }}" class="button primary">Apply now</label>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="apply-title-{{ uid }}">
+      <label for="apply-confirm-{{ uid }}" class="modal-backdrop" aria-label="Close"></label>
+      <div class="modal-card">
+        <h3 id="apply-title-{{ uid }}">Apply to {{ job.title or "this job" }}?</h3>
+        <p>An agent fills out the application on the job site and submits it with:</p>
+        <ul class="modal-docs">
+          <li>Your tailored resume</li>
+          {% if job.cover_letter_path %}<li>Your cover letter</li>{% endif %}
+        </ul>
+        <p class="dim">This can take a few minutes. The card updates when the application is submitted.</p>
+        <div class="modal-actions">
+          <form hx-post="/jobs/apply-now" hx-target="#jobs-board" hx-swap="outerHTML">
+            {% include "partials/board_view_params.html" %}
+            <input type="hidden" name="url" value="{{ job.url }}">
+            <button type="submit" class="primary">Confirm &amp; apply</button>
+          </form>
+          <label for="apply-confirm-{{ uid }}" class="button secondary-button">Cancel</label>
+        </div>
+      </div>
+    </div>
+    {% else %}
+    <form hx-post="/jobs/tailor-now" hx-target="#jobs-board" hx-swap="outerHTML">
+      {% include "partials/board_view_params.html" %}
+      <input type="hidden" name="url" value="{{ job.url }}">
+      <button type="submit" class="primary">Tailor now</button>
+    </form>
+    {% endif %}
+    <form hx-post="/jobs/dismiss" hx-target="#jobs-board" hx-swap="outerHTML">
+      {% include "partials/board_view_params.html" %}
+      <input type="hidden" name="url" value="{{ job.url }}">
+      <button type="submit" class="secondary-button">Dismiss</button>
+    </form>
+  </div>
+  {% endif %}
+</article>

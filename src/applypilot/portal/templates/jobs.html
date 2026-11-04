@@ -7,15 +7,23 @@
 </div>
 
 <section class="panel">
-  <form class="filter-bar" hx-get="/jobs/table" hx-target="#jobs-table" hx-trigger="change, submit">
-    <label>Stage
-      <select name="stage">
-        {% for s in stages %}
-        <option value="{{ s }}" {{ 'selected' if s == stage }}>{{ s }}</option>
-        {% endfor %}
+  <nav class="chip-row" aria-label="Board views">
+    {% for chip in chip_links %}
+    <a class="chip {{ 'chip-active' if chip.active }}" href="{{ chip.href }}"
+       {% if chip.active %}aria-pressed="true"{% endif %}>{{ chip.label }}</a>
+    {% endfor %}
+  </nav>
+  <form class="filter-bar" hx-get="/jobs/table" hx-target="#jobs-board" hx-trigger="change, submit">
+    <input type="hidden" name="stage" value="{{ stage }}">
+    <input type="hidden" name="chip" value="{{ view_chip }}">
+    <label>Sort
+      <select name="sort">
+        <option value="best" {{ 'selected' if sort == 'best' }}>Best match</option>
+        <option value="newest" {{ 'selected' if sort == 'newest' }}>Newest</option>
+        <option value="salary" {{ 'selected' if sort == 'salary' }}>Highest salary</option>
       </select>
     </label>
-    <label>Site
+    <label>Job board
       <select name="site">
         <option value="">All</option>
         {% for s in sites %}
@@ -24,29 +32,22 @@
       </select>
     </label>
     <label>Location <input type="text" name="location" value="{{ location }}" placeholder="e.g. Austin"></label>
-    <label>Discovered from <input type="date" name="discovered_from" value="{{ discovered_from }}"></label>
-    <label>Discovered to <input type="date" name="discovered_to" value="{{ discovered_to }}"></label>
-    <label>Apply status
-      <select name="apply_status">
-        <option value="">Any</option>
-        {% for st in statuses %}
-        <option value="{{ st }}" {{ 'selected' if st == apply_status }}>{{ st }}</option>
-        {% endfor %}
-      </select>
+    <label>Found between
+      <input type="date" name="discovered_from" value="{{ discovered_from }}" aria-label="Found from">
+      <input type="date" name="discovered_to" value="{{ discovered_to }}" aria-label="Found until">
     </label>
-    <label>Salary ≥ <input type="number" name="min_salary" min="0" step="1000" value="{{ min_salary or '' }}" placeholder="annual"></label>
-    <label>Fit ≥ <input type="number" name="min_score" min="0" max="10" value="{{ min_score }}"></label>
-    <label>Remote
+    <label>Pay at least <input type="number" name="min_salary" min="0" step="1000" value="{{ min_salary if min_salary is not none else '' }}" placeholder="per year"> /yr</label>
+    <label>Match score at least <input type="number" name="min_score" min="0" max="10" value="{{ min_score }}"> /10</label>
+    <label>Work setup
       <select name="remote">
         <option value="">Any</option>
-        <option value="yes" {{ 'selected' if remote == 'yes' }}>Remote only</option>
-        <option value="no" {{ 'selected' if remote == 'no' }}>Onsite/hybrid</option>
+        <option value="yes" {{ 'selected' if remote == 'yes' }}>Remote</option>
+        <option value="no" {{ 'selected' if remote == 'no' }}>Onsite or hybrid</option>
       </select>
     </label>
-    <label>Limit <input type="number" name="limit" min="1" max="500" value="{{ limit }}"></label>
     <button type="submit">Filter</button>
   </form>
-  <p class="dim">The Remote filter is inferred from listing text, not site data. Dates are when the job was discovered.</p>
+  <p class="dim">Remote is inferred from the listing text, not site data. “Found” dates are when the job was discovered.</p>
   <form method="post" action="/jobs/reset-failed" class="inline-form">
     <button type="submit" class="secondary">Reset failed</button>
   </form>
@@ -61,7 +62,10 @@
   </div>
 </div>
 
-<div id="jobs-table">
-  {% include "partials/jobs_table.html" %}
+<div hx-ext="sse" sse-connect="/events/board">
+  {# The board partial is the swap target for verb POSTs and the SSE
+     board-changed feed; the wrapper owns the connection so it survives
+     swaps. #}
+  {% include "partials/jobs_board.html" %}
 </div>
 {% endblock %}

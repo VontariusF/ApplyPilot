@@ -103,6 +103,27 @@ def parse_salary_lower_bound(salary: str | None) -> float | None:
     return value
 
 
+SORTS = ("best", "newest", "salary")
+
+
+def _view_condition(name: str) -> str:
+    """WHERE condition for a board view stage.
+
+    Pipeline stages come from STAGE_CONDITIONS (untouched). Two read-only
+    extras union existing fields for the board chips — they are views over
+    existing columns, not pipeline stages:
+    - "new": found, no score outcome yet. The literal discovered stage is
+      1=1 (every job is discovered), so its condition cannot distinguish.
+    - "apply_failed": failed apply attempts (apply_status), for the
+      Needs-attention chip.
+    """
+    if name == "new":
+        return "fit_score IS NULL AND score_error IS NULL"
+    if name == "apply_failed":
+        return "apply_status = 'failed'"
+    return STAGE_CONDITIONS.get(name, "1=1")
+
+
 def filtered_jobs(stage: str = "discovered",
                   site: str = "",
                   location: str = "",
@@ -112,7 +133,11 @@ def filtered_jobs(stage: str = "discovered",
                   min_score: int | None = None,
                   min_salary: float | None = None,
                   remote: str = "",
-                  limit: int = 50) -> list[dict]:
+                  dismissed: str = "",
+                  limit: int = 50,
+                  offset: int = 0,
+                  sort: str = "best",
+                  stages: str = "") -> list[dict]:
     """Jobs board rows behind every filter on the filter bar.
 
     Each parameter narrows independently; empty values are no-ops, so a
@@ -126,8 +151,62 @@ def filtered_jobs(stage: str = "discovered",
     are excluded only while min_salary is active. The remote filter uses
     the inferred is_remote column; rows with no inference (NULL) match
     neither "yes" nor "no".
+
+    The dismissed flag (spec Jobs panel) is board curation: the default
+    view (dismissed="") hides dismissed rows, dismissed="only" shows just
+    them (the Undo section). It is not a pipeline stage.
+
+    `stages` (comma-separated) ORs together existing stage conditions —
+    the plain-language chips span several stages ("New" = discovered +
+    pending_detail + enriched) without adding pipeline stages. `sort`
+    orders the board: "best" (fit score), "newest" (discovered date) in
+    SQL, "salary" in Python via the same lower-bound parser the salary
+    filter uses (unparseable rows sort last). `offset` skips into the
+    filtered, sorted list — server-side pagination, applied after the
+    Python-side salary filter so page boundaries stay stable.
     """
-    condition = STAGE_CONDITIONS.get(stage, "1=1")
+    jobs = _select_jobs(stage=stage, stages=stages, site=site, location=location,
+                        discovered_from=discovered_from, discovered_to=discovered_to,
+                        apply_status=apply_status, min_score=min_score,
+                        min_salary=min_salary, remote=remote, dismissed=dismissed,
+                        sort=sort)
+    if limit <= 0:
+        return jobs
+    return jobs[offset:offset + limit]
+
+
+def count_filtered_jobs(stage: str = "discovered",
+                        site: str = "",
+                        location: str = "",
+                        discovered_from: str = "",
+                        discovered_to: str = "",
+                        apply_status: str = "",
+                        min_score: int | None = None,
+                        min_salary: float | None = None,
+                        remote: str = "",
+                        dismissed: str = "",
+                        stages: str = "") -> int:
+    """How many jobs match the board filters, ignoring limit/offset —
+    the pagination count."""
+    return len(_select_jobs(stage=stage, stages=stages, site=site, location=location,
+                            discovered_from=discovered_from, discovered_to=discovered_to,
+                            apply_status=apply_status, min_score=min_score,
+                            min_salary=min_salary, remote=remote, dismissed=dismissed,
+                            sort="best"))
+
+
+def _select_jobs(stage: str, stages: str, site: str, location: str,
+                 discovered_from: str, discovered_to: str, apply_status: str,
+                 min_score: int | None, min_salary: float | None, remote: str,
+                 dismissed: str, sort: str) -> list[dict]:
+    """All jobs matching the board filters, sorted. Shared by
+    filtered_jobs (which slices) and count_filtered_jobs (which counts)."""
+    if stages.strip():
+        names = [s.strip() for s in stages.split(",") if s.strip()]
+        parts = [_view_condition(s) for s in names]
+        condition = "(" + " OR ".join(parts) + ")"
+    else:
+        condition = STAGE_CONDITIONS.get(stage, "1=1")
     where = [condition]
     params: list = []
 
@@ -139,6 +218,11 @@ def filtered_jobs(stage: str = "discovered",
     elif min_score is not None and stage in ("scored", "tailored", "applied"):
         where.append("fit_score >= ?")
         params.append(min_score)
+
+    if dismissed == "only":
+        where.append("dismissed_at IS NOT NULL")
+    else:
+        where.append("dismissed_at IS NULL")
 
     if site:
         where.append("site = ?")
@@ -163,9 +247,16 @@ def filtered_jobs(stage: str = "discovered",
     elif remote == "no":
         where.append("is_remote = 0")
 
+    if sort == "newest":
+        order_by = "ORDER BY discovered_at DESC"
+    elif sort == "salary":
+        order_by = "ORDER BY fit_score DESC NULLS LAST, discovered_at DESC"
+    else:
+        order_by = "ORDER BY fit_score DESC NULLS LAST, discovered_at DESC"
+
     rows = get_connection().execute(
         f"SELECT * FROM jobs WHERE {' AND '.join(where)} "
-        "ORDER BY fit_score DESC NULLS LAST, discovered_at DESC",
+        f"{order_by}",
         params,
     ).fetchall()
     jobs = [dict(r) for r in rows]
@@ -175,7 +266,12 @@ def filtered_jobs(stage: str = "discovered",
                 if (bound := parse_salary_lower_bound(j.get("salary"))) is not None
                 and bound >= min_salary]
 
-    return jobs[:limit] if limit > 0 else jobs
+    if sort == "salary":
+        # Highest lower-bound first; unparseable or missing salary sorts last.
+        jobs.sort(key=lambda j: parse_salary_lower_bound(j.get("salary")) or -1,
+                  reverse=True)
+
+    return jobs
 
 
 def distinct_sites() -> list[str]:
@@ -194,6 +290,22 @@ def distinct_apply_statuses() -> list[str]:
         "WHERE apply_status IS NOT NULL AND apply_status != '' ORDER BY apply_status"
     ).fetchall()
     return [r[0] for r in rows]
+
+
+def dismissed_jobs() -> list[dict]:
+    """All board-dismissed jobs, most recent dismissal first (Undo list)."""
+    rows = get_connection().execute(
+        "SELECT * FROM jobs WHERE dismissed_at IS NOT NULL "
+        "ORDER BY dismissed_at DESC"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def dismissed_count() -> int:
+    """How many jobs sit in the board's collapsed Dismissed section."""
+    return get_connection().execute(
+        "SELECT COUNT(*) FROM jobs WHERE dismissed_at IS NOT NULL"
+    ).fetchone()[0]
 
 
 def count_jobs() -> int:
