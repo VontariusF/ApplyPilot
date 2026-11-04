@@ -258,6 +258,14 @@ _TIMEOUT = 120  # seconds
 # Gemini free tier is 15 RPM = 4s minimum between requests; 10s gives headroom.
 _RATE_LIMIT_BASE_WAIT = 10
 
+# Ceiling on any single rate-limit sleep, including server-suggested
+# Retry-After / x-ratelimit-reset values. A header hint is advisory: many
+# APIs send x-ratelimit-reset as an epoch timestamp (which parses to ~1.7e9
+# seconds) and a misbehaving server can send anything. Honoring a too-short
+# wait costs one extra 429 round-trip on the next retry; honoring a huge one
+# stalls the worker for hours with no way to cancel.
+MAX_RATE_LIMIT_WAIT_SECONDS: float = 120.0
+
 
 _GEMINI_COMPAT_BASE = "https://generativelanguage.googleapis.com/v1beta/openai"
 _GEMINI_NATIVE_BASE = "https://generativelanguage.googleapis.com/v1beta"
@@ -476,6 +484,7 @@ class LLMClient:
                             wait = float(retry_after)
                         except (ValueError, TypeError):
                             wait = _RATE_LIMIT_BASE_WAIT * (2 ** attempt)
+                        wait = min(max(wait, 0.0), MAX_RATE_LIMIT_WAIT_SECONDS)
                     else:
                         wait = min(_RATE_LIMIT_BASE_WAIT * (2 ** attempt), 60)
 

@@ -40,7 +40,7 @@ from applypilot import config
 from applypilot.database import get_connection, init_db
 from applypilot.discovery.filters import location_filters, location_ok as _location_ok
 from applypilot.discovery.workday import strip_html
-from applypilot.llm import mask_key
+from applypilot.llm import MAX_RATE_LIMIT_WAIT_SECONDS, mask_key
 
 log = logging.getLogger(__name__)
 
@@ -377,12 +377,16 @@ class ComposioClient:
         return min(self._backoff_base * (2 ** attempt), 60.0)
 
     def _retry_wait_seconds(self, response: httpx.Response, attempt: int) -> float:
-        """Rate-limit wait: Retry-After, then x-ratelimit-reset (spike §5)."""
+        """Rate-limit wait: Retry-After, then x-ratelimit-reset (spike §5).
+
+        Header hints are clamped to the shared ceiling: x-ratelimit-reset is
+        an epoch timestamp on many APIs, which would otherwise sleep ~1.7e9 s.
+        """
         for header in ("retry-after", "x-ratelimit-reset"):
             value = response.headers.get(header)
             if value:
                 try:
-                    return max(0.0, float(value))
+                    return min(max(0.0, float(value)), MAX_RATE_LIMIT_WAIT_SECONDS)
                 except ValueError:
                     log.debug("Composio %s header not numeric: %r", header, value)
         return self._backoff_seconds(attempt)
