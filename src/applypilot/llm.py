@@ -1,10 +1,17 @@
 """
 Unified LLM client for ApplyPilot.
 
-Auto-detects provider from environment:
-  GEMINI_API_KEY  -> Google Gemini (default: gemini-2.0-flash)
-  OPENAI_API_KEY  -> OpenAI (default: gpt-4o-mini)
-  LLM_URL         -> Local llama.cpp / Ollama compatible endpoint
+Provider resolution order:
+  1. LLM_PROVIDER env var, when set — an explicit, validated choice:
+       gemini -> Google Gemini compat endpoint (requires GEMINI_API_KEY)
+       openai -> OpenAI (requires OPENAI_API_KEY)
+       custom -> any OpenAI-compatible endpoint (requires LLM_URL + LLM_MODEL,
+                 optional LLM_API_KEY for endpoints that need no bearer auth)
+       local  -> local endpoint like Ollama/llama.cpp (requires LLM_URL)
+  2. Legacy env sniffing, when LLM_PROVIDER is unset (unchanged behavior):
+       GEMINI_API_KEY  -> Google Gemini (default: gemini-2.0-flash)
+       OPENAI_API_KEY  -> OpenAI (default: gpt-4o-mini)
+       LLM_URL         -> Local llama.cpp / Ollama compatible endpoint
 
 LLM_MODEL env var overrides the model name for any provider.
 """
@@ -21,12 +28,69 @@ log = logging.getLogger(__name__)
 # Provider detection
 # ---------------------------------------------------------------------------
 
-def _detect_provider() -> tuple[str, str, str]:
+# Explicit LLM_PROVIDER values, in wizard order.
+_VALID_PROVIDERS = ("gemini", "openai", "custom", "local")
+
+# Well-known base URLs used to label providers that were resolved by
+# legacy env sniffing (LLM_PROVIDER unset).
+_OPENAI_BASE = "https://api.openai.com/v1"
+
+
+def _detect_provider() -> tuple[str, str, str | None]:
     """Return (base_url, model, api_key) based on environment variables.
 
     Reads env at call time (not module import time) so that load_env() called
     in _bootstrap() is always visible here.
+
+    An explicit LLM_PROVIDER value is a contract: missing required variables
+    raise a RuntimeError naming the missing variable — never a silent
+    fallthrough to another provider. When LLM_PROVIDER is unset, the legacy
+    env-sniffing order applies unchanged.
     """
+    explicit = os.environ.get("LLM_PROVIDER", "").strip().lower()
+
+    if explicit:
+        if explicit not in _VALID_PROVIDERS:
+            raise RuntimeError(
+                f"LLM_PROVIDER='{explicit}' is not recognized. "
+                f"Valid values: {', '.join(_VALID_PROVIDERS)}."
+            )
+
+        model_override = os.environ.get("LLM_MODEL", "")
+
+        if explicit == "custom":
+            base = os.environ.get("LLM_URL", "")
+            missing = [
+                name
+                for name, value in (("LLM_URL", base), ("LLM_MODEL", model_override))
+                if not value
+            ]
+            if missing:
+                raise RuntimeError(
+                    f"LLM_PROVIDER=custom requires {', '.join(missing)} to be set."
+                )
+            # Bearer auth is optional: llama.cpp-class endpoints need no key.
+            return base.rstrip("/"), model_override, os.environ.get("LLM_API_KEY", "") or None
+
+        if explicit == "local":
+            base = os.environ.get("LLM_URL", "")
+            if not base:
+                raise RuntimeError(
+                    "LLM_PROVIDER=local requires LLM_URL to be set "
+                    "(e.g. http://localhost:11434/v1)."
+                )
+            return base.rstrip("/"), model_override or "local-model", os.environ.get("LLM_API_KEY", "") or None
+
+        # explicit in ("gemini", "openai")
+        key_var = "GEMINI_API_KEY" if explicit == "gemini" else "OPENAI_API_KEY"
+        key = os.environ.get(key_var, "")
+        if not key:
+            raise RuntimeError(f"LLM_PROVIDER={explicit} requires {key_var} to be set.")
+        base = _GEMINI_COMPAT_BASE if explicit == "gemini" else _OPENAI_BASE
+        model = model_override or ("gemini-2.0-flash" if explicit == "gemini" else "gpt-4o-mini")
+        return base, model, key
+
+    # Legacy fallback: env sniffing, unchanged.
     gemini_key = os.environ.get("GEMINI_API_KEY", "")
     openai_key = os.environ.get("OPENAI_API_KEY", "")
     local_url = os.environ.get("LLM_URL", "")
@@ -34,14 +98,14 @@ def _detect_provider() -> tuple[str, str, str]:
 
     if gemini_key and not local_url:
         return (
-            "https://generativelanguage.googleapis.com/v1beta/openai",
+            _GEMINI_COMPAT_BASE,
             model_override or "gemini-2.0-flash",
             gemini_key,
         )
 
     if openai_key and not local_url:
         return (
-            "https://api.openai.com/v1",
+            _OPENAI_BASE,
             model_override or "gpt-4o-mini",
             openai_key,
         )
@@ -57,6 +121,42 @@ def _detect_provider() -> tuple[str, str, str]:
         "No LLM provider configured. "
         "Set GEMINI_API_KEY, OPENAI_API_KEY, or LLM_URL in your environment."
     )
+
+
+def mask_key(api_key: str | None) -> str:
+    """Mask an API key for display: never reveal more than the last 4 characters."""
+    if not api_key:
+        return "(not set)"
+    if len(api_key) <= 4:
+        return "(set)"
+    return f"(ending {api_key[-4:]})"
+
+
+def _provider_label(base_url: str) -> str:
+    """Human-readable provider name for logs and diagnostics."""
+    explicit = os.environ.get("LLM_PROVIDER", "").strip().lower()
+    if explicit:
+        return explicit
+    if base_url == _GEMINI_COMPAT_BASE:
+        return "gemini"
+    if base_url == _OPENAI_BASE:
+        return "openai"
+    return "custom/local"
+
+
+def describe_provider() -> dict[str, str]:
+    """Resolve the active provider for diagnostics (doctor, portal).
+
+    Raises the same RuntimeError as _detect_provider when nothing is
+    configured. The API key is masked — only a last-4 hint is returned.
+    """
+    base_url, model, api_key = _detect_provider()
+    return {
+        "provider": _provider_label(base_url),
+        "base_url": base_url,
+        "model": model,
+        "key_hint": mask_key(api_key),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -84,10 +184,17 @@ class LLMClient:
     for the lifetime of the process.
     """
 
-    def __init__(self, base_url: str, model: str, api_key: str) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        api_key: str | None,
+        provider_name: str = "",
+    ) -> None:
         self.base_url = base_url
         self.model = model
         self.api_key = api_key
+        self.provider_name = provider_name
         self._client = httpx.Client(timeout=_TIMEOUT)
         # True once we've confirmed the native Gemini API works for this model
         self._use_native_gemini: bool = False
@@ -243,10 +350,12 @@ class LLMClient:
                         wait = min(_RATE_LIMIT_BASE_WAIT * (2 ** attempt), 60)
 
                     log.warning(
-                        "LLM rate limited (HTTP %s). Waiting %ds before retry %d/%d. "
-                        "Tip: Gemini free tier = 15 RPM. Consider a paid account "
-                        "or switching to a local model.",
-                        resp.status_code, wait, attempt + 1, _MAX_RETRIES,
+                        "LLM rate limited (HTTP %s) on %s. Waiting %ds before retry %d/%d.",
+                        resp.status_code,
+                        self.provider_name or "LLM endpoint",
+                        wait,
+                        attempt + 1,
+                        _MAX_RETRIES,
                     )
                     time.sleep(wait)
                     continue
@@ -292,6 +401,7 @@ def get_client() -> LLMClient:
     global _instance
     if _instance is None:
         base_url, model, api_key = _detect_provider()
-        log.info("LLM provider: %s  model: %s", base_url, model)
-        _instance = LLMClient(base_url, model, api_key)
+        label = _provider_label(base_url)
+        log.info("LLM provider: %s (%s)  model: %s", label, base_url, model)
+        _instance = LLMClient(base_url, model, api_key, provider_name=label)
     return _instance

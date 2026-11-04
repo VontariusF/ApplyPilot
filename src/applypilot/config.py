@@ -197,6 +197,25 @@ TIER_COMMANDS: dict[int, list[str]] = {
 }
 
 
+# Env vars that signal an LLM is configured under the legacy (LLM_PROVIDER
+# unset) resolution order. Kept here so get_tier/check_tier and the wizard
+# stay in sync with llm.py's legacy fallback.
+_LLM_ENV_KEYS = ("GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_URL")
+
+
+def _llm_configured() -> bool:
+    """True when an LLM endpoint is configured.
+
+    With an explicit LLM_PROVIDER of custom/local, only the endpoint URL
+    counts — never a silent fallthrough to whatever other keys happen to be
+    present (llm.py raises the readable startup error instead).
+    """
+    provider = os.environ.get("LLM_PROVIDER", "").strip().lower()
+    if provider in ("custom", "local"):
+        return bool(os.environ.get("LLM_URL"))
+    return any(os.environ.get(k) for k in _LLM_ENV_KEYS)
+
+
 def get_tier() -> int:
     """Detect the current tier based on available dependencies.
 
@@ -206,8 +225,7 @@ def get_tier() -> int:
     """
     load_env()
 
-    has_llm = any(os.environ.get(k) for k in ("GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_URL"))
-    if not has_llm:
+    if not _llm_configured():
         return 1
 
     has_claude = shutil.which("claude") is not None
@@ -238,8 +256,8 @@ def check_tier(required: int, feature: str) -> None:
     _console = Console(stderr=True)
 
     missing: list[str] = []
-    if required >= 2 and not any(os.environ.get(k) for k in ("GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_URL")):
-        missing.append("LLM API key — run [bold]applypilot init[/bold] or set GEMINI_API_KEY")
+    if required >= 2 and not _llm_configured():
+        missing.append("LLM configuration — run [bold]applypilot init[/bold] or set LLM_PROVIDER / GEMINI_API_KEY")
     if required >= 3:
         if not shutil.which("claude"):
             missing.append("Claude Code CLI — install from [bold]https://claude.ai/code[/bold]")

@@ -233,6 +233,12 @@ def _setup_searches() -> None:
 # AI Features
 # ---------------------------------------------------------------------------
 
+def _write_env_file(path: Path, lines: list[str]) -> None:
+    """Write env lines at mode 0600 — the file holds API keys and passwords."""
+    path.write_text("\n".join(lines), encoding="utf-8")
+    path.chmod(0o600)
+
+
 def _setup_ai_features() -> None:
     """Ask about AI scoring/tailoring — optional LLM configuration."""
     console.print(Panel(
@@ -245,14 +251,20 @@ def _setup_ai_features() -> None:
         console.print("[dim]Discovery-only mode. You can configure AI later with [bold]applypilot init[/bold].[/dim]")
         return
 
-    console.print("Supported providers: [bold]Gemini[/bold] (recommended, free tier), OpenAI, local (Ollama/llama.cpp)")
+    console.print("Supported providers: [bold]Gemini[/bold] (recommended, free tier), OpenAI, custom (OpenAI-compatible URL), local (Ollama/llama.cpp)")
     provider = Prompt.ask(
         "Provider",
-        choices=["gemini", "openai", "local"],
+        choices=["gemini", "openai", "custom", "local"],
         default="gemini",
     )
 
-    env_lines = ["# ApplyPilot configuration", ""]
+    env_lines = [
+        "# ApplyPilot configuration",
+        "",
+        # Explicit selector: llm.py validates the required variables for this
+        # provider at startup instead of sniffing the environment.
+        f"LLM_PROVIDER={provider}",
+    ]
 
     if provider == "gemini":
         api_key = Prompt.ask("Gemini API key (from aistudio.google.com)")
@@ -264,14 +276,26 @@ def _setup_ai_features() -> None:
         model = Prompt.ask("Model", default="gpt-4o-mini")
         env_lines.append(f"OPENAI_API_KEY={api_key}")
         env_lines.append(f"LLM_MODEL={model}")
+    elif provider == "custom":
+        console.print(
+            "[dim]Any endpoint speaking POST /chat/completions works: "
+            "OpenRouter, vLLM, llama.cpp server, Gemini's OpenAI-compat route, ...[/dim]"
+        )
+        url = Prompt.ask("Base URL (e.g. https://openrouter.ai/api/v1)")
+        api_key = Prompt.ask("API key (leave blank if the endpoint needs no auth)", default="")
+        model = Prompt.ask("Model name (the model id the endpoint expects)")
+        env_lines.append(f"LLM_URL={url}")
+        env_lines.append(f"LLM_MODEL={model}")
+        if api_key:
+            env_lines.append(f"LLM_API_KEY={api_key}")
     elif provider == "local":
-        url = Prompt.ask("Local LLM endpoint URL", default="http://localhost:8080/v1")
+        url = Prompt.ask("Local LLM endpoint URL", default="http://localhost:11434/v1")
         model = Prompt.ask("Model name", default="local-model")
         env_lines.append(f"LLM_URL={url}")
         env_lines.append(f"LLM_MODEL={model}")
 
     env_lines.append("")
-    ENV_PATH.write_text("\n".join(env_lines), encoding="utf-8")
+    _write_env_file(ENV_PATH, env_lines)
     console.print(f"[green]AI configuration saved to {ENV_PATH}[/green]")
 
 
