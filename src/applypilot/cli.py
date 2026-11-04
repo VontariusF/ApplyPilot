@@ -495,18 +495,29 @@ def doctor() -> None:
         results.append(("LLM provider", fail_mark, str(exc)))
 
     # --- Tier 3 checks ---
-    # Claude Code CLI (default engine)
-    claude_bin = shutil.which("claude")
-    if claude_bin:
-        results.append(("Claude Code CLI", ok_mark, claude_bin))
+    from applypilot import engine_auth
+
+    # Claude Code CLI (default engine) — install AND sign-in state
+    claude = engine_auth.claude_status()
+    if claude.state == engine_auth.SIGNED_IN:
+        method = f", sign-in method: {claude.auth_method}" if claude.auth_method else ""
+        results.append(("Claude Code CLI", ok_mark, f"{claude.binary} (signed in{method})"))
+    elif claude.state == engine_auth.SIGNED_OUT:
+        note = f"Installed at {claude.binary} but not signed in — run `claude auth login` (needed for auto-apply)"
+        if claude.error:
+            note += f" [{claude.error}]"
+        results.append(("Claude Code CLI", warn_mark, note))
     else:
         results.append(("Claude Code CLI", fail_mark,
                         "Install from https://claude.ai/code (needed for auto-apply)"))
 
-    # Factory Droid CLI (optional second engine)
-    droid_bin = shutil.which("droid")
-    if droid_bin:
-        results.append(("Factory Droid CLI", ok_mark, droid_bin))
+    # Factory Droid CLI (optional second engine) — install + key state
+    droid = engine_auth.droid_status()
+    if droid.state == engine_auth.SIGNED_IN:
+        results.append(("Factory Droid CLI", ok_mark, f"{droid.binary} (FACTORY_API_KEY set)"))
+    elif droid.state == engine_auth.SIGNED_OUT:
+        results.append(("Factory Droid CLI", warn_mark,
+                        f"Installed at {droid.binary}; set FACTORY_API_KEY in .env to use it"))
     else:
         results.append(("Factory Droid CLI", warn_mark,
                         "Install from https://docs.factory.ai/cli (only needed for --engine droid)"))

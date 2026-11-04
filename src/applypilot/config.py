@@ -5,6 +5,8 @@ import platform
 import shutil
 from pathlib import Path
 
+from applypilot import engine_auth
+
 # User data directory — all user-specific files live here
 APP_DIR = Path(os.environ.get("APPLYPILOT_DIR", Path.home() / ".applypilot"))
 
@@ -105,14 +107,36 @@ def _tighten_file(path: Path, mode: int = 0o600) -> None:
         os.chmod(path, mode)
 
 
+def _ensure_secret_parent(path: Path) -> None:
+    """Create path's missing parent directories, each owner-only (S2).
+
+    A fresh install could crash the first secret write (portal token,
+    .env) because the app dir did not exist yet; only directories this
+    call creates are tightened to 0700 — pre-existing ones keep their
+    modes (ensure_dirs still owns ~/.applypilot's mode).
+    """
+    missing: list[Path] = []
+    probe = path.parent
+    while not probe.exists() and probe != probe.parent:  # `!= parent` = filesystem root
+        missing.append(probe)
+        probe = probe.parent
+    for d in reversed(missing):
+        d.mkdir()
+        if os.name == "posix":
+            os.chmod(d, 0o700)
+
+
 def write_secret_text(path: Path, text: str) -> None:
     """Write a secret file (.env, profile.json) owner-only (S2).
 
+    Missing parent directories are created first, owner-only, so a fresh
+    install's first secret write cannot crash on a nonexistent app dir.
     os.open with mode 0o600 avoids a world-readable window between file
     creation and a later chmod. The explicit chmod at the end also tightens
     files that already existed with looser modes (rewrites). chmod is a
     no-op on Windows, which has no POSIX permission bits.
     """
+    _ensure_secret_parent(path)
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(text)
@@ -252,27 +276,56 @@ def _llm_configured() -> bool:
     return any(os.environ.get(k) for k in _LLM_ENV_KEYS)
 
 
+def _engine_gap_messages() -> list[str]:
+    """Human-readable reasons the auto-apply engine is not ready (tier 3).
+
+    Distinguishes the two states the old binary-presence check blurred:
+    an installed-but-unsigned-in CLI, and an installed Droid whose
+    FACTORY_API_KEY is missing. Pure so tests can pin the messages.
+    """
+    claude = engine_auth.claude_status()
+    droid = engine_auth.droid_status()
+    if claude.state == engine_auth.NOT_INSTALLED and droid.state == engine_auth.NOT_INSTALLED:
+        return [
+            "An auto-apply engine CLI — Claude Code ([bold]https://claude.ai/code[/bold], "
+            "default) or Factory Droid ([bold]https://docs.factory.ai/cli[/bold])"
+        ]
+    gaps: list[str] = []
+    if claude.state == engine_auth.SIGNED_OUT:
+        msg = "Claude Code sign-in — the CLI is installed but not signed in; run [bold]claude auth login[/bold]"
+        if claude.error:
+            msg += f" ({claude.error})"
+        gaps.append(msg)
+    if droid.state == engine_auth.SIGNED_OUT:
+        gaps.append("FACTORY_API_KEY — the Droid CLI is installed; add the key to ~/.applypilot/.env to use it")
+    return gaps
+
+
 def get_tier() -> int:
     """Detect the current tier based on available dependencies.
 
     Tier 1 (Discovery):            Python + pip
     Tier 2 (AI Scoring & Tailoring): + LLM API key
-    Tier 3 (Full Auto-Apply):       + Claude Code or Droid CLI + Chrome
+    Tier 3 (Full Auto-Apply):       + a signed-in engine (Claude Code
+                                    authenticated via `claude auth status`,
+                                    or Droid with FACTORY_API_KEY) + Chrome
     """
     load_env()
 
     if not _llm_configured():
         return 1
 
-    has_claude = shutil.which("claude") is not None
-    has_droid = shutil.which("droid") is not None
+    engine_ready = (
+        engine_auth.claude_status().state == engine_auth.SIGNED_IN
+        or engine_auth.droid_status().state == engine_auth.SIGNED_IN
+    )
     try:
         get_chrome_path()
         has_chrome = True
     except FileNotFoundError:
         has_chrome = False
 
-    if (has_claude or has_droid) and has_chrome:
+    if engine_ready and has_chrome:
         return 3
 
     return 2
@@ -296,11 +349,7 @@ def check_tier(required: int, feature: str) -> None:
     if required >= 2 and not _llm_configured():
         missing.append("LLM configuration — run [bold]applypilot init[/bold] or set LLM_PROVIDER / GEMINI_API_KEY")
     if required >= 3:
-        if not shutil.which("claude") and not shutil.which("droid"):
-            missing.append(
-                "An auto-apply engine CLI — Claude Code ([bold]https://claude.ai/code[/bold], "
-                "default) or Factory Droid ([bold]https://docs.factory.ai/cli[/bold])"
-            )
+        missing.extend(_engine_gap_messages())
         try:
             get_chrome_path()
         except FileNotFoundError:
