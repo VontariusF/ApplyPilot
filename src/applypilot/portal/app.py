@@ -25,6 +25,7 @@ from applypilot.apply.launcher import mark_job, reset_failed
 from applypilot.llm import ModelListError, list_models
 from applypilot.portal import auth, queries, runner
 from applypilot.portal import settings as settings_mod
+from applypilot.scoring.scorer import run_scoring
 
 PORTAL_DIR = Path(__file__).parent
 STATIC_FILES = ("htmx.min.js", "ext-sse.js", "portal.css")
@@ -166,6 +167,26 @@ def create_app() -> FastAPI:
     async def jobs_reset_failed():
         reset_failed()
         return RedirectResponse("/jobs", status_code=303)
+
+    @app.post("/jobs/rescore")
+    async def jobs_rescore(request: Request):
+        """Re-score one job inline (a single LLM call) and show the result.
+
+        Scoring failures land in the job's score_error and render as a
+        distinct failed state on the detail page.
+        """
+        form = await request.form()
+        url = str(form.get("url", "")).strip()
+        if not url:
+            return PlainTextResponse("missing url", status_code=400)
+        run_scoring(url=url)
+        return RedirectResponse(f"/jobs/detail?url={url}", status_code=303)
+
+    @app.post("/jobs/rescore-all")
+    async def jobs_rescore_all():
+        """Re-score every described job as a tracked subprocess."""
+        runner.start_run("rescore", {})
+        return RedirectResponse("/runs", status_code=303)
 
     # ------------------------------------------------------------------
     # Runs

@@ -6,11 +6,11 @@ from applypilot.database import get_connection
 # condition registry, plus a row-count subquery for the outcome feed.
 STAGES = (
     "discovered", "pending_detail", "enriched", "pending_score", "scored",
-    "pending_tailor", "tailored", "pending_apply", "applied",
+    "score_failed", "pending_tailor", "tailored", "pending_apply", "applied",
 )
 
 _JOB_LIST_COLUMNS = (
-    "url, title, site, location, salary, fit_score, apply_status, "
+    "url, title, site, location, salary, fit_score, apply_status, score_error, "
     "discovered_at, applied_at, tailored_resume_path, cover_letter_path"
 )
 

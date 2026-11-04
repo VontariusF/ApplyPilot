@@ -144,6 +144,50 @@ def run(
 
 
 @app.command()
+def rescore(
+    url: Optional[str] = typer.Argument(
+        None,
+        help="Re-score this specific job URL (must have a captured description).",
+    ),
+    all_jobs: bool = typer.Option(False, "--all", help="Re-score every job that has a description."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Max jobs to re-score in this pass (with --all)."),
+) -> None:
+    """Re-score jobs against your resume (re-runs the LLM fit score).
+
+    Re-scoring overwrites the stored fit_score; scoring failures are recorded
+    on the job as score_error and shown in the portal.
+    """
+    if not url and not all_jobs:
+        console.print("[red]Nothing to re-score.[/red] Pass a job URL or --all.")
+        raise typer.Exit(code=1)
+    if url and all_jobs:
+        console.print("[red]Pass either a job URL or --all, not both.[/red]")
+        raise typer.Exit(code=1)
+
+    _bootstrap()
+
+    from applypilot.config import check_tier
+
+    check_tier(2, "AI scoring")
+
+    from applypilot.scoring.scorer import run_scoring
+
+    result = run_scoring(limit=limit, rescore=True) if all_jobs else run_scoring(url=url)
+
+    if result["errors"]:
+        console.print(
+            f"[red]{result['errors']} scoring failure(s).[/red] The error is stored per job "
+            "(score_error) and shown on the job detail page in the portal."
+        )
+    console.print(
+        f"[green]Scored {result['scored']} job(s) in {result['elapsed']:.1f}s.[/green]"
+    )
+
+    if result["errors"]:
+        raise typer.Exit(code=1)
+
+
+@app.command()
 def apply(
     limit: Optional[int] = typer.Option(None, "--limit", "-l", help="Max applications to submit."),
     workers: int = typer.Option(1, "--workers", "-w", help="Number of parallel browser workers."),
