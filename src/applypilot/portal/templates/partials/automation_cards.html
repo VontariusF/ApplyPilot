@@ -1,0 +1,98 @@
+{% if error %}<p class="alert error">{{ error }}</p>{% endif %}
+
+<div class="toggle-row">
+  <article class="toggle-card">
+    <div class="toggle-copy">
+      <h2>Auto-apply</h2>
+      <p class="dim">Applies to your best-scoring jobs as they're found, up to your daily cap. No browser windows, no clicking.</p>
+    </div>
+    <div class="toggle-state">
+      <span class="badge {{ 'on' if cfg.auto_apply_enabled else 'off' }}" data-toggle-state="auto_apply_enabled">{{ "On" if cfg.auto_apply_enabled else "Off" }}</span>
+      <form method="post" action="/automation/toggle" class="inline-form">
+        <input type="hidden" name="name" value="auto_apply_enabled">
+        <input type="hidden" name="value" value="{{ 'off' if cfg.auto_apply_enabled else 'on' }}">
+        <button type="submit">{{ "Turn off" if cfg.auto_apply_enabled else "Turn on" }}</button>
+      </form>
+    </div>
+  </article>
+  <article class="toggle-card">
+    <div class="toggle-copy">
+      <h2>Daily schedule</h2>
+      <p class="dim">Runs Find jobs once every day, so fresh matches are waiting when you check in.</p>
+    </div>
+    <div class="toggle-state">
+      <span class="badge {{ 'on' if cfg.schedule_enabled else 'off' }}" data-toggle-state="schedule_enabled">{{ "On" if cfg.schedule_enabled else "Off" }}</span>
+      <form method="post" action="/automation/toggle" class="inline-form">
+        <input type="hidden" name="name" value="schedule_enabled">
+        <input type="hidden" name="value" value="{{ 'off' if cfg.schedule_enabled else 'on' }}">
+        <button type="submit">{{ "Turn off" if cfg.schedule_enabled else "Turn on" }}</button>
+      </form>
+    </div>
+  </article>
+</div>
+
+{% if status.paused %}
+<p class="alert" data-testid="cap-pause">{{ status.pause_reason }}</p>
+{% endif %}
+
+<div class="preset-grid">
+  {% for p in presets %}
+  <article class="preset-card" data-preset="{{ p.name }}">
+    <div class="preset-head">
+      <h2>{{ p.title }}</h2>
+      {% if p.running %}<span class="badge running">Working now</span>{% endif %}
+    </div>
+    <p>{{ p.description }}</p>
+    {% if p.name == "apply_matches" %}
+    <p class="hint" data-testid="cap-usage">{{ status.used_today }} of {{ status.cap }} applications used today.</p>
+    {% endif %}
+    <div class="preset-actions">
+      <form method="post" action="/automation/start" class="inline-form">
+        <input type="hidden" name="preset" value="{{ p.name }}">
+        <button type="submit" data-action="start" {% if p.running %}disabled{% endif %}>Start</button>
+      </form>
+      {% if p.running %}
+      <form method="post" action="/automation/stop" class="inline-form">
+        <input type="hidden" name="preset" value="{{ p.name }}">
+        <button type="submit" class="danger" data-action="stop">Stop</button>
+      </form>
+      {% endif %}
+    </div>
+    {% if p.name != "refresh_scores" %}
+    <details class="adjust">
+      <summary>Adjust</summary>
+      <form method="post" action="/automation/adjust" class="adjust-form">
+        <input type="hidden" name="preset" value="{{ p.name }}">
+        {% if p.name == "find_jobs" %}
+        <label>Results per site
+          <select name="results_level">
+            <option value="low" {{ 'selected' if p.params.results_level == 'low' }}>Low</option>
+            <option value="standard" {{ 'selected' if p.params.results_level == 'standard' }}>Standard</option>
+            <option value="high" {{ 'selected' if p.params.results_level == 'high' }}>High</option>
+          </select>
+        </label>
+        {% else %}
+        <fieldset>
+          <legend>Minimum match score</legend>
+          {% for s in min_score_choices %}
+          <label class="check"><input type="radio" name="min_score" value="{{ s }}" {{ 'checked' if p.params.min_score == s }}> {{ s }}</label>
+          {% endfor %}
+        </fieldset>
+        <fieldset>
+          <legend>Applications per day</legend>
+          {% for c in daily_cap_choices %}
+          <label class="check"><input type="radio" name="daily_cap" value="{{ c }}" {{ 'checked' if p.params.daily_cap == c }}> {{ c }}</label>
+          {% endfor %}
+        </fieldset>
+        <label class="check">
+          <input type="checkbox" name="keep_going" value="1" {{ 'checked' if p.params.keep_going }}>
+          Keep going after the daily cap
+        </label>
+        {% endif %}
+        <button type="submit" class="secondary small">Save</button>
+      </form>
+    </details>
+    {% endif %}
+  </article>
+  {% endfor %}
+</div>

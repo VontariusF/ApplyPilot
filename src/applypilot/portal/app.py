@@ -400,6 +400,67 @@ def create_app() -> FastAPI:
         ))
 
     # ------------------------------------------------------------------
+    # Automation (spec Automation UI): three preset cards, the auto-apply
+    # and schedule toggles, and a push channel for the cards. Every action
+    # goes through automation.start_preset/stop_preset/update — the same
+    # service functions the ask-the-agent panel uses.
+    # ------------------------------------------------------------------
+    @app.get("/automation", response_class=HTMLResponse)
+    async def automation_page(request: Request):
+        return _render(request, "automation.html",
+                       **_automation_context(error=request.query_params.get("error", "")))
+
+    @app.post("/automation/start")
+    async def automation_start(request: Request):
+        form = await request.form()
+        try:
+            automation_mod.start_preset(str(form.get("preset", "")))
+        except runner.ParamError as e:
+            return RedirectResponse(f"/automation?error={quote(str(e))}", status_code=303)
+        return RedirectResponse("/automation", status_code=303)
+
+    @app.post("/automation/stop")
+    async def automation_stop(request: Request):
+        form = await request.form()
+        try:
+            automation_mod.stop_preset(str(form.get("preset", "")))
+        except runner.ParamError as e:
+            return RedirectResponse(f"/automation?error={quote(str(e))}", status_code=303)
+        return RedirectResponse("/automation", status_code=303)
+
+    @app.post("/automation/toggle")
+    async def automation_toggle(request: Request):
+        """Flip a master toggle (auto-apply / daily schedule) on or off."""
+        form = await request.form()
+        name = str(form.get("name", ""))
+        if name not in ("auto_apply_enabled", "schedule_enabled"):
+            return RedirectResponse("/automation?error=Unknown+toggle",
+                                    status_code=303)
+        try:
+            automation_mod.update({name: str(form.get("value", "")) == "on"})
+        except runner.ParamError as e:
+            return RedirectResponse(f"/automation?error={quote(str(e))}", status_code=303)
+        return RedirectResponse("/automation", status_code=303)
+
+    @app.post("/automation/adjust")
+    async def automation_adjust(request: Request):
+        """Save one preset's Adjust disclosure (selects/buttons only)."""
+        form = await request.form()
+        preset = str(form.get("preset", ""))
+        try:
+            updates = _preset_form_updates(preset, form)
+            automation_mod.update({"presets": {preset: updates}})
+        except (runner.ParamError, ValueError) as e:
+            return RedirectResponse(f"/automation?error={quote(str(e))}", status_code=303)
+        return RedirectResponse("/automation", status_code=303)
+
+    @app.get("/automation/stream")
+    async def automation_stream():
+        """Push the automation cards partial when anything on them changes."""
+        baseline = _automation_signature()
+        return EventSourceResponse(_stream_cards(baseline))
+
+    # ------------------------------------------------------------------
     # Agent sign-in (onboarding step 1): the engine gate cards. Status
     # checks run per request; HTMX polls /engine/status every 2s until
     # the signed-in flip or the polling window expires.
@@ -817,6 +878,102 @@ def _chat_html() -> str:
     """Render the chat partial for the SSE stream (no request context)."""
     return templates.get_template("partials/onboarding_chat.html").render(
         **_onboarding_context())
+
+
+# ---------------------------------------------------------------------------
+# Automation page helpers (spec Automation UI)
+# ---------------------------------------------------------------------------
+
+def _preset_form_updates(preset: str, form) -> dict:
+    """The preset dict an Adjust form submits (validated by automation.update).
+
+    Only the fields the UI actually offers; keep_going is a checkbox, so
+    its absence means off.
+    """
+    if preset == "find_jobs":
+        return {"results_level": str(form.get("results_level", ""))}
+    if preset == "apply_matches":
+        raw_score = str(form.get("min_score", "")).strip()
+        raw_cap = str(form.get("daily_cap", "")).strip()
+        try:
+            min_score = int(raw_score) if raw_score else automation_mod.MIN_SCORE_CHOICES[0]
+            daily_cap = int(raw_cap) if raw_cap else automation_mod.DAILY_CAP_CHOICES[1]
+        except ValueError as e:
+            raise runner.ParamError("score and cap must be numbers") from e
+        return {
+            "min_score": min_score,
+            "daily_cap": daily_cap,
+            "keep_going": str(form.get("keep_going", "")).strip() in ("1", "on", "true"),
+        }
+    if preset == "refresh_scores":
+        return {}
+    raise runner.ParamError(f"unknown preset {preset!r}")
+
+
+def _automation_context(error: str = "") -> dict:
+    """Shared context for the automation cards partial (page render, posts, SSE)."""
+    cfg = automation_mod.load()
+    status = automation_mod.cap_status(cfg)
+    active = runner.running_runs()
+    presets = []
+    for name, meta in automation_mod.PRESETS.items():
+        presets.append({
+            "name": name,
+            "kind": meta["kind"],
+            "title": meta["title"],
+            "description": meta["description"],
+            "running": any(r["kind"] == meta["kind"] for r in active),
+            "params": cfg["presets"][name],
+        })
+    return {
+        "cfg": cfg,
+        "status": status,
+        "presets": presets,
+        "error": error,
+        "min_score_choices": automation_mod.MIN_SCORE_CHOICES,
+        "daily_cap_choices": automation_mod.DAILY_CAP_CHOICES,
+        "results_levels": automation_mod.RESULTS_LEVELS,
+    }
+
+
+def _automation_cards_html() -> str:
+    """Render the cards partial for the SSE stream (no request context)."""
+    return templates.get_template("partials/automation_cards.html").render(
+        **_automation_context())
+
+
+def _automation_signature() -> tuple:
+    """Cheap fingerprint of everything the cards display (push on change)."""
+    cfg = automation_mod.load()
+    return (
+        cfg["auto_apply_enabled"],
+        cfg["schedule_enabled"],
+        json.dumps(cfg["presets"], sort_keys=True),
+        json.dumps(cfg["labels"], sort_keys=True),
+        json.dumps(cfg["state"], sort_keys=True),
+        json.dumps(automation_mod.cap_status(cfg), sort_keys=True),
+        tuple(sorted(r["id"] for r in runner.running_runs())),
+    )
+
+
+async def _stream_cards(last: tuple) -> AsyncIterator[dict]:
+    """SSE generator: the automation cards partial, re-pushed on any change.
+
+    Mirrors _stream_chat: the route renders the current surface server-side
+    at connect time and the stream pushes only changes, so a scheduler
+    pause or a run start/end reaches every open Automation page without a
+    reload. Idle-closes a few seconds after the last change.
+    """
+    idle = 0
+    while idle < IDLE_POLLS_BEFORE_CLOSE:
+        await asyncio.sleep(POLL_SECONDS)
+        sig = _automation_signature()
+        if sig != last:
+            last, idle = sig, 0
+            yield {"event": "cards", "data": _automation_cards_html()}
+        else:
+            idle += 1
+    yield {"event": "end", "data": "closed"}
 
 
 def _chat_signature() -> tuple:

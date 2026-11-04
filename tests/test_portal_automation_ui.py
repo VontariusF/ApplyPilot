@@ -1,0 +1,316 @@
+"""Automation page UI tests (spec Automation UI): preset cards, toggles,
+adjust disclosures, the cap-pause surface, and the cards SSE stream.
+
+Route-level companion to test_portal_automation.py (backend): here the
+page and its forms are the subject — every automation action must be
+button-reachable, values the UI offers must persist, and values it never
+offered must be refused.
+"""
+
+import asyncio
+import json
+import sys
+import time
+
+import pytest
+
+from applypilot.database import init_db
+from applypilot.portal import automation, runner
+
+
+def seed_applied(n: int) -> None:
+    """n applications recorded right now (today's UTC calendar day)."""
+    conn = init_db()
+    now = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+    for i in range(n):
+        conn.execute(
+            "INSERT OR REPLACE INTO jobs (url, title, site, description, "
+            "apply_status, applied_at, discovered_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (f"https://jobs.example/applied-{i}", "Pwidget Engineer", "ExampleBoard",
+             "short desc", "applied", now, now),
+        )
+    conn.commit()
+
+
+@pytest.fixture()
+def real_spawns(monkeypatch):
+    """Let presets spawn real subprocesses that exit immediately.
+
+    The test-verified pattern from test_portal_pages.py: route -> real
+    start_run, with the child swapped for `python -c "pass"` so no stage
+    work ever runs.
+    """
+    original = runner.start_run
+
+    def fake_start(kind, params, command=None, emit_jsonl=None):
+        return original(kind, params, command=[sys.executable, "-c", "pass"],
+                        emit_jsonl=False)
+
+    monkeypatch.setattr(runner, "start_run", fake_start)
+
+
+# ---------------------------------------------------------------------------
+# Page render
+# ---------------------------------------------------------------------------
+
+def test_automation_page_renders_preset_cards_and_toggles(portal_client):
+    client, _ = portal_client
+    r = client.get("/automation")
+    assert r.status_code == 200
+    assert r.text.count("<h1>Automation</h1>") == 1
+    for title in ("Find jobs", "Apply to matches", "Refresh scores"):
+        assert title in r.text
+    # Both master toggles: clear off state, button-reachable.
+    assert r.text.count('class="badge off"') == 2
+    assert r.text.count("Turn on") == 2
+    assert 'action="/automation/start"' in r.text
+    assert 'action="/automation/toggle"' in r.text
+
+
+def test_automation_sidebar_entry_and_active_state(portal_client):
+    client, _ = portal_client
+    r = client.get("/automation")
+    assert 'href="/automation"' in r.text
+    assert 'href="/automation" ' in r.text and "aria-current" in r.text
+
+
+def test_refresh_scores_has_no_adjust_disclosure(portal_client):
+    client, _ = portal_client
+    r = client.get("/automation")
+    # Two Adjust disclosures (find_jobs, apply_matches) — refresh_scores has none.
+    assert r.text.count('<details class="adjust">') == 2
+
+
+def test_adjust_disclosures_offer_buttons_and_selects_only(portal_client):
+    client, _ = portal_client
+    r = client.get("/automation")
+    # The Adjust disclosures render selects and radio/checkbox buttons —
+    # never free-text inputs.
+    assert '<select name="results_level">' in r.text
+    for score in ("5", "6", "7", "8", "9"):
+        assert f'name="min_score" value="{score}"' in r.text
+    for cap in ("5", "10", "25"):
+        assert f'name="daily_cap" value="{cap}"' in r.text
+    assert 'name="keep_going"' in r.text
+    assert '<input type="text"' not in r.text.split('class="preset-grid"')[1]
+
+
+def test_both_themes_render_automation_page(portal_client):
+    client, _ = portal_client
+    for theme in ("light", "dark"):
+        r = client.get(f"/automation?theme={theme}")
+        assert r.status_code == 200
+        assert f'data-theme="{theme}"' in r.text
+
+
+# ---------------------------------------------------------------------------
+# Start / stop buttons
+# ---------------------------------------------------------------------------
+
+def test_start_button_runs_the_preset(portal_client, real_spawns):
+    client, _ = portal_client
+    r = client.post("/automation/start", data={"preset": "find_jobs"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/automation"
+    runs = runner.list_runs()
+    assert len(runs) == 1
+    assert runs[0]["kind"] == "pipeline"
+    params = json.loads(runs[0]["params"])
+    assert params["results_per_site"] == "50"  # the "standard" preset default
+
+
+def test_start_button_refuses_when_daily_cap_is_spent(portal_client, real_spawns):
+    seed_applied(10)  # default cap 10
+    client, _ = portal_client
+    r = client.post("/automation/start", data={"preset": "apply_matches"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert "error=" in r.headers["location"]
+    assert runner.list_runs() == []
+
+
+def test_stop_button_cancels_the_preset_run(portal_client, real_spawns):
+    client, _ = portal_client
+    client.post("/automation/start", data={"preset": "find_jobs"},
+                follow_redirects=False)
+    run = runner.list_runs()[0]
+    r = client.post("/automation/stop", data={"preset": "find_jobs"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    deadline = time.time() + 5
+    while time.time() < deadline and runner.get_run(run["id"])["status"] == "running":
+        time.sleep(0.05)
+    assert runner.get_run(run["id"])["status"] == "cancelled"
+
+
+def test_stop_button_without_active_run_redirects_cleanly(portal_client):
+    client, _ = portal_client
+    r = client.post("/automation/stop", data={"preset": "find_jobs"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/automation"
+
+
+def test_stop_rejects_unknown_preset(portal_client):
+    client, _ = portal_client
+    r = client.post("/automation/stop", data={"preset": "nope"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert "error=" in r.headers["location"]
+
+
+# ---------------------------------------------------------------------------
+# Toggles: persist, render, survive a portal restart
+# ---------------------------------------------------------------------------
+
+def test_toggle_button_flips_and_persists(portal_client):
+    client, _ = portal_client
+    r = client.post("/automation/toggle",
+                    data={"name": "auto_apply_enabled", "value": "on"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert automation.load()["auto_apply_enabled"] is True
+    r = client.get("/automation")
+    assert 'data-toggle-state="auto_apply_enabled"' in r.text
+    assert ">On<" in r.text
+
+
+def test_toggles_survive_portal_restart(portal_env, portal_client):
+    """A restart re-runs create_app against the same store; state must hold."""
+    client, _ = portal_client
+    client.post("/automation/toggle",
+                data={"name": "schedule_enabled", "value": "on"},
+                follow_redirects=False)
+    # The "restart": a brand-new app instance + client over the same app dir.
+    from fastapi.testclient import TestClient
+
+    from applypilot.portal.app import create_app
+    app = create_app()
+    fresh = TestClient(app, base_url="http://127.0.0.1")
+    fresh.headers["x-portal-token"] = app.state.token
+    assert automation.load()["schedule_enabled"] is True
+    r = fresh.get("/automation")
+    assert 'data-toggle-state="schedule_enabled"' in r.text
+    # The schedule card's badge is the On one (auto-apply is still Off).
+    assert 'data-toggle-state="schedule_enabled">On<' in r.text
+
+
+def test_toggle_rejects_unknown_name(portal_client):
+    client, _ = portal_client
+    r = client.post("/automation/toggle", data={"name": "evil", "value": "on"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert "error=" in r.headers["location"]
+    assert automation.load()["auto_apply_enabled"] is False
+    assert automation.load()["schedule_enabled"] is False
+
+
+# ---------------------------------------------------------------------------
+# Adjust disclosures
+# ---------------------------------------------------------------------------
+
+def test_adjust_saves_apply_preset_knobs(portal_client):
+    client, _ = portal_client
+    r = client.post("/automation/adjust", data={
+        "preset": "apply_matches", "min_score": "5",
+        "daily_cap": "25", "keep_going": "1",
+    }, follow_redirects=False)
+    assert r.status_code == 303
+    cfg = automation.load()
+    assert cfg["presets"]["apply_matches"] == {
+        "min_score": 5, "daily_cap": 25, "keep_going": True}
+
+
+def test_adjust_saves_find_jobs_results_level(portal_client):
+    client, _ = portal_client
+    r = client.post("/automation/adjust",
+                    data={"preset": "find_jobs", "results_level": "high"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert automation.preset_params(automation.load(), "find_jobs")[
+        "results_per_site"] == "100"
+
+
+def test_adjust_keeps_going_unchecked_means_off(portal_client):
+    client, _ = portal_client
+    client.post("/automation/adjust", data={
+        "preset": "apply_matches", "min_score": "7", "daily_cap": "10",
+    }, follow_redirects=False)
+    assert automation.load()["presets"]["apply_matches"]["keep_going"] is False
+
+
+def test_adjust_rejects_values_the_ui_never_offers(portal_client):
+    client, _ = portal_client
+    for form in ({"preset": "apply_matches", "min_score": "3", "daily_cap": "10"},
+                 {"preset": "apply_matches", "min_score": "7", "daily_cap": "50"},
+                 {"preset": "find_jobs", "results_level": "max"},
+                 {"preset": "bogus"}):
+        r = client.post("/automation/adjust", data=form, follow_redirects=False)
+        assert r.status_code == 303
+        assert "error=" in r.headers["location"]
+    # Nothing was written by any of the rejected forms.
+    assert automation.load()["presets"] == automation.DEFAULTS["presets"]
+
+
+def test_adjust_error_surfaces_on_the_page(portal_client):
+    client, _ = portal_client
+    r = client.post("/automation/adjust",
+                    data={"preset": "apply_matches", "min_score": "3",
+                          "daily_cap": "10"},
+                    follow_redirects=False)
+    assert "min_score" in r.headers["location"]
+    page = client.get(r.headers["location"])
+    assert "min_score" in page.text  # the alert shows the reason
+    assert 'class="alert error"' in page.text
+
+
+# ---------------------------------------------------------------------------
+# Daily-cap pause surface
+# ---------------------------------------------------------------------------
+
+def test_cap_pause_reason_shows_on_the_card(portal_client):
+    """When the cap pauses auto-apply, the persisted reason is visible."""
+    client, _ = portal_client
+    client.post("/automation/toggle",
+                data={"name": "auto_apply_enabled", "value": "on"},
+                follow_redirects=False)
+    seed_applied(10)  # fills the default cap of 10
+    outcome = automation.run_tick()
+    assert outcome["paused"]  # the scheduler recorded the pause + reason
+    r = client.get("/automation")
+    assert "Daily cap reached" in r.text
+    assert "data-testid=\"cap-pause\"" in r.text
+
+
+def test_cap_usage_line_shows_used_of_cap(portal_client):
+    seed_applied(4)
+    client, _ = portal_client
+    r = client.get("/automation")
+    assert "4 of 10 applications used today." in r.text
+
+
+# ---------------------------------------------------------------------------
+# Cards SSE stream
+# ---------------------------------------------------------------------------
+
+def test_cards_stream_pushes_on_change(portal_client):
+    """A change since connect is pushed as the cards partial (push-on-change)."""
+    from applypilot.portal import app as portal_app
+
+    last = portal_app._automation_signature()
+    client, _ = portal_client
+    client.post("/automation/toggle",
+                data={"name": "schedule_enabled", "value": "on"},
+                follow_redirects=False)
+
+    async def first_event():
+        gen = portal_app._stream_cards(last)
+        try:
+            return await gen.__anext__()
+        finally:
+            await gen.aclose()
+
+    event = asyncio.run(first_event())
+    assert event["event"] == "cards"
+    assert 'data-toggle-state="schedule_enabled">On<' in event["data"]

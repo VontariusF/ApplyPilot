@@ -27,6 +27,30 @@ log = logging.getLogger(__name__)
 
 # Find jobs preset: result level -> discovery results per site (spec).
 RESULTS_LEVELS = {"low": 25, "standard": 50, "high": 100}
+# Preset registry shared by the Automation page and the ask-the-agent
+# panel: one plain-language identity per preset, mapped to the run kind
+# it starts. Both surfaces act through start_preset/stop_preset — no
+# other path may spawn automation runs.
+PRESETS: dict = {
+    "find_jobs": {
+        "kind": "pipeline",
+        "title": "Find jobs",
+        "description": "Searches your job sites, scores every listing "
+                       "against your resume, and prepares application documents.",
+    },
+    "apply_matches": {
+        "kind": "apply",
+        "title": "Apply to matches",
+        "description": "Applies to your best-scoring jobs, up to the "
+                       "daily cap you set.",
+    },
+    "refresh_scores": {
+        "kind": "rescore",
+        "title": "Refresh scores",
+        "description": "Re-scores every saved job against your current resume.",
+    },
+}
+
 MIN_SCORE_CHOICES = (5, 6, 7, 8, 9)
 DAILY_CAP_CHOICES = (5, 10, 25)
 
@@ -159,6 +183,8 @@ def start_preset(name: str) -> dict:
     Apply runs get limit = today's remaining cap, so a manual start cannot
     blow past the cap the user set.
     """
+    if name not in PRESETS:
+        raise runner.ParamError(f"unknown preset {name!r}")
     cfg = load()
     if name == "apply_matches":
         status = cap_status(cfg)
@@ -167,10 +193,25 @@ def start_preset(name: str) -> dict:
         params = preset_params(cfg, name)
         params["limit"] = str(status["remaining"])
         return runner.start_run("apply", params)
-    kind = {"find_jobs": "pipeline", "refresh_scores": "rescore"}.get(name)
-    if kind is None:
+    return runner.start_run(PRESETS[name]["kind"], preset_params(cfg, name))
+
+
+def stop_preset(name: str) -> bool:
+    """Stop a preset: cancel its newest active run of the preset's kind.
+
+    Returns True when a run was cancelled, False when nothing was
+    running. Raises runner.ParamError for an unknown preset name.
+    """
+    if name not in PRESETS:
         raise runner.ParamError(f"unknown preset {name!r}")
-    return runner.start_run(kind, preset_params(cfg, name))
+    kind = PRESETS[name]["kind"]
+    active = sorted(
+        (r for r in runner.running_runs() if r["kind"] == kind),
+        key=lambda r: r["started_at"], reverse=True,
+    )
+    if not active:
+        return False
+    return runner.cancel_run(active[0]["id"])
 
 
 # ---------------------------------------------------------------------------

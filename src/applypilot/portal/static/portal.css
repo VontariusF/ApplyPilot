@@ -709,3 +709,86 @@ pre.logview {
   .mark-actions .inline-form { width: 100%; }
   .doc-actions { gap: var(--space-1); }
 }
+
+/* ---------------------------------------------------------------------------
+ * Automation page (spec Automation UI)
+ * ------------------------------------------------------------------------- */
+
+.toggle-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
+}
+
+.toggle-card,
+.preset-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  padding: var(--space-5);
+}
+
+.toggle-card { display: flex; justify-content: space-between; gap: var(--space-4); }
+
+.toggle-card h2 { margin: 0 0 var(--space-1); }
+.toggle-copy p { margin: 0; max-width: 40ch; }
+.toggle-state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-2);
+}
+.toggle-state form { margin: 0; }
+
+.badge.on { background: var(--ok-bg); color: var(--ok); }
+.badge.off { background: var(--surface-2); color: var(--ink-2); }
+
+.preset-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: var(--space-4);
+}
+
+.preset-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.preset-head h2 { margin: 0; }
+.preset-card p { margin: var(--space-2) 0; }
+.preset-actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+.preset-actions .inline-form { margin: 0; }
+
+details.adjust { margin-top: var(--space-3); }
+details.adjust summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  width: fit-content;
+}
+details.adjust[open] summary { margin-bottom: var(--space-3); }
+
+.adjust-form { display: flex; flex-direction: column; gap: var(--space-3); }
+.adjust-form fieldset {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-3);
+  display: flex;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+.adjust-form legend {
+  color: var(--ink-2);
+  font-size: var(--text-xs);
+  padding: 0 var(--space-1);
+}
+.adjust-form fieldset .check { margin: 0; }
+.adjust-form .check { display: inline-flex; align-items: center; gap: var(--space-2); }

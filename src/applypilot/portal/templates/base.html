@@ -16,6 +16,7 @@
         <a href="/jobs" {% if request.url.path.startswith("/jobs") %}class="active" aria-current="page"{% endif %}>Jobs</a>
         <a href="/" {% if request.url.path == "/" %}class="active" aria-current="page"{% endif %}>Dashboard</a>
         <a href="/runs" {% if request.url.path.startswith("/runs") %}class="active" aria-current="page"{% endif %}>Runs</a>
+        <a href="/automation" {% if request.url.path.startswith("/automation") %}class="active" aria-current="page"{% endif %}>Automation</a>
         <a href="/onboarding" {% if request.url.path.startswith("/onboarding") %}class="active" aria-current="page"{% endif %}>Onboarding</a>
         <a href="/engine" {% if request.url.path.startswith("/engine") %}class="active" aria-current="page"{% endif %}>Agent</a>
         <a href="/settings" {% if request.url.path.startswith("/settings") %}class="active" aria-current="page"{% endif %}>Settings</a>
