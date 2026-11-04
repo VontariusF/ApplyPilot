@@ -53,11 +53,24 @@
     {% if droid.state == "signed_in" %}
       <p>Ready — FACTORY_API_KEY is set. The Droid engine can auto-apply.</p>
     {% elif droid.state == "signed_out" %}
-      <p>Droid is installed, but its API key is missing. Droid has no browser sign-in — add
-         <code>FACTORY_API_KEY</code> on the Settings page instead.</p>
+      <p>Droid is installed, but its API key is missing. Droid has no browser sign-in —
+         paste your <code>FACTORY_API_KEY</code> here (get one from the
+         <a href="https://docs.factory.com/droid-exec/overview" rel="noopener noreferrer">Factory settings page</a>)
+         and this gate flips to ready without a restart.</p>
       <div class="gate-actions">
-        <a class="button" href="/settings">Open Settings</a>
+        <form method="post" action="/engine/droid-key" class="inline-form">
+          <input type="password" name="factory_key" placeholder="fk-…" autocomplete="off"
+                 aria-label="Factory API key" required>
+          <button>Save key</button>
+        </form>
+        <a class="button secondary" href="/settings">Open Settings</a>
       </div>
+      <details class="terminal-fallback">
+        <summary>Prefer your terminal? Set it there instead</summary>
+        <pre>export FACTORY_API_KEY=fk-…</pre>
+        <p class="dim">Run this in the shell that started the portal, then restart it —
+           or paste the key above to skip the restart entirely.</p>
+      </details>
     {% else %}
       <p>Not installed. You only need this engine if you prefer it over Claude Code —
          install it from <a href="https://docs.factory.ai/cli">docs.factory.ai/cli</a>.</p>

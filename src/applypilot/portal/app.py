@@ -400,6 +400,28 @@ def create_app() -> FastAPI:
             return RedirectResponse(f"{dest}?login_error={quote(death)}", status_code=303)
         return RedirectResponse(f"{dest}?login=1&t0={time.time():.0f}", status_code=303)
 
+    @app.post("/engine/droid-key")
+    async def engine_droid_key(request: Request):
+        """Droid's sign-in equivalent: one pasted Factory API key.
+
+        Factory's CLI has no login command — the documented headless
+        credential is ``FACTORY_API_KEY``. The key goes through the
+        settings write path (0600 in ~/.applypilot/.env) whose live
+        refresh flips ``droid_status()`` in this same process, so the
+        gate turns ready without a restart. The value is never echoed
+        back — not in redirects, bodies, or logs.
+        """
+        form = await request.form()
+        dest = str(form.get("next", "") or "/engine")
+        if dest not in ("/engine", "/onboarding"):  # allowlisted return paths
+            dest = "/engine"
+        key = str(form.get("factory_key", "") or "").strip()
+        if not key:
+            msg = "Paste your Factory API key — generate one from the Factory settings page."
+            return RedirectResponse(f"{dest}?login_error={quote(msg)}", status_code=303)
+        settings_mod.apply_settings({"FACTORY_API_KEY": key})
+        return RedirectResponse(dest, status_code=303)
+
     # ------------------------------------------------------------------
     # Onboarding (spec deliverable C): one chat surface carries the
     # agent-account gate, the interview, and profile review. Agent turns
