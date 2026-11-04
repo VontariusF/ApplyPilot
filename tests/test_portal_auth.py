@@ -1,10 +1,13 @@
 """Portal security tests: token gate, host check, 0600 token file.
 
-Spec D acceptance: every route 401s without the token; the launch-token
-query parameter converts to a cookie; non-localhost Host headers are
-refused (DNS-rebinding defense).
+Spec D acceptance: every route 401s without the token; the POST /login
+form swaps the submitted token for a cookie; non-localhost Host headers
+are refused (DNS-rebinding defense). Sweep F9 acceptance: the query
+string is not a token source at all, and no access-log line ever
+contains a token value.
 """
 
+import logging
 import os
 import stat
 
@@ -62,14 +65,47 @@ def auth_cookie(client) -> str | None:
     return jar.get("portal_token")
 
 
-def test_query_token_sets_cookie_and_grants_access(anon_client, seeded_profile):
+def test_query_token_is_not_a_token_source(anon_client, seeded_profile):
+    """F9: a ?token= URL grants nothing and sets no cookie — the token
+    must never ride in a URL (access logs, history, Referer)."""
     app = anon_client.app
     r = anon_client.get(f"/?token={app.state.token}", follow_redirects=False)
-    assert r.status_code == 200
-    assert auth_cookie(anon_client)
-    # Subsequent request rides the cookie alone.
-    r2 = anon_client.get("/settings")
-    assert r2.status_code == 200
+    assert r.status_code == 401
+    assert auth_cookie(anon_client) is None
+
+
+def test_access_log_never_contains_token_value(anon_client, seeded_profile, caplog):
+    """F9 acceptance: no access-log line contains a token value —
+    including stale ?token= links, which now 401 but still must not
+    leak the (long-lived) token into uvicorn's access log. TestClient
+    does not run uvicorn, so records are emitted through the
+    uvicorn.access logger exactly as its access formatter would."""
+    app = anon_client.app
+    access_logger = logging.getLogger("uvicorn.access")
+    with caplog.at_level("INFO", logger="uvicorn.access"):
+        access_logger.info('%s - "%s %s HTTP/%s" %d',
+                           "127.0.0.1", "GET", f"/?token={app.state.token}", "1.1", 401)
+        access_logger.info('%s - "%s %s HTTP/%s" %d',
+                           "127.0.0.1", "GET",
+                           f"/jobs?stage=scored&token={app.state.token}&min=5", "1.1", 401)
+        # An authenticated (cookie) request line must also stay clean.
+        access_logger.info('%s - "%s %s HTTP/%s" %d',
+                           "127.0.0.1", "GET", "/?stage=scored", "1.1", 200)
+    logged = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert app.state.token not in logged
+    assert "token=[REDACTED]" in logged
+
+
+def test_redact_token_query_handles_query_and_anchor_params():
+    from applypilot.portal.auth import redact_token_query
+
+    line = '127.0.0.1 - "GET /?token=abc123 HTTP/1.1" 401'
+    assert "abc123" not in redact_token_query(line)
+    assert "token=[REDACTED]" in redact_token_query(line)
+    mid = 'GET /jobs?stage=scored&token=sekret&min=5 HTTP/1.1'
+    assert redact_token_query(mid) == 'GET /jobs?stage=scored&token=[REDACTED]&min=5 HTTP/1.1'
+    # No token parameter: line passes through untouched.
+    assert redact_token_query('GET /settings HTTP/1.1') == 'GET /settings HTTP/1.1'
 
 
 def test_header_token_grants_access(anon_client):
@@ -87,7 +123,8 @@ def test_bearer_token_grants_access(anon_client):
 def test_non_localhost_host_refused(portal_env):
     app = create_app()
     client = TestClient(app, base_url="http://127.0.0.1")
-    r = client.get(f"/?token={app.state.token}", headers={"host": "evil.example.com"})
+    r = client.get("/", headers={"host": "evil.example.com",
+                                 "x-portal-token": app.state.token})
     assert r.status_code == 400
 
 
