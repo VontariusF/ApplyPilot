@@ -113,14 +113,18 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
         conn.execute("BEGIN IMMEDIATE")
 
         if target_url:
-            like = f"%{target_url.split('?')[0].rstrip('/')}%"
+            core = target_url.split("?")[0].rstrip("/")
+            # S7: escape LIKE wildcards (and the escape char itself) so a URL
+            # containing % or _ matches itself only, never unrelated rows.
+            escaped = core.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            like = f"%{escaped}%"
             row = conn.execute("""
                 SELECT url, title, site, application_url, tailored_resume_path,
                        fit_score, location, full_description, cover_letter_path
                 FROM jobs
-                WHERE (url = ? OR application_url = ? OR application_url LIKE ? OR url LIKE ?)
+                WHERE (url = ? OR application_url = ? OR application_url LIKE ? ESCAPE '\\' OR url LIKE ? ESCAPE '\\')
                   AND tailored_resume_path IS NOT NULL
-                  AND apply_status != 'in_progress'
+                  AND (apply_status IS NULL OR apply_status != 'in_progress')
                 LIMIT 1
             """, (target_url, target_url, like, like)).fetchone()
         else:
@@ -246,7 +250,9 @@ def gen_prompt(target_url: str, min_score: int = 7,
     config.ensure_dirs()
     site_slug = (job.get("site") or "unknown")[:20].replace(" ", "_")
     prompt_file = config.LOG_DIR / f"prompt_{site_slug}_{_job_title(job)[:30].replace(' ', '_')}.txt"
-    prompt_file.write_text(prompt, encoding="utf-8")
+    # S1: prompts on disk must never carry credential values (defense-in-depth
+    # on top of build_prompt no longer embedding the password).
+    prompt_file.write_text(prompt_mod.redact_prompt_for_log(prompt), encoding="utf-8")
 
     # Write MCP config for reference
     port = BASE_CDP_PORT + worker_id

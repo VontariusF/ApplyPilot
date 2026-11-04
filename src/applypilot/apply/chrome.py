@@ -101,8 +101,14 @@ def setup_worker_profile(worker_id: int) -> Path:
     """Create an isolated Chrome profile for a worker.
 
     On first run, clones from an existing worker profile (preferred, since
-    it already has session cookies) or from the user's real Chrome profile.
-    Subsequent runs reuse the existing worker profile.
+    it accumulates this worker's own browsing state) or from the user's real
+    Chrome profile. Subsequent runs reuse the existing worker profile.
+
+    S5: the clone carries preferences and bookmarks only -- credential
+    stores (saved passwords, session cookies, autofill data) are excluded,
+    so the automation profile starts with none of the user's credentials.
+    Consequence: workers start logged out of job sites; log into the worker
+    profile manually once if a site requires an authenticated session.
 
     Args:
         worker_id: Numeric worker identifier.
@@ -139,6 +145,18 @@ def setup_worker_profile(worker_id: int) -> Path:
         "SingletonLock", "SingletonSocket", "SingletonCookie",
     }
 
+    # S5: credential stores (saved passwords, session cookies, autofill) must
+    # never ride along with the clone. They live under Default/ and
+    # Default/Network/, so the effective exclusion is copytree's ignore
+    # patterns, which match basenames at any depth. Journal/WAL siblings are
+    # excluded with them -- copying a journal without its DB corrupts both.
+    credential_stores = [
+        "Login Data", "Login Data-journal", "Login Data-wal",
+        "Cookies", "Cookies-journal", "Cookies-wal",
+        "Web Data", "Web Data-journal", "Web Data-wal",
+    ]
+    skip.update(credential_stores)
+
     for item in source.iterdir():
         if item.name in skip:
             continue
@@ -149,6 +167,7 @@ def setup_worker_profile(worker_id: int) -> Path:
                     str(item), str(dst), dirs_exist_ok=True,
                     ignore=shutil.ignore_patterns(
                         "Cache", "Code Cache", "GPUCache", "Service Worker",
+                        *credential_stores,
                     ),
                 )
             else:

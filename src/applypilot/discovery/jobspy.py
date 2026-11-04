@@ -17,6 +17,7 @@ from jobspy import scrape_jobs
 from applypilot import config
 from applypilot.database import get_connection, init_db, store_jobs
 from applypilot.discovery.filters import location_filters, location_ok as _location_ok
+from applypilot.security import redact_proxy
 
 log = logging.getLogger(__name__)
 
@@ -51,8 +52,10 @@ def parse_proxy(proxy_str: str) -> dict:
             "playwright": {"server": f"http://{host}:{port}"},
         }
     else:
+        # S3: never echo the raw proxy -- user:pass would propagate into
+        # stage error strings and console output.
         raise ValueError(
-            f"Proxy format not recognized: {proxy_str}. "
+            f"Proxy format not recognized: {redact_proxy(proxy_str)}. "
             f"Expected: host:port:user:pass or host:port"
         )
 

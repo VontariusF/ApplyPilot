@@ -89,6 +89,34 @@ def ensure_dirs():
     """Create all required directories."""
     for d in [APP_DIR, TAILORED_DIR, COVER_LETTER_DIR, LOG_DIR, CHROME_WORKER_DIR, APPLY_WORKER_DIR]:
         d.mkdir(parents=True, exist_ok=True)
+    # S2: APP_DIR holds secret files (profile.json, .env, prompt logs).
+    # Owner-only traversal keeps every other user off everything under it.
+    if os.name == "posix":
+        os.chmod(APP_DIR, 0o700)
+
+
+def _tighten_file(path: Path, mode: int = 0o600) -> None:
+    """Restrict a secret file to owner-only access (S2). POSIX only.
+
+    Only rewrites the mode when it is actually looser, so a user who chose
+    a stricter mode keeps it.
+    """
+    if os.name == "posix" and path.exists() and path.stat().st_mode & 0o077:
+        os.chmod(path, mode)
+
+
+def write_secret_text(path: Path, text: str) -> None:
+    """Write a secret file (.env, profile.json) owner-only (S2).
+
+    os.open with mode 0o600 avoids a world-readable window between file
+    creation and a later chmod. The explicit chmod at the end also tightens
+    files that already existed with looser modes (rewrites). chmod is a
+    no-op on Windows, which has no POSIX permission bits.
+    """
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+    _tighten_file(path)
 
 
 def load_profile() -> dict:
@@ -98,6 +126,8 @@ def load_profile() -> dict:
         raise FileNotFoundError(
             f"Profile not found at {PROFILE_PATH}. Run `applypilot init` first."
         )
+    # S2: tighten secrets written by older versions with default modes.
+    _tighten_file(PROFILE_PATH)
     return json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
 
 
@@ -175,6 +205,8 @@ def load_env():
     """Load environment variables from ~/.applypilot/.env if it exists."""
     from dotenv import load_dotenv
     if ENV_PATH.exists():
+        # S2: tighten secrets written by older versions with default modes.
+        _tighten_file(ENV_PATH)
         load_dotenv(ENV_PATH)
     # Also try CWD .env as fallback
     load_dotenv()

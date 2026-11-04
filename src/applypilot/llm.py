@@ -253,8 +253,13 @@ class LLMClient:
         resp = self._client.post(
             url,
             json=payload,
-            headers={"Content-Type": "application/json"},
-            params={"key": self.api_key},
+            headers={
+                "Content-Type": "application/json",
+                # S4: the key must ride in a header, never the URL query
+                # string -- httpx exception text (raise_for_status) embeds the
+                # request URL, which then lands in logs and error strings.
+                "x-goog-api-key": self.api_key,
+            },
         )
         resp.raise_for_status()
         data = resp.json()
