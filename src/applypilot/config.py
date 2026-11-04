@@ -245,6 +245,21 @@ DEFAULTS = {
 }
 
 
+def quote_env_value(value: str) -> str:
+    """Quote a value for .env storage the way python-dotenv's own writer
+    (dotenv.main.rewrite) does: single quotes, with backslash and
+    single-quote escaped.
+
+    Unquoted values round-trip wrongly through the parser when they hold
+    ' #', quotes, or trailing backslashes (sweep F11): a key saved as
+    `abc #123` reads back as `abc`. The escape set matches dotenv's
+    single-quoted-value decoder exactly, so anything written here reads
+    back identically through load_dotenv().
+    """
+    escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{escaped}'"
+
+
 def load_env():
     """Load environment variables from ~/.applypilot/.env if it exists."""
     from dotenv import load_dotenv

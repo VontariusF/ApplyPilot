@@ -301,7 +301,7 @@ def test_droid_key_route_saves_and_flips_signed_in(portal_client, monkeypatch):
     from applypilot import config
 
     env_text = config.ENV_PATH.read_text(encoding="utf-8")
-    assert "FACTORY_API_KEY=fk-test-4242-abcd" in env_text  # merged into .env
+    assert "FACTORY_API_KEY='fk-test-4242-abcd'" in env_text  # merged into .env, quoted (F11)
     assert (config.ENV_PATH.stat().st_mode & 0o777) == 0o600
     import os
     assert os.environ["FACTORY_API_KEY"] == FAKE_KEY  # live refresh, no restart

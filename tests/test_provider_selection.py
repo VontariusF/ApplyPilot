@@ -335,10 +335,10 @@ def test_wizard_custom_branch_writes_env_at_0600(monkeypatch, tmp_path):
     wizard._setup_ai_features()
 
     text = env_path.read_text(encoding="utf-8")
-    assert "LLM_PROVIDER=custom" in text
-    assert "LLM_URL=https://openrouter.ai/api/v1/" in text
-    assert "LLM_API_KEY=sk-or-secret-123456" in text
-    assert "LLM_MODEL=google/gemini-2.0-flash" in text
+    assert "LLM_PROVIDER='custom'" in text
+    assert "LLM_URL='https://openrouter.ai/api/v1/'" in text
+    assert "LLM_API_KEY='sk-or-secret-123456'" in text
+    assert "LLM_MODEL='google/gemini-2.0-flash'" in text
     assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
 
 
@@ -353,9 +353,9 @@ def test_wizard_custom_branch_without_key_omits_line(monkeypatch, tmp_path):
     wizard._setup_ai_features()
 
     text = env_path.read_text(encoding="utf-8")
-    assert "LLM_PROVIDER=custom" in text
-    assert "LLM_URL=http://localhost:8080/v1" in text
-    assert "LLM_MODEL=qwen2.5-7b-instruct" in text
+    assert "LLM_PROVIDER='custom'" in text
+    assert "LLM_URL='http://localhost:8080/v1'" in text
+    assert "LLM_MODEL='qwen2.5-7b-instruct'" in text
     assert "LLM_API_KEY" not in text
     assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
 
@@ -368,9 +368,9 @@ def test_wizard_local_branch_writes_env_at_0600(monkeypatch, tmp_path):
     wizard._setup_ai_features()
 
     text = env_path.read_text(encoding="utf-8")
-    assert "LLM_PROVIDER=local" in text
-    assert "LLM_URL=http://localhost:11434/v1" in text
-    assert "LLM_MODEL=local-model" in text
+    assert "LLM_PROVIDER='local'" in text
+    assert "LLM_URL='http://localhost:11434/v1'" in text
+    assert "LLM_MODEL='local-model'" in text
     assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
 
 
@@ -382,9 +382,9 @@ def test_wizard_gemini_branch_still_works(monkeypatch, tmp_path):
     wizard._setup_ai_features()
 
     text = env_path.read_text(encoding="utf-8")
-    assert "LLM_PROVIDER=gemini" in text
-    assert "GEMINI_API_KEY=gk999" in text
-    assert "LLM_MODEL=gemini-2.0-flash" in text
+    assert "LLM_PROVIDER='gemini'" in text
+    assert "GEMINI_API_KEY='gk999'" in text
+    assert "LLM_MODEL='gemini-2.0-flash'" in text
     assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
 
 

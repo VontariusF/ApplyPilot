@@ -70,18 +70,22 @@ def mask(value: str | None) -> str:
 
 
 def read_env_file() -> dict[str, str]:
-    """Parse the current .env into a key/value dict (raw values, in-memory)."""
+    """Parse the current .env into a key/value dict (raw values, in-memory).
+
+    Parsing goes through python-dotenv itself — the same parser
+    config.load_env uses at runtime. F11's bug was two parsers
+    disagreeing on quoting, so the settings display showed a different
+    value than the runs consumed; one parser means one truth.
+    Unparseable lines (dotenv yields None) are skipped, matching the
+    old line-loop's behavior.
+    """
     path = config.ENV_PATH
     if not path.exists():
         return {}
-    values: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, val = line.partition("=")
-        values[key.strip()] = val.strip().strip("'\"")
-    return values
+    from dotenv import dotenv_values  # lazy, matching config.load_env
+
+    raw = dotenv_values(path)
+    return {key: val for key, val in raw.items() if val is not None}
 
 
 def masked_view() -> list[dict]:
@@ -136,7 +140,12 @@ def _effective_changes(
 
 
 def _merge_env_text(text: str, sets: dict[str, str], drops: set[str]) -> str:
-    """Line-based merge: comments, blanks, and unknown keys survive in place."""
+    """Line-based merge: comments, blanks, and unknown keys survive in place.
+
+    Values are written quoted (config.quote_env_value, F11) so special
+    values — ' #', quotes, backslashes — round-trip through both readers
+    instead of silently corrupting on the next load.
+    """
     out: list[str] = []
     seen: set[str] = set()
     for line in text.splitlines():
@@ -147,13 +156,13 @@ def _merge_env_text(text: str, sets: dict[str, str], drops: set[str]) -> str:
             if key in drops:
                 continue
             if key in sets:
-                out.append(f"{key}={sets[key]}")
+                out.append(f"{key}={config.quote_env_value(sets[key])}")
                 seen.add(key)
                 continue
         out.append(line)
     for key, val in sets.items():
         if key not in seen:
-            out.append(f"{key}={val}")
+            out.append(f"{key}={config.quote_env_value(val)}")
     return "\n".join(out).rstrip("\n") + "\n"
 
 

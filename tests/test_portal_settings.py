@@ -107,6 +107,56 @@ def test_redact_for_render_strips_configured_keys(portal_env):
 
 
 # ---------------------------------------------------------------------------
+# .env quoting (sweep F11): special values round-trip through both readers
+# ---------------------------------------------------------------------------
+
+
+def test_quote_env_value_uses_dotenv_canonical_escaping():
+    assert config.quote_env_value("plain") == "'plain'"
+    assert config.quote_env_value("it's") == "'it\\'s'"
+    assert config.quote_env_value("back\\slash") == "'back\\\\slash'"
+    assert config.quote_env_value("") == "''"
+
+
+def test_env_roundtrip_special_chars(portal_env, portal_client, monkeypatch):
+    """F11 acceptance: values holding #, quotes, =, and spaces survive a
+    settings save and read back identically through BOTH readers — the
+    portal's read_env_file and the runtime config.load_env — with no
+    corruption of the stored value."""
+    values = {
+        "LLM_URL": "https://proxy.example/api?team=x #not-a-comment",
+        "LLM_MODEL": "model with 'single' \"double\" quotes",
+        "GEMINI_API_KEY": "key#hash=equals and spaces, ends with backslash\\",
+    }
+    for key in values:
+        monkeypatch.delenv(key, raising=False)
+
+    client, _ = portal_client
+    r = client.post("/settings", data=values, follow_redirects=False)
+    assert r.status_code == 303
+
+    # The file itself stores quoted values, not the raw special chars.
+    raw = config.ENV_PATH.read_text(encoding="utf-8")
+    assert "LLM_URL='https://proxy.example/api?team=x #not-a-comment'" in raw
+
+    # Reader 1: the portal's own parser (now python-dotenv).
+    read_back = settings_mod.read_env_file()
+    for key, expected in values.items():
+        assert read_back[key] == expected, f"read_env_file corrupted {key}"
+
+    # Reader 2: the runtime loader (load_dotenv into os.environ).
+    config.load_env()
+    for key, expected in values.items():
+        assert os.environ[key] == expected, f"load_env corrupted {key}"
+
+    # And a second save (blank secret = keep existing) does not corrupt.
+    client.post("/settings", data={"LLM_PROVIDER": "gemini"})
+    read_again = settings_mod.read_env_file()
+    for key, expected in values.items():
+        assert read_again[key] == expected, f"second save corrupted {key}"
+
+
+# ---------------------------------------------------------------------------
 # Live refresh (S2-2 / sweep F7): a save reaches the running process
 # ---------------------------------------------------------------------------
 

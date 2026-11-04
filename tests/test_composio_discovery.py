@@ -637,9 +637,9 @@ def test_wizard_composio_step_writes_env_and_yaml(app_dir, monkeypatch):
     wizard._setup_composio()
 
     env_text = (app_dir / ".env").read_text(encoding="utf-8")
-    assert "COMPOSIO_API_KEY=ck_wizard_secret_4321" in env_text
-    assert "COMPOSIO_TOOLKITS=web3_career" in env_text
-    assert f"COMPOSIO_USER_ID={DEFAULT_USER_ID}" in env_text
+    assert "COMPOSIO_API_KEY='ck_wizard_secret_4321'" in env_text
+    assert "COMPOSIO_TOOLKITS='web3_career'" in env_text
+    assert f"COMPOSIO_USER_ID='{DEFAULT_USER_ID}'" in env_text
     assert stat.S_IMODE((app_dir / ".env").stat().st_mode) == 0o600
 
     yaml_text = (app_dir / "searches.yaml").read_text(encoding="utf-8")
@@ -652,7 +652,7 @@ def test_wizard_composio_step_writes_env_and_yaml(app_dir, monkeypatch):
     wizard._setup_composio()
 
     env_text = (app_dir / ".env").read_text(encoding="utf-8")
-    assert "COMPOSIO_API_KEY=ck_new_secret_0000" in env_text
+    assert "COMPOSIO_API_KEY='ck_new_secret_0000'" in env_text
     assert "ck_wizard_secret_4321" not in env_text
     yaml_text = (app_dir / "searches.yaml").read_text(encoding="utf-8")
     assert yaml_text.count("composio:") == 1
