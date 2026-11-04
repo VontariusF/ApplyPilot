@@ -98,6 +98,15 @@ def build_apply_command(params: dict) -> list[str]:
     return argv
 
 
+def build_rescore_command(params: dict) -> list[str]:
+    """Validated argv for a rescore-all run (no user params).
+
+    Re-scoring every described job is an LLM call per job, so it runs as a
+    tracked subprocess like pipeline/apply runs (E).
+    """
+    return [sys.executable, "-m", "applypilot", "rescore", "--all"]
+
+
 # ---------------------------------------------------------------------------
 # Registry storage
 # ---------------------------------------------------------------------------
@@ -205,7 +214,7 @@ def start_run(kind: str, params: dict, command: list[str] | None = None,
     """Spawn a run subprocess and record it.
 
     Args:
-        kind: "pipeline" or "apply".
+        kind: "pipeline", "apply", or "rescore".
         params: Form dict; validated by the build functions.
         command: Override argv (tests use a fake entry point). Must never
             come from raw user input — routes pass build_* output.
@@ -217,12 +226,16 @@ def start_run(kind: str, params: dict, command: list[str] | None = None,
     Raises:
         ParamError: on invalid form values.
     """
-    if kind not in ("pipeline", "apply"):
+    if kind not in ("pipeline", "apply", "rescore"):
         raise ParamError(f"unknown run kind {kind!r}")
     init_registry()  # idempotent; start_run must work without prior setup
     if command is None:
-        command = build_pipeline_command(params) if kind == "pipeline" \
-            else build_apply_command(params)
+        if kind == "pipeline":
+            command = build_pipeline_command(params)
+        elif kind == "apply":
+            command = build_apply_command(params)
+        else:
+            command = build_rescore_command(params)
 
     run_id = uuid.uuid4().hex[:12]
     log_path = runs_dir() / f"{run_id}.log"

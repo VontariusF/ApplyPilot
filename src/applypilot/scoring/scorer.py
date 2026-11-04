@@ -70,6 +70,19 @@ def _parse_score_response(response: str) -> dict:
     return {"score": score, "keywords": keywords, "reasoning": reasoning}
 
 
+def _response_is_malformed(response: str, parsed: dict) -> bool:
+    """True when the response is missing a required marker or an usable score.
+
+    A valid response carries all three SCORE:/KEYWORDS:/REASONING: markers and
+    a 1-10 score. Anything else would previously fall through as fit_score=0
+    (missing markers) or the raw response text — both silently persisted.
+    """
+    lowered = response.lower()
+    if not all(marker in lowered for marker in ("score:", "keywords:", "reasoning:")):
+        return True
+    return not 1 <= parsed["score"] <= 10
+
+
 def score_job(resume_text: str, job: dict) -> dict:
     """Score a single job against the resume.
 
@@ -95,28 +108,80 @@ def score_job(resume_text: str, job: dict) -> dict:
     try:
         client = get_client()
         response = client.chat(messages, max_tokens=512, temperature=0.2)
-        return _parse_score_response(response)
     except Exception as e:
         log.error("LLM error scoring job '%s': %s", job.get("title") or "?", e)
-        # B2: mark the result as an error so run_scoring leaves fit_score NULL
-        # (the job stays in the retry queue) instead of persisting 0.
+        # E: errored results get stored as the job's score_error by run_scoring
+        # (fit_score stays NULL) instead of silently re-queueing forever.
         return {"score": 0, "keywords": "", "reasoning": f"LLM error: {e}", "error": str(e)}
 
+    parsed = _parse_score_response(response)
+    if not _response_is_malformed(response, parsed):
+        return parsed
 
-def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
+    # E: malformed responses (missing SCORE:/KEYWORDS:/REASONING:) retry once
+    # with a fresh call before failing visibly, so one bad completion doesn't
+    # poison the job's score state.
+    log.warning(
+        "Malformed score response for '%s' — missing/invalid SCORE:/KEYWORDS:/REASONING:; retrying once",
+        job.get("title") or "?",
+    )
+    try:
+        response = client.chat(messages, max_tokens=512, temperature=0.2)
+    except Exception as e:
+        log.error("LLM error on scoring retry for '%s': %s", job.get("title") or "?", e)
+        return {"score": 0, "keywords": "", "reasoning": f"LLM error on retry: {e}", "error": str(e)}
+
+    parsed = _parse_score_response(response)
+    if not _response_is_malformed(response, parsed):
+        return parsed
+
+    error = (
+        "Malformed LLM response after retry: missing or unreadable "
+        f"SCORE:/KEYWORDS:/REASONING: markers. Response began: {response[:200]!r}"
+    )
+    log.error("Score parse FAILED for '%s': %s", job.get("title") or "?", error)
+    return {"score": 0, "keywords": "", "reasoning": error, "error": error}
+
+
+def _record_score_errors(conn, urls: list[str], error: str) -> None:
+    """Persist a scoring failure per job so the portal can show it (E).
+
+    fit_score stays NULL, so the job remains in the pending-score queue —
+    but 'scoring failed' is now visible and distinguishable from 'not
+    scored yet'. A later successful score clears score_error.
+    """
+    for u in urls:
+        conn.execute("UPDATE jobs SET score_error = ? WHERE url = ?", (error, u))
+    conn.commit()
+
+
+def run_scoring(limit: int = 0, rescore: bool = False, url: str | None = None) -> dict:
     """Score unscored jobs that have full descriptions.
 
     Args:
         limit: Maximum number of jobs to score in this run.
         rescore: If True, re-score all jobs (not just unscored ones).
+        url: Score exactly this job URL (must have a full description),
+            regardless of its current score state.
 
     Returns:
         {"scored": int, "errors": int, "elapsed": float, "distribution": list}
     """
-    resume_text = RESUME_PATH.read_text(encoding="utf-8")
     conn = get_connection()
 
-    if rescore:
+    if url:
+        jobs = conn.execute(
+            "SELECT * FROM jobs WHERE url = ? AND full_description IS NOT NULL", (url,)
+        ).fetchall()
+        if not jobs:
+            # Targeted rescore of a missing or description-less job: fail
+            # visibly (exit code on the CLI, score_error when the row exists).
+            _record_score_errors(
+                conn, [url],
+                f"Rescore target not scoreable: no job with a full description at {url}",
+            )
+            return {"scored": 0, "errors": 1, "elapsed": 0.0, "distribution": []}
+    elif rescore:
         query = "SELECT * FROM jobs WHERE full_description IS NOT NULL"
         if limit > 0:
             query += f" LIMIT {limit}"
@@ -133,6 +198,20 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
         columns = jobs[0].keys()
         jobs = [dict(zip(columns, row)) for row in jobs]
 
+    try:
+        resume_text = RESUME_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        # E: a missing resume is a failed state on every targeted job — not a
+        # silent skip and not a crash. It stays visible until fixed and a
+        # successful score clears it.
+        error = (
+            f"Resume file not found at {RESUME_PATH}. "
+            "Run 'applypilot init' to add your resume, then rescore."
+        )
+        _record_score_errors(conn, [job["url"] for job in jobs], error)
+        log.error("Scoring stopped: %s", error)
+        return {"scored": 0, "errors": len(jobs), "elapsed": 0.0, "distribution": []}
+
     log.info("Scoring %d jobs sequentially...", len(jobs))
     t0 = time.time()
     completed = 0
@@ -146,8 +225,9 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
 
         if result.get("error"):
             errors += 1
-            # B2: errored jobs keep fit_score NULL so they reappear in the
-            # pending-score queue on the next run; the error is logged per job.
+            # E: errored jobs keep fit_score NULL so they reappear in the
+            # pending-score queue; the failure is also stored as score_error
+            # so the portal can distinguish it from 'not scored yet'.
             log.error(
                 "Score FAILED for '%s' (%s): %s",
                 job.get("title") or "?", job["url"], result["error"],
@@ -162,13 +242,18 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
             completed, len(jobs), result["score"], (job.get("title") or "?")[:60],
         )
 
-    # Write scores to DB — only for jobs that scored successfully (B2)
+    # Write scores to DB — successful scores clear any prior score_error (E);
+    # errored jobs get the failure recorded instead.
     now = datetime.now(timezone.utc).isoformat()
     for r in results:
         if r.get("error"):
+            conn.execute(
+                "UPDATE jobs SET score_error = ? WHERE url = ?", (r["error"], r["url"])
+            )
             continue
         conn.execute(
-            "UPDATE jobs SET fit_score = ?, score_reasoning = ?, scored_at = ? WHERE url = ?",
+            "UPDATE jobs SET fit_score = ?, score_reasoning = ?, scored_at = ?, "
+            "score_error = NULL WHERE url = ?",
             (r["score"], f"{r['keywords']}\n{r['reasoning']}", now, r["url"]),
         )
     conn.commit()

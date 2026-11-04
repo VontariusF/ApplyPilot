@@ -9,7 +9,7 @@
         <span class="dim url-cell">{{ job.url[:80] }}</span></td>
       <td>{{ job.site or "—" }}</td>
       <td>{{ job.location or "—" }}</td>
-      <td>{{ job.fit_score if job.fit_score is not none else "—" }}</td>
+      <td>{% if job.score_error %}<span class="badge failed">score failed</span>{% elif job.fit_score is not none %}{{ job.fit_score }}{% else %}—{% endif %}</td>
       <td>{% if job.apply_status %}<span class="badge {{ job.apply_status | lower }}">{{ job.apply_status }}</span>{% else %}—{% endif %}</td>
       <td class="dim">{{ (job.discovered_at or "")[:19] }}</td>
     </tr>

@@ -135,6 +135,7 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             fit_score             INTEGER,
             score_reasoning       TEXT,
             scored_at             TEXT,
+            score_error           TEXT,
 
             -- Tailoring stage (resume tailor)
             tailored_resume_path  TEXT,
@@ -188,6 +189,8 @@ _ALL_COLUMNS: dict[str, str] = {
     "fit_score": "INTEGER",
     "score_reasoning": "TEXT",
     "scored_at": "TEXT",
+    # Last scoring failure, cleared on the next successful score (E).
+    "score_error": "TEXT",
     # Tailoring
     "tailored_resume_path": "TEXT",
     "tailored_at": "TEXT",
@@ -420,6 +423,7 @@ def get_jobs_by_stage(conn: sqlite3.Connection | None = None,
         "enriched": "full_description IS NOT NULL",
         "pending_score": "full_description IS NOT NULL AND fit_score IS NULL",
         "scored": "fit_score IS NOT NULL",
+        "score_failed": "score_error IS NOT NULL",
         "pending_tailor": (
             "fit_score >= ? AND full_description IS NOT NULL "
             "AND tailored_resume_path IS NULL AND COALESCE(tailor_attempts, 0) < 5"

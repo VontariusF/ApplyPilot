@@ -12,7 +12,16 @@
   {% endif %}
 
   <h3>Score reasoning</h3>
-  <pre class="reasoning">{{ job.score_reasoning or "Not scored yet." }}</pre>
+  {% if job.score_error %}
+  <div class="alert error">
+    <strong>Scoring failed:</strong> {{ job.score_error }}
+    <span class="hint">Use Rescore to try again once the problem is fixed.</span>
+  </div>
+  {% elif job.fit_score is none %}
+  <pre class="reasoning">Not scored yet.</pre>
+  {% else %}
+  <pre class="reasoning">{{ job.score_reasoning or "No reasoning captured." }}</pre>
+  {% endif %}
 
   <h3>Documents</h3>
   <ul>
@@ -35,6 +44,10 @@
 
   <h3>Manual override</h3>
   <div class="mark-actions">
+    <form method="post" action="/jobs/rescore" class="inline-form">
+      <input type="hidden" name="url" value="{{ job.url }}">
+      <button type="submit" class="secondary">Rescore</button>
+    </form>
     <form method="post" action="/jobs/mark" class="inline-form">
       <input type="hidden" name="url" value="{{ job.url }}">
       <input type="hidden" name="status" value="applied">
