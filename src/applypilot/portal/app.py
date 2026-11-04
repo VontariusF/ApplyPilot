@@ -8,24 +8,28 @@ store and ~/.applypilot config the CLI uses; long jobs run as subprocesses
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from typing import AsyncIterator
 from urllib.parse import quote
 
 from fastapi import FastAPI, Request
-from fastapi.responses import (FileResponse, HTMLResponse, PlainTextResponse,
-                               RedirectResponse)
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
+                               PlainTextResponse, RedirectResponse)
 from fastapi.templating import Jinja2Templates
 from markupsafe import escape
 from sse_starlette.sse import EventSourceResponse
 
 from applypilot import config, database
 from applypilot.apply.launcher import mark_job, reset_failed
+from applypilot.llm import ModelListError, list_models
 from applypilot.portal import auth, queries, runner
 from applypilot.portal import settings as settings_mod
 
 PORTAL_DIR = Path(__file__).parent
 STATIC_FILES = ("htmx.min.js", "ext-sse.js", "portal.css")
+
+log = logging.getLogger(__name__)
 
 # SSE tuning
 POLL_SECONDS = 0.5
@@ -228,13 +232,27 @@ def create_app() -> FastAPI:
     @app.get("/settings", response_class=HTMLResponse)
     async def settings_page(request: Request, saved: int = 0):
         return _render(request, "settings.html", fields=settings_mod.masked_view(),
-                       saved=bool(saved))
+                       saved=bool(saved), model_choices=_fetch_model_choices())
 
     @app.post("/settings")
     async def settings_save(request: Request):
         form = {k: str(v) for k, v in (await request.form()).items()}
         settings_mod.apply_settings(form)
         return RedirectResponse("/settings?saved=1", status_code=303)
+
+    @app.get("/settings/models")
+    async def settings_models():
+        """Model ids for the settings datalists (Refresh control source).
+
+        Auth-covered by the middleware like every route. A failed lookup
+        returns 502 with an empty list — the browser keeps its existing
+        options and the fields remain free text.
+        """
+        try:
+            models = list_models()
+        except (ModelListError, RuntimeError) as exc:
+            return JSONResponse({"models": [], "error": str(exc)}, status_code=502)
+        return JSONResponse({"models": models})
 
     return app
 
@@ -247,6 +265,19 @@ def _bearer(header: str | None) -> str | None:
     if header and header.lower().startswith("bearer "):
         return header[7:].strip()
     return None
+
+
+def _fetch_model_choices(timeout: float = 2.0) -> list[str]:
+    """Best-effort model list for the settings datalists; [] when unreachable.
+
+    A short timeout keeps page render snappy when a configured endpoint is
+    down; the failure is logged, and the fields degrade to plain text.
+    """
+    try:
+        return list_models(timeout=timeout)
+    except (ModelListError, RuntimeError) as exc:
+        log.warning("Settings page: model list unavailable: %s", exc)
+        return []
 
 
 def _unauthorized(request: Request) -> HTMLResponse:

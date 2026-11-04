@@ -28,8 +28,34 @@ from applypilot.config import (
     ensure_dirs,
     write_secret_text,
 )
+from applypilot.llm import ModelListError, _GEMINI_COMPAT_BASE, _OPENAI_BASE, list_models
 
 console = Console()
+
+
+def _ask_model(label: str, default: str, base_url: str, api_key: str | None) -> str:
+    """Ask for a model id: a validated select from GET {base}/models when
+    reachable, free text with a one-line warning otherwise.
+
+    The list is an affordance, never a gate — endpoints that don't expose
+    /models (or are briefly down) still accept a typed id.
+    """
+    try:
+        choices = list_models(base_url=base_url, api_key=api_key)
+    except ModelListError as exc:
+        console.print(
+            f"[yellow]Could not fetch the model list ({exc}) — "
+            "enter the model id manually.[/yellow]"
+        )
+        return Prompt.ask(label, default=default)
+    if not choices:
+        console.print(
+            "[yellow]The endpoint returned no models — enter the model id manually.[/yellow]"
+        )
+        return Prompt.ask(label, default=default)
+    if default not in choices:
+        default = choices[0]
+    return Prompt.ask(label, choices=choices, default=default)
 
 
 # ---------------------------------------------------------------------------
@@ -268,12 +294,12 @@ def _setup_ai_features() -> None:
 
     if provider == "gemini":
         api_key = Prompt.ask("Gemini API key (from aistudio.google.com)")
-        model = Prompt.ask("Model", default="gemini-2.0-flash")
+        model = _ask_model("Model", "gemini-2.0-flash", _GEMINI_COMPAT_BASE, api_key)
         env_lines.append(f"GEMINI_API_KEY={api_key}")
         env_lines.append(f"LLM_MODEL={model}")
     elif provider == "openai":
         api_key = Prompt.ask("OpenAI API key")
-        model = Prompt.ask("Model", default="gpt-4o-mini")
+        model = _ask_model("Model", "gpt-4o-mini", _OPENAI_BASE, api_key)
         env_lines.append(f"OPENAI_API_KEY={api_key}")
         env_lines.append(f"LLM_MODEL={model}")
     elif provider == "custom":
@@ -283,14 +309,14 @@ def _setup_ai_features() -> None:
         )
         url = Prompt.ask("Base URL (e.g. https://openrouter.ai/api/v1)")
         api_key = Prompt.ask("API key (leave blank if the endpoint needs no auth)", default="")
-        model = Prompt.ask("Model name (the model id the endpoint expects)")
+        model = _ask_model("Model name (the model id the endpoint expects)", "", url, api_key)
         env_lines.append(f"LLM_URL={url}")
         env_lines.append(f"LLM_MODEL={model}")
         if api_key:
             env_lines.append(f"LLM_API_KEY={api_key}")
     elif provider == "local":
         url = Prompt.ask("Local LLM endpoint URL", default="http://localhost:11434/v1")
-        model = Prompt.ask("Model name", default="local-model")
+        model = _ask_model("Model name", "local-model", url, "")
         env_lines.append(f"LLM_URL={url}")
         env_lines.append(f"LLM_MODEL={model}")
 
