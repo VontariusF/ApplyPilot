@@ -644,3 +644,89 @@ def test_ensure_columns_concurrent_migration_no_duplicate_column(
     cols = {row[1] for row in verify.execute("PRAGMA table_info(jobs)").fetchall()}
     verify.close()
     assert "fit_score" in cols and "url" in cols
+
+
+# ---------------------------------------------------------------------------
+# F5 — streaming discover must surface sub-scraper failures
+# ---------------------------------------------------------------------------
+
+
+def _discover_stats(**overrides) -> dict:
+    stats = {"jobspy": "ok", "workday": "ok", "smartextract": "ok", "composio": "ok"}
+    stats.update(overrides)
+    return stats
+
+
+def test_f5_streaming_discover_suberrors_surfaced(monkeypatch):
+    """One failed sub-scraper must land in errors (CLI exits nonzero),
+    not print ok while every source is down."""
+    def _one_failing(**kwargs):
+        return _discover_stats(workday="error: no network")
+
+    monkeypatch.setitem(pipeline._STAGE_RUNNERS, "discover", _one_failing)
+
+    summary = pipeline._run_streaming(["discover"], min_score=7)
+
+    discover = next(s for s in summary["stages"] if s["stage"] == "discover")
+    assert discover["status"] == "partial"
+    assert "discover" in summary["errors"]
+    assert "workday: error: no network" in summary["errors"]["discover"]
+
+
+def test_f5_streaming_discover_all_sources_down(monkeypatch):
+    """All four scrapers failing is an error, never ok."""
+    def _all_failing(**kwargs):
+        return _discover_stats(
+            jobspy="error: dns", workday="error: timeout",
+            smartextract="error: nav", composio="error: 1810",
+        )
+
+    monkeypatch.setitem(pipeline._STAGE_RUNNERS, "discover", _all_failing)
+
+    summary = pipeline._run_streaming(["discover"], min_score=7)
+
+    discover = next(s for s in summary["stages"] if s["stage"] == "discover")
+    assert discover["status"] == "partial"
+    assert "discover" in summary["errors"]
+
+
+def test_f5_streaming_discover_all_ok_reports_ok(monkeypatch):
+    """Healthy discovery must keep its ok summary with an empty errors dict."""
+    def _all_ok(**kwargs):
+        return _discover_stats()
+
+    monkeypatch.setitem(pipeline._STAGE_RUNNERS, "discover", _all_ok)
+
+    summary = pipeline._run_streaming(["discover"], min_score=7)
+
+    discover = next(s for s in summary["stages"] if s["stage"] == "discover")
+    assert discover["status"] == "ok"
+    assert summary["errors"] == {}
+
+
+def test_f5_sequential_discover_suberror_exits_nonzero(monkeypatch):
+    """Sequential mode: sub-scraper failure reaches the errors dict, which
+    drives `applypilot run`'s nonzero exit (cli.py exits 1 on errors)."""
+
+    def _one_failing(**kwargs):
+        return _discover_stats(workday="error: no network")
+
+    monkeypatch.setitem(pipeline._STAGE_RUNNERS, "discover", _one_failing)
+
+    summary = pipeline.run_pipeline(stages=["discover"])
+
+    discover = next(s for s in summary["stages"] if s["stage"] == "discover")
+    assert discover["status"] == "partial"
+    assert summary["errors"]["discover"].startswith("workday: error")
+
+
+def test_f5_discover_helpers():
+    """Pure helper contract: only 'error'-prefixed strings count."""
+    assert pipeline._discover_sub_errors(_discover_stats()) == []
+    assert pipeline._discover_stage_status(_discover_stats()) == "ok"
+    result = _discover_stats(jobspy="error: dns")
+    assert pipeline._discover_sub_errors(result) == ["jobspy: error: dns"]
+    assert pipeline._discover_stage_status(result) == "partial"
+    # the summary "status" key never counts as a sub-scraper error
+    assert pipeline._discover_sub_errors({"status": "partial"}) == []
+

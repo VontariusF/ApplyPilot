@@ -107,7 +107,26 @@ def _run_discover(workers: int = 1) -> dict:
         console.print(f"  [red]Composio error:[/red] {e}")
         stats["composio"] = f"error: {e}"
 
+    stats["status"] = _discover_stage_status(stats)
     return stats
+
+
+def _discover_sub_errors(result: dict) -> list[str]:
+    """Sub-scraper error strings from a ``_run_discover`` result dict."""
+    return [
+        f"{key}: {value}"
+        for key, value in result.items()
+        if key != "status" and isinstance(value, str) and value.startswith("error")
+    ]
+
+
+def _discover_stage_status(result: dict) -> str:
+    """Summary status for a discover result: ok, or partial when any
+    sub-scraper failed. Some scrapers succeeding still counts as partial —
+    a failed source is a real failure the run summary must carry."""
+    if isinstance(result, dict) and _discover_sub_errors(result):
+        return "partial"
+    return "ok"
 
 
 def _run_enrich(workers: int = 1) -> dict:
@@ -393,12 +412,12 @@ def _run_sequential(ordered: list[str], min_score: int, workers: int = 1,
             if isinstance(result, dict):
                 status = result.get("status", "ok")
                 if name == "discover":
-                    sub_errors = [
-                        f"{k}: {v}" for k, v in result.items()
-                        if isinstance(v, str) and v.startswith("error")
-                    ]
+                    sub_errors = _discover_sub_errors(result)
                     if sub_errors:
                         status = "partial"
+                        # Sub-scraper failures are real failures — carry them
+                        # into errors so the CLI exits nonzero (F5).
+                        errors[name] = "; ".join(sub_errors)
 
         except Exception as e:
             elapsed = time.time() - t0
@@ -471,11 +490,20 @@ def _run_streaming(ordered: list[str], min_score: int, workers: int = 1,
     for name in ordered:
         r = all_results.get(name, {"status": "unknown"})
         elapsed = time.time() - start_times.get(name, pipeline_start)
-        status = r.get("status", "ok")
+
+        sub_errors: list[str] = []
+        if name == "discover" and isinstance(r, dict):
+            # F5: a discover result carries per-scraper stats, not a single
+            # status — derive it, so failed scrapers can't hide behind ok.
+            sub_errors = _discover_sub_errors(r)
+
+        status = "partial" if sub_errors else r.get("status", "ok")
 
         results.append({"stage": name, "status": status, "elapsed": elapsed})
         if status not in ("ok", "partial", "skipped"):
             errors[name] = status
+        elif sub_errors:
+            errors[name] = "; ".join(sub_errors)
 
     return {"stages": results, "errors": errors, "elapsed": total_elapsed}
 
