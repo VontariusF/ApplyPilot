@@ -110,3 +110,14 @@ exclude_titles:
   - "clearance required"
   - "TS/SCI"
   - "principal scientist"
+
+# Optional: Composio discovery source (web3.career via the Composio v3.1 API).
+# Requires COMPOSIO_API_KEY in .env and an ACTIVE toolkit connection.
+# composio:
+#   toolkits:
+#     - web3_career
+#   # tag: solidity            # one role/tech tag per search (54-value enum)
+#   # limit: 20                # 1-100 (provider serves newest 100, no pagination)
+#   # country: united-states   # lowercase-hyphenated English country slug
+#   # remote_only: false
+#   # include_description: false  # nulls id/company/tags; dedupe stays on apply_url

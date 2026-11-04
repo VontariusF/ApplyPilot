@@ -404,6 +404,10 @@ def doctor() -> None:
         results.append(("python-jobspy", warn_mark,
                         "pip install --no-deps python-jobspy && pip install pydantic tls-client requests markdownify regex"))
 
+    # Composio (optional discovery source — web3.career)
+    from applypilot.discovery.composio import doctor_row
+    results.append(("Composio discovery", *doctor_row()))
+
     # --- Tier 2 checks ---
     import os
     from applypilot.llm import describe_provider

@@ -31,6 +31,11 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "ruff>=0.1"]
+# Optional tooling for the Composio discovery source. The discovery source
+# itself talks to Composio's REST API over httpx (a base dependency) per the
+# live-verified spike recipe; composio-core ships for users who want the
+# broader SDK for one-off account management.
+composio = ["composio-core>=0.7.21"]
 
 [project.scripts]
 applypilot = "applypilot.cli:app"

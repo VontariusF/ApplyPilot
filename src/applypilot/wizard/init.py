@@ -345,6 +345,81 @@ def _setup_auto_apply() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Composio discovery (optional)
+# ---------------------------------------------------------------------------
+
+def _setup_composio() -> None:
+    """Optional Composio discovery source (e.g. web3.career via Composio)."""
+    console.print(Panel(
+        "[bold]Step 6: Composio discovery (optional)[/bold]\n"
+        "Composio routes extra job sources (web3.career) into discovery.\n"
+        "Needs a Composio API key and an ACTIVE toolkit connection."
+    ))
+
+    if not Confirm.ask("Configure Composio job discovery?", default=False):
+        console.print("[dim]Skipped. Add COMPOSIO_API_KEY to .env later to enable it.[/dim]")
+        return
+
+    from applypilot.discovery.composio import DEFAULT_USER_ID
+
+    # password=True keeps the key out of the scrollback (S1 discipline).
+    api_key = Prompt.ask("Composio API key (backend.composio.dev)", password=True)
+    toolkits_raw = Prompt.ask("Composio toolkits (comma-separated)", default="web3_career")
+    toolkits = ", ".join(t.strip() for t in toolkits_raw.split(",") if t.strip()) or "web3_career"
+    user_id = Prompt.ask(
+        "Composio user id your toolkit connection was created under",
+        default=DEFAULT_USER_ID,
+    )
+
+    # Replace any existing COMPOSIO_* lines so re-runs update values; written
+    # at 0600 like every secret file (S2).
+    existing_lines: list[str] = []
+    if ENV_PATH.exists():
+        existing_lines = [
+            line for line in ENV_PATH.read_text(encoding="utf-8").splitlines()
+            if not line.startswith(
+                ("COMPOSIO_API_KEY=", "COMPOSIO_TOOLKITS=", "COMPOSIO_USER_ID=",
+                 "COMPOSIO_CONNECTED_ACCOUNT_ID=")
+            )
+        ]
+    if not existing_lines:
+        existing_lines = ["# ApplyPilot configuration", ""]
+    env_lines = existing_lines + [
+        f"COMPOSIO_API_KEY={api_key}",
+        f"COMPOSIO_TOOLKITS={toolkits}",
+        f"COMPOSIO_USER_ID={user_id}",
+        "",
+    ]
+    _write_env_file(ENV_PATH, env_lines)
+    console.print(f"[green]Composio configuration saved to {ENV_PATH}[/green]")
+
+    _ensure_composio_block(toolkits)
+
+
+def _ensure_composio_block(toolkits: str) -> None:
+    """Append the composio enablement block to searches.yaml (once)."""
+    if SEARCH_CONFIG_PATH.exists():
+        text = SEARCH_CONFIG_PATH.read_text(encoding="utf-8")
+        if text.lstrip().startswith("composio:") or "\ncomposio:" in text:
+            console.print("[dim]searches.yaml already has a composio block — left unchanged.[/dim]")
+            return
+        base = text.rstrip() + "\n"
+    else:
+        base = "# ApplyPilot search configuration\n"
+
+    lines = [
+        "",
+        "# Composio discovery source (job listings via Composio).",
+        "# Optional search parameters (see README): tag, limit, country,",
+        "# remote_only, include_description.",
+        "composio:",
+        "  toolkits:",
+    ]
+    lines += [f"    - {t.strip()}" for t in toolkits.split(",") if t.strip()]
+    SEARCH_CONFIG_PATH.write_text(base + "\n".join(lines) + "\n", encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
 # Main entry
 # ---------------------------------------------------------------------------
 
@@ -382,6 +457,10 @@ def run_wizard() -> None:
 
     # Step 5: Auto-apply (Claude Code detection)
     _setup_auto_apply()
+    console.print()
+
+    # Step 6: Composio discovery source (optional)
+    _setup_composio()
     console.print()
 
     # Done — show tier status

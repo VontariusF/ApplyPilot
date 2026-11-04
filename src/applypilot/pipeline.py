@@ -35,7 +35,7 @@ console = Console()
 STAGE_ORDER = ("discover", "enrich", "score", "tailor", "cover", "pdf")
 
 STAGE_META: dict[str, dict] = {
-    "discover": {"desc": "Job discovery (JobSpy + Workday + smart extract)"},
+    "discover": {"desc": "Job discovery (JobSpy + Workday + smart extract + Composio)"},
     "enrich":   {"desc": "Detail enrichment (full descriptions + apply URLs)"},
     "score":    {"desc": "LLM scoring (fit 1-10)"},
     "tailor":   {"desc": "Resume tailoring (LLM + validation)"},
@@ -61,7 +61,7 @@ _UPSTREAM: dict[str, str | None] = {
 
 def _run_discover(workers: int = 1) -> dict:
     """Stage: Job discovery — JobSpy, Workday, and smart-extract scrapers."""
-    stats: dict = {"jobspy": None, "workday": None, "smartextract": None}
+    stats: dict = {"jobspy": None, "workday": None, "smartextract": None, "composio": None}
 
     # JobSpy
     console.print("  [cyan]JobSpy full crawl...[/cyan]")
@@ -95,6 +95,17 @@ def _run_discover(workers: int = 1) -> dict:
         log.error("Smart extract failed: %s", e)
         console.print(f"  [red]Smart extract error:[/red] {e}")
         stats["smartextract"] = f"error: {e}"
+
+    # Composio (web3.career via the Composio v3.1 tool API)
+    console.print("  [cyan]Composio (web3.career)...[/cyan]")
+    try:
+        from applypilot.discovery.composio import run_composio_discovery
+        run_composio_discovery()
+        stats["composio"] = "ok"
+    except Exception as e:
+        log.error("Composio discovery failed: %s", e)
+        console.print(f"  [red]Composio error:[/red] {e}")
+        stats["composio"] = f"error: {e}"
 
     return stats
 
