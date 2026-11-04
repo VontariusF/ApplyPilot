@@ -8,6 +8,7 @@ monkeypatch reverts them per test).
 
 import os
 import subprocess
+import time
 
 import pytest
 
@@ -194,6 +195,11 @@ class TestStartLogin:
         assert error is None
         assert seen["argv"] == [CLAUDE_BIN, "auth", "login"]
         assert seen["kwargs"]["stdin"] == subprocess.DEVNULL
+        # Output is captured, not discarded — the OAuth URL the CLI prints
+        # is the headless sign-in path. stderr is merged in: a URL printed
+        # there is still a sign-in link.
+        assert seen["kwargs"]["stdout"] == subprocess.PIPE
+        assert seen["kwargs"]["stderr"] == subprocess.STDOUT
         if os.name != "posix":
             assert seen["kwargs"]["creationflags"] == subprocess.CREATE_NEW_PROCESS_GROUP
 
@@ -215,6 +221,107 @@ class TestLoginInstantDeath:
     def test_exited_process_reports_code(self):
         msg = engine_auth.login_instant_death(_FakeProc(exit_code=3), grace=0.01)
         assert msg is not None and "3" in msg
+
+
+# ---------------------------------------------------------------------------
+# OAuth URL capture — fake binaries reproduce `claude auth login` output
+# ---------------------------------------------------------------------------
+
+def _wait_for(getter, timeout: float = 2.0):
+    """Bounded wait for the capture thread to surface output."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        value = getter()
+        if value:
+            return value
+        time.sleep(0.02)
+    return getter()
+
+
+@pytest.fixture()
+def clean_registry(monkeypatch):
+    """Isolate the most-recent-login slot; monkeypatch restores it at teardown."""
+    monkeypatch.setattr(engine_auth, "_active_login", None)
+
+
+def _fake_claude(tmp_path, script: str):
+    fake = tmp_path / "claude"
+    fake.write_text("#!/bin/sh\n" + script)
+    fake.chmod(0o755)
+    return fake
+
+
+class TestExtractOauthUrl:
+    def test_url_with_query_params(self):
+        text = "Sign in at https://claude.ai/oauth/authorize?code=abc&state=x to continue."
+        assert engine_auth.extract_oauth_url(text) == "https://claude.ai/oauth/authorize?code=abc&state=x"
+
+    def test_bare_url(self):
+        assert engine_auth.extract_oauth_url("https://claude.ai/x\nmore") == "https://claude.ai/x"
+
+    def test_trailing_punctuation_stripped(self):
+        assert engine_auth.extract_oauth_url("Open https://claude.ai/x.") == "https://claude.ai/x"
+
+    def test_first_url_wins(self):
+        text = "banner https://a.example/one then https://b.example/two"
+        assert engine_auth.extract_oauth_url(text) == "https://a.example/one"
+
+    def test_no_url(self):
+        assert engine_auth.extract_oauth_url("nothing here\nreally") is None
+
+    def test_empty(self):
+        assert engine_auth.extract_oauth_url("") is None
+
+
+class TestLoginCapture:
+    def test_url_on_stdout_is_captured(self, tmp_path, monkeypatch, clean_registry):
+        fake = _fake_claude(tmp_path, "echo 'claude v1.2.3'\n"
+                                    "echo 'Browser did not open? Use the url below to log in.'\n"
+                                    "echo 'https://claude.ai/oauth/authorize?code=abc123&state=xyz'\n")
+        patch_which(monkeypatch, {"claude": str(fake)})
+        login, error = engine_auth.start_login()
+        assert error is None
+        url = _wait_for(lambda: login.oauth_url())
+        assert url == "https://claude.ai/oauth/authorize?code=abc123&state=xyz"
+        login.proc.wait(timeout=5)
+
+    def test_url_on_stderr_is_captured_too(self, tmp_path, monkeypatch, clean_registry):
+        fake = _fake_claude(tmp_path, "echo 'https://claude.ai/oauth/authorize?code=err-path' >&2\n"
+                                      "exec sleep 30\n")
+        patch_which(monkeypatch, {"claude": str(fake)})
+        login, _ = engine_auth.start_login()
+        url = _wait_for(lambda: login.oauth_url())
+        assert url == "https://claude.ai/oauth/authorize?code=err-path"
+        login.proc.kill()  # keep the sleep from outliving the test
+        login.proc.wait(timeout=5)
+
+    def test_instant_death_includes_captured_output(self, tmp_path, monkeypatch, clean_registry):
+        fake = _fake_claude(tmp_path, "echo 'error: unrecognized subcommand' >&2\nexit 2\n")
+        patch_which(monkeypatch, {"claude": str(fake)})
+        login, _ = engine_auth.start_login()
+        _wait_for(lambda: login.text().strip() or None)
+        message = engine_auth.login_instant_death(login, grace=1.0)
+        assert message is not None
+        assert "code 2" in message
+        assert "unrecognized subcommand" in message
+
+    def test_registry_tracks_latest_spawn(self, tmp_path, monkeypatch, clean_registry):
+        fake = _fake_claude(tmp_path, "exec sleep 30\n")
+        patch_which(monkeypatch, {"claude": str(fake)})
+        first, _ = engine_auth.start_login()
+        second, _ = engine_auth.start_login()
+        assert engine_auth.active_login() is second
+        assert engine_auth.active_login() is not first
+        for login in (first, second):
+            login.proc.kill()
+            login.proc.wait(timeout=5)
+
+    def test_missing_binary_leaves_registry_untouched(self, monkeypatch, clean_registry):
+        patch_which(monkeypatch, {"claude": None})
+        proc, error = engine_auth.start_login()
+        assert proc is None
+        assert error is not None and "not installed" in error
+        assert engine_auth.active_login() is None
 
 
 # ---------------------------------------------------------------------------
