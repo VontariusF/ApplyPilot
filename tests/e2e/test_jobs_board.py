@@ -128,15 +128,15 @@ def test_dismiss_then_undo_roundtrip(
         async with chromium() as page:
             await login(page, base, portal_server.token)
             await page.goto(f"{base}/jobs")
-            await page.get_by_role("button", name="Dismiss").click()
             board = page.locator("#jobs-board")
-            await board.get_by_text("Dismissed (1)").wait_for()
-            assert await board.locator(".dismissed-section .job-card").count() == 1
-            # Undo brings the job back to the main grid.
-            await page.locator(".dismissed-section summary").click()
+            await page.get_by_role("button", name="Dismiss").click()
+            await board.locator(".dismissed-section .job-card").wait_for()
+            # Undo restores the card to the MAIN grid — scope by direct child:
+            # the dismissed section nests its own .card-grid.
+            await board.locator(".dismissed-section summary").click()
             await page.get_by_role("button", name="Undo").click()
-            await page.wait_for_selector("#jobs-board .card-grid .job-card")
-            assert await board.get_by_text("Dismissed").count() == 0
+            await page.wait_for_selector("#jobs-board > .card-grid .job-card")
+            assert await board.locator(".dismissed-section").count() == 0
 
     run_journey(journey())
 
