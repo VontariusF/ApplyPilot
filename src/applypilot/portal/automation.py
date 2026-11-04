@@ -157,6 +157,28 @@ def run_kind_label(kind: str) -> str:
     return load()["labels"].get(kind, kind)
 
 
+def run_summary(run: dict) -> str:
+    """Plain-language one-line summary of a run row (no jargon).
+
+    Spec: no model ids, workers, headless, or raw stage names outside
+    the Adjust disclosures — run rows speak the preset language. Built
+    on the stored kind label, with a qualifier only where it adds
+    information (one-job apply, keep-going apply).
+    """
+    kind = run["kind"]
+    try:
+        params = json.loads(run["params"]) if run["params"] else {}
+    except (TypeError, json.JSONDecodeError):
+        params = {}
+    label = run_kind_label(kind)
+    if kind == "apply":
+        if params.get("url"):
+            return f"{label} — one job"
+        if params.get("continuous"):
+            return f"{label} — keeps going"
+    return label
+
+
 # ---------------------------------------------------------------------------
 # Presets -> runner params
 # ---------------------------------------------------------------------------

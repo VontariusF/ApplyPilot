@@ -14,7 +14,7 @@ import time
 
 import pytest
 
-from applypilot.database import init_db
+from applypilot.database import get_connection, init_db
 from applypilot.portal import automation, runner
 
 
@@ -30,6 +30,21 @@ def seed_applied(n: int) -> None:
              "short desc", "applied", now, now),
         )
     conn.commit()
+
+
+def seed_run(run_id: str, kind: str, params: dict | None = None,
+             status: str = "running", pid: int | None = None) -> dict:
+    """Insert a registry row directly (no subprocess)."""
+    runner.init_registry()
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO runs (id, kind, params, status, pid, started_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (run_id, kind, json.dumps(params or {}), status, pid,
+         time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())),
+    )
+    conn.commit()
+    return runner.get_run(run_id)
 
 
 @pytest.fixture()
@@ -314,3 +329,68 @@ def test_cards_stream_pushes_on_change(portal_client):
     event = asyncio.run(first_event())
     assert event["event"] == "cards"
     assert 'data-toggle-state="schedule_enabled">On<' in event["data"]
+
+
+# ---------------------------------------------------------------------------
+# Run rows: plain language everywhere
+# ---------------------------------------------------------------------------
+
+def test_run_rows_use_plain_language_only(portal_client):
+    """No kind names, model ids, workers, or headless in run rows."""
+    seed_run("r1", "pipeline", {"min_score": "7", "workers": "2"}, status="failed")
+    seed_run("r2", "apply",
+             {"model": "haiku", "workers": "2", "headless": "1",
+              "min_score": "7"}, status="failed")
+    seed_run("r3", "rescore", {}, status="completed")
+    client, _ = portal_client
+    r = client.get("/runs")
+    assert "Finding jobs" in r.text
+    assert "Applying" in r.text
+    assert "Refreshing scores" in r.text
+    # No jargon anywhere on the page.
+    for jargon in ("pipeline", "rescore", "haiku", "workers", "headless",
+                   "min_score", "continuous"):
+        assert jargon not in r.text
+
+
+def test_run_summary_qualifies_one_job_and_keep_going(portal_client):
+    seed_run("r4", "apply", {"url": "https://jobs.example/posting-1"},
+             status="failed")
+    seed_run("r5", "apply", {"continuous": "1"}, status="failed")
+    client, _ = portal_client
+    r = client.get("/runs")
+    assert "Applying — one job" in r.text
+    assert "Applying — keeps going" in r.text
+
+
+def test_retry_button_only_on_failed_runs(portal_client):
+    seed_run("r6", "pipeline", {}, status="failed")
+    seed_run("r7", "apply", {}, status="running", pid=1)
+    seed_run("r8", "rescore", {}, status="completed")
+    client, _ = portal_client
+    r = client.get("/runs")
+    assert r.text.count('action="/runs/retry/r6"') == 1
+    assert 'action="/runs/retry/r7"' not in r.text
+    assert 'action="/runs/retry/r8"' not in r.text
+    assert 'action="/runs/cancel/r7"' in r.text  # cancel stays as-is
+
+
+def test_retry_button_replays_failed_run(portal_client, real_spawns):
+    seed_run("r9", "apply", {"min_score": "7", "model": "haiku"},
+             status="failed")
+    client, _ = portal_client
+    r = client.post("/runs/retry/r9", follow_redirects=False)
+    assert r.status_code == 303
+    retried = [x for x in runner.list_runs() if x["id"] != "r9"][0]
+    assert retried["kind"] == "apply"
+    assert json.loads(retried["params"]) == {"min_score": "7", "model": "haiku"}
+
+
+def test_retry_error_surfaces_on_runs_page(portal_client):
+    seed_run("r10", "rescore", {}, status="completed")
+    client, _ = portal_client
+    r = client.post("/runs/retry/r10", follow_redirects=False)
+    assert r.status_code == 303
+    assert "error=" in r.headers["location"]
+    page = client.get(r.headers["location"])
+    assert "only failed runs can be retried" in page.text

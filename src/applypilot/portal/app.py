@@ -87,7 +87,7 @@ def create_app() -> FastAPI:
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.state.token = token
-    templates.env.globals["params_summary"] = _params_summary
+    templates.env.globals["run_summary"] = automation_mod.run_summary
 
     # ------------------------------------------------------------------
     # Auth middleware: every route requires the token; non-localhost Host
@@ -791,17 +791,6 @@ def _fetch_model_choices(timeout: float = 2.0) -> list[str]:
 def _unauthorized(request: Request) -> HTMLResponse:
     """The 401 body doubles as the token login form for browsers."""
     return _render(request, "login.html", status_code=401)
-
-
-def _params_summary(params_json: str) -> str:
-    """Compact human string of a run's stored params for the table."""
-    try:
-        params = json.loads(params_json)
-    except (TypeError, json.JSONDecodeError):
-        return params_json or ""
-    if not params:
-        return "—"
-    return ", ".join(f"{k}={v}" for k, v in params.items())
 
 
 def _active_stream_run() -> dict | None:
