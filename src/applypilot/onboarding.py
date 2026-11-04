@@ -616,12 +616,18 @@ def _after_reply(state: InterviewState, reply: str) -> None:
 
 
 def start_interview(mode: str) -> InterviewState:
-    """Open a fresh interview on the chosen backend and run the kickoff turn.
+    """Open (or resume) an interview on the chosen backend.
 
     mode "claude" requires the signed-in gate (D1); "llm" is the explicit
     skip to provider-key mode. The gate phase never reaches here unlocked.
+    An existing live state resumes as-is — two tabs (or the post-sign-in
+    refresh) must not wipe an interview in progress; only a cleared state
+    (first run, or after redo_interview) starts fresh.
     """
     with _STATE_LOCK:
+        existing = load_state()
+        if existing is not None:
+            return existing
         ready = readiness()
         if mode == "claude":
             if not ready["can_start_claude"]:

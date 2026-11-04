@@ -8,7 +8,6 @@ and drives the multi-turn state transitions on top of it.
 """
 
 import json
-import os
 import stat
 
 import pytest

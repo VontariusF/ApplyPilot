@@ -35,7 +35,7 @@ def portal_resume() -> object:
     return config.APP_DIR / "tailored_resumes" / "resume.txt"
 
 
-def test_dashboard_renders_stage_counters(portal_client):
+def test_dashboard_renders_stage_counters(portal_client, seeded_profile):
     client, _ = portal_client
     seed_job(applied_at=datetime.now(timezone.utc).isoformat(),
              apply_status="applied")
@@ -45,11 +45,19 @@ def test_dashboard_renders_stage_counters(portal_client):
     assert "Score distribution" in r.text
 
 
-def test_dashboard_empty_state(portal_client):
+def test_dashboard_empty_state(portal_client, seeded_profile):
     client, _ = portal_client
     r = client.get("/")
     assert r.status_code == 200
     assert "No apply outcomes yet" in r.text
+
+
+def test_dashboard_redirects_to_onboarding_without_profile(portal_client):
+    """Fresh store: onboarding is the front door (spec journey step 1)."""
+    client, _ = portal_client
+    r = client.get("/", follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/onboarding"
 
 
 def test_jobs_page_filters_by_stage(portal_client):

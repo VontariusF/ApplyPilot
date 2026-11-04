@@ -99,9 +99,31 @@ def portal_client(portal_env, monkeypatch):
     # Speed up SSE idle-close in tests (generators read these at runtime).
     from applypilot.portal import app as portal_app_module
     monkeypatch.setattr(portal_app_module, "POLL_SECONDS", 0.01)
+    monkeypatch.setattr(portal_app_module, "CHAT_POLL_SECONDS", 0.01)
 
     app = create_app()
     client = TestClient(app, base_url="http://127.0.0.1")
     client.headers["x-portal-token"] = app.state.token
     yield client, app
+
+
+def write_profile(profile: dict | None = None):
+    """Seed a minimal profile.json (the onboarding-complete marker)."""
+    import json
+
+    from applypilot import config, onboarding
+
+    if profile is None:
+        profile, _ = onboarding.normalize_profile(
+            {"_applypilot_profile": {"personal": {"full_name": "Test Person",
+                                                  "email": "test@example.com"}},
+             "_applypilot_search": {}})
+    config.write_secret_text(config.PROFILE_PATH, json.dumps(profile))
+    return profile
+
+
+@pytest.fixture()
+def seeded_profile(app_dir):
+    """A store that has completed onboarding (dashboard reachable)."""
+    return write_profile()
 

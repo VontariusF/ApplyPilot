@@ -190,3 +190,45 @@ pre.logview {
 .login-card h1 { margin: 0; }
 .login-card input { width: 100%; }
 .login-card button { width: 100%; }
+
+/* Onboarding interview chat */
+.onboard-steps {
+  display: flex; gap: 18px; list-style: none; margin: 0 0 16px; padding: 0;
+  color: var(--dim); font-size: 13px;
+}
+.onboard-steps li { padding-bottom: 4px; }
+.onboard-steps li::before { content: "· "; }
+.onboard-steps li.active { color: var(--ink); font-weight: 600; border-bottom: 2px solid var(--accent); }
+.onboard-steps li.done { color: var(--ok); }
+.onboard-steps li.done::before { content: "✓ "; }
+
+.chat-panel { display: flex; flex-direction: column; gap: 12px; }
+.chat-log { display: flex; flex-direction: column; gap: 10px; min-height: 120px; }
+.chat-msg { display: flex; }
+.chat-msg.user { justify-content: flex-end; }
+.chat-msg .bubble {
+  max-width: 75%; padding: 9px 13px; border-radius: 12px; white-space: pre-wrap;
+  background: #eef2f7; border: 1px solid var(--line);
+}
+.chat-msg.assistant .bubble { background: #eff6ff; border-color: #bfdbfe; }
+.chat-msg.user .bubble { background: var(--panel); }
+.chat-note {
+  align-self: center; font-size: 12px; color: var(--dim);
+  background: #fef3c7; border-radius: 999px; padding: 3px 12px;
+}
+.chat-composer { display: flex; gap: 8px; align-items: flex-end; }
+.chat-composer textarea { flex: 1; }
+.htmx-indicator { display: none; }
+.htmx-request .htmx-indicator, .htmx-request.htmx-indicator { display: inline; }
+.resume-upload summary { cursor: pointer; color: var(--dim); font-size: 13px; }
+.resume-form { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.profile-preview {
+  background: #f8fafc; border: 1px solid var(--line); border-radius: 8px;
+  padding: 12px 14px; white-space: pre-wrap; font-size: 13px;
+}
+.button-link {
+  display: inline-block; padding: 7px 14px; border-radius: 8px;
+  background: var(--accent); color: #fff; border: 1px solid var(--accent);
+}
+.button-link:hover { text-decoration: none; opacity: 0.92; }
+.button-link.secondary { background: var(--panel); color: var(--ink); border-color: var(--line); }
