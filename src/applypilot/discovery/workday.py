@@ -23,6 +23,7 @@ from applypilot import config
 from applypilot.config import CONFIG_DIR
 from applypilot.database import get_connection, init_db
 from applypilot.discovery.filters import location_filters, location_ok as _location_ok
+from applypilot.security import redact_proxy
 
 log = logging.getLogger(__name__)
 
@@ -109,7 +110,9 @@ def setup_proxy(proxy_str: str | None) -> None:
     elif len(parts) == 2:
         proxy_url = f"http://{parts[0]}:{parts[1]}"
     else:
-        log.warning("Proxy format not recognized: %s (expected host:port:user:pass or host:port)", proxy_str)
+        # S3: never log the raw proxy -- user:pass would leak into logs.
+        log.warning("Proxy format not recognized: %s (expected host:port:user:pass or host:port)",
+                    redact_proxy(proxy_str))
         _opener = urllib.request.build_opener()
         return
 

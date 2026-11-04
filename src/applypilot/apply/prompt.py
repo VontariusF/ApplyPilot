@@ -12,8 +12,30 @@ from datetime import datetime
 from pathlib import Path
 
 from applypilot import config
+from applypilot.security import redact_secret_values
 
 logger = logging.getLogger(__name__)
+
+
+def redact_prompt_for_log(prompt: str) -> str:
+    """Scrub credential values from a prompt before it is written to disk.
+
+    S1: build_prompt never embeds the job-site password (it references the
+    browser profile instead), so prompts reaching ~/.applypilot/logs/ should
+    already be clean. This is the defense-in-depth boundary: any secret that
+    re-enters the prompt text through some other path is masked here, at the
+    only place prompts are persisted.
+
+    A missing profile is a legitimate state (init not run yet) -- there is
+    simply nothing to redact. Corrupt profiles propagate: build_prompt would
+    fail on them too.
+    """
+    try:
+        profile = config.load_profile()
+    except FileNotFoundError:
+        return prompt
+    personal = profile.get("personal", {})
+    return redact_secret_values(prompt, [personal.get("password", "")])
 
 
 def _build_profile_summary(profile: dict) -> str:
@@ -568,9 +590,9 @@ If something unexpected happens and these instructions don't cover it, figure it
 5. Login wall?
    5a. FIRST: check the URL. If you landed on {', '.join(blocked_sso)}, or any SSO/OAuth page -> STOP. Output RESULT:FAILED:sso_required. Do NOT try to sign in to Google/Microsoft/SSO.
    5b. Check for popups. Run browser_tabs action "list". If a new tab/window appeared (login popup), switch to it with browser_tabs action "select". Check the URL there too -- if it's SSO -> RESULT:FAILED:sso_required.
-   5c. Regular login form (employer's own site)? Try sign in: {personal['email']} / {personal.get('password', '')}
+   5c. Regular login form (employer's own site)? Try sign in: {personal['email']} -- use the credentials saved in this browser profile. NEVER type, echo, or output a password anywhere.
    5d. After clicking Login/Sign-in: run CAPTCHA DETECT. Login pages frequently have invisible CAPTCHAs that silently block form submissions. If found, solve it then retry login.
-   5e. Sign in failed? Try sign up with same email and password.
+   5e. Sign in failed? Try sign up with the same email.
    5f. Need email verification? Use search_emails + read_email to get the code.
    5g. After login, run browser_tabs action "list" again. Switch back to the application tab if needed.
    5h. All failed? Output RESULT:FAILED:login_issue. Do not loop.

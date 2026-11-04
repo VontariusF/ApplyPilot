@@ -147,6 +147,17 @@ accepts `max_tokens` on your endpoint.
 - `config/sites.yaml` - Direct career sites (30+), blocked sites, base URLs, manual ATS domains
 - `config/searches.example.yaml` - Example search configuration
 
+### Privacy & data flow
+
+**Your resume text is sent to the configured LLM provider on every AI call.** Scoring, tailoring, and cover-letter generation each transmit the full tailored resume text (plus your profile data: contact info, work authorization, compensation) to the provider selected in `.env` — Gemini, OpenAI, or a custom endpoint. Job descriptions are also sent during AI-powered enrichment. There is no redaction of this content; that is inherent to how the pipeline works.
+
+To opt down:
+- Use **discovery-only mode** (skip AI scoring/tailoring entirely) — nothing leaves your machine except job listings fetched from public boards.
+- Point `LLM_URL` at a **local endpoint** (Ollama, llama.cpp) — your resume and profile stay on your machine, though job descriptions still come from the web.
+- If you use a hosted provider, pick one whose data-retention terms you accept; avoid free tiers with training-on-inputs policies if that matters to you.
+
+**Credential handling:** `profile.json` and `.env` are created with owner-only file permissions (0600) and tightened automatically if found looser. The job-site password is never embedded in agent prompts or written to log files — the apply agent is told to use the browser profile's saved credentials instead. Log files under `~/.applypilot/logs/` produced by versions before 0.3.1 may still contain passwords; scrub or delete them when upgrading.
+
 ---
 
 ## How Stages Work
@@ -168,6 +179,8 @@ Writes a targeted cover letter per job referencing the specific company, role, a
 
 ### Auto-Apply
 Claude Code launches a Chrome instance, navigates to each application page, detects the form type, fills personal information and work history, uploads the tailored resume and cover letter, answers screening questions with AI, and submits. A live dashboard shows progress in real-time.
+
+**The browser is a dedicated automation profile, not your daily-driver Chrome.** On first run, each worker clones your real Chrome profile as a starting point — but credential stores are excluded from the clone (saved passwords, session cookies, and autofill data do not carry over). Workers therefore start logged out of job sites; if a site requires an authenticated session, log into the worker profile manually once (`~/.applypilot/chrome-workers/worker-0`) and it will be reused on subsequent runs. Driving any browser profile with an autonomous agent is a real blast radius: the agent operates with broad browser permissions on whatever sessions that profile holds, so keep the automation profile free of accounts where a stray submission or action would hurt, and review `applypilot apply` logs.
 
 The Playwright MCP server is configured automatically at runtime per worker. No manual MCP setup needed.
 
