@@ -1,7 +1,12 @@
-"""Shared fixtures for the ApplyPilot test suite.
+"""Shared fixtures for the ApplyPilot test suites.
 
-All tests run against a throwaway app directory / SQLite file so they never
-touch a real ~/.applypilot directory.
+Two layers of isolation, so no test can touch a real ~/.applypilot:
+
+1. APPLYPILOT_DIR is redirected to a throwaway dir BEFORE the applypilot
+   package is imported, so config.py binds APP_DIR (and every derived path)
+   to it for tests that don't opt into the app_dir fixture.
+2. Tests that need per-test isolation use `app_dir`, which repoints every
+   ApplyPilot path constant at a fresh temp directory.
 
 ApplyPilot resolves ~/.applypilot into module-level path constants at import
 time; every consumer reads them as attributes at call time, so tests can
@@ -9,11 +14,15 @@ repoint the attributes at a temp directory instead of touching the real home
 directory.
 """
 
+import os
+import tempfile
 import threading
 
 import pytest
 
-from applypilot import config, database
+os.environ.setdefault("APPLYPILOT_DIR", tempfile.mkdtemp(prefix="applypilot-test-"))
+
+from applypilot import config, database  # noqa: E402  (after the env redirect)
 
 
 @pytest.fixture

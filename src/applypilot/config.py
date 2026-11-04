@@ -201,6 +201,7 @@ DEFAULTS = {
     # worker) and may be reclaimed / cleared by reset_failed.
     "apply_stale_lock_minutes": 60,
     "viewport": "1280x900",
+    "apply_engine": "claude",
 }
 
 
@@ -256,7 +257,7 @@ def get_tier() -> int:
 
     Tier 1 (Discovery):            Python + pip
     Tier 2 (AI Scoring & Tailoring): + LLM API key
-    Tier 3 (Full Auto-Apply):       + Claude Code CLI + Chrome
+    Tier 3 (Full Auto-Apply):       + Claude Code or Droid CLI + Chrome
     """
     load_env()
 
@@ -264,13 +265,14 @@ def get_tier() -> int:
         return 1
 
     has_claude = shutil.which("claude") is not None
+    has_droid = shutil.which("droid") is not None
     try:
         get_chrome_path()
         has_chrome = True
     except FileNotFoundError:
         has_chrome = False
 
-    if has_claude and has_chrome:
+    if (has_claude or has_droid) and has_chrome:
         return 3
 
     return 2
@@ -294,8 +296,11 @@ def check_tier(required: int, feature: str) -> None:
     if required >= 2 and not _llm_configured():
         missing.append("LLM configuration — run [bold]applypilot init[/bold] or set LLM_PROVIDER / GEMINI_API_KEY")
     if required >= 3:
-        if not shutil.which("claude"):
-            missing.append("Claude Code CLI — install from [bold]https://claude.ai/code[/bold]")
+        if not shutil.which("claude") and not shutil.which("droid"):
+            missing.append(
+                "An auto-apply engine CLI — Claude Code ([bold]https://claude.ai/code[/bold], "
+                "default) or Factory Droid ([bold]https://docs.factory.ai/cli[/bold])"
+            )
         try:
             get_chrome_path()
         except FileNotFoundError:

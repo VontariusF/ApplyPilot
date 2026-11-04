@@ -1,16 +1,14 @@
-"""Apply orchestration: acquire jobs, spawn Claude Code sessions, track results.
+"""Apply orchestration: acquire jobs, spawn engine sessions, track results.
 
 This is the main entry point for the apply pipeline. It pulls jobs from
-the database, launches Chrome + Claude Code for each one, parses the
-result, and updates the database. Supports parallel workers via --workers.
+the database, launches Chrome plus the selected engine (Claude Code or
+Factory Droid) for each job, parses the result, and updates the database.
+Supports parallel workers via --workers.
 """
 
 import atexit
-import json
 import logging
-import os
 import platform
-import re
 import signal
 import subprocess
 import sys
@@ -35,6 +33,7 @@ from applypilot.apply.dashboard import (
     init_worker, update_state, add_event, get_state,
     render_full, get_totals,
 )
+from applypilot.apply.engines import ApplyEngine, make_engine
 
 logger = logging.getLogger(__name__)
 
@@ -58,9 +57,9 @@ POLL_INTERVAL = config.DEFAULTS["poll_interval"]
 # Thread-safe shutdown coordination
 _stop_event = threading.Event()
 
-# Track active Claude Code processes for skip (Ctrl+C) handling
-_claude_procs: dict[int, subprocess.Popen] = {}
-_claude_lock = threading.Lock()
+# Track active engine processes (any engine) for skip (Ctrl+C) handling
+_engine_procs: dict[int, subprocess.Popen] = {}
+_engine_lock = threading.Lock()
 
 # Register cleanup on exit
 atexit.register(cleanup_on_exit)
@@ -69,41 +68,18 @@ if platform.system() != "Windows":
 
 
 # ---------------------------------------------------------------------------
-# MCP config
-# ---------------------------------------------------------------------------
-
-def _make_mcp_config(cdp_port: int) -> dict:
-    """Build MCP config dict for a specific CDP port."""
-    return {
-        "mcpServers": {
-            "playwright": {
-                "command": "npx",
-                "args": [
-                    "@playwright/mcp@latest",
-                    f"--cdp-endpoint=http://localhost:{cdp_port}",
-                    f"--viewport-size={config.DEFAULTS['viewport']}",
-                ],
-            },
-            "gmail": {
-                "command": "npx",
-                "args": ["-y", "@gongrzhe/server-gmail-autoauth-mcp"],
-            },
-        }
-    }
-
-
-# ---------------------------------------------------------------------------
 # Database operations
 # ---------------------------------------------------------------------------
 
 def acquire_job(target_url: str | None = None, min_score: int = 7,
-                worker_id: int = 0) -> dict | None:
+                worker_id: int = 0, agent_label: str = "claude") -> dict | None:
     """Atomically acquire the next job to apply to.
 
     Args:
         target_url: Apply to a specific URL instead of picking from queue.
         min_score: Minimum fit_score threshold.
         worker_id: Worker claiming this job (for tracking).
+        agent_label: Engine name recorded in agent_id ("{label}-worker-{id}").
 
     Returns:
         Job dict or None if the queue is empty.
@@ -182,7 +158,7 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                            agent_id = ?,
                            last_attempted_at = ?
             WHERE url = ?
-        """, (f"worker-{worker_id}", now, row["url"]))
+        """, (f"{agent_label}-worker-{worker_id}", now, row["url"]))
         conn.commit()
 
         return dict(row)
@@ -241,13 +217,16 @@ def _stale_lock_cutoff() -> str:
 # ---------------------------------------------------------------------------
 
 def gen_prompt(target_url: str, min_score: int = 7,
-               model: str = "sonnet", worker_id: int = 0) -> Path | None:
-    """Generate a prompt file and print the Claude CLI command for manual debugging.
+               model: str = "sonnet", worker_id: int = 0,
+               engine: str = "claude") -> Path | None:
+    """Generate a prompt file for manual debugging runs.
 
-    Returns:
-        Path to the generated prompt file, or None if no job found.
+    Returns the prompt file path, or None if no job found. Callers that want
+    the engine's manual command build it with manual_command().
     """
-    job = acquire_job(target_url=target_url, min_score=min_score, worker_id=worker_id)
+    engine_obj = make_engine(engine)
+    job = acquire_job(target_url=target_url, min_score=min_score,
+                      worker_id=worker_id, agent_label=engine_obj.name)
     if not job:
         return None
 
@@ -271,12 +250,26 @@ def gen_prompt(target_url: str, min_score: int = 7,
     # on top of build_prompt no longer embedding the password).
     prompt_file.write_text(prompt_mod.redact_prompt_for_log(prompt), encoding="utf-8")
 
-    # Write MCP config for reference
+    # Engine setup writes its MCP config for reference (claude:
+    # .mcp-apply-{id}.json; droid: the merged global ~/.factory/mcp.json).
     port = BASE_CDP_PORT + worker_id
-    mcp_path = config.APP_DIR / f".mcp-apply-{worker_id}.json"
-    mcp_path.write_text(json.dumps(_make_mcp_config(port)), encoding="utf-8")
+    engine_obj.setup(worker_id, port)
 
     return prompt_file
+
+
+def manual_command(engine: str, prompt_file: Path, model: str,
+                   worker_id: int = 0) -> str:
+    """The engine's manual run command, printed by `apply --gen`."""
+    engine_obj = make_engine(engine)
+    if engine_obj.prompt_delivery == "file":
+        worker_dir = config.APPLY_WORKER_DIR / f"worker-{worker_id}"
+        return " ".join(engine_obj.build_command(prompt_file, model, worker_dir))
+    mcp_path = config.APP_DIR / f".mcp-apply-{worker_id}.json"
+    return (
+        f"claude --model {model} -p --mcp-config {mcp_path} "
+        f"--permission-mode bypassPermissions < {prompt_file}"
+    )
 
 
 def mark_job(url: str, status: str, reason: str | None = None) -> None:
@@ -332,14 +325,21 @@ def reset_failed() -> int:
 # ---------------------------------------------------------------------------
 
 def run_job(job: dict, port: int, worker_id: int = 0,
-            model: str = "sonnet", dry_run: bool = False) -> tuple[str, int]:
-    """Spawn a Claude Code session for one job application.
+            model: str = "sonnet", dry_run: bool = False,
+            engine: ApplyEngine | None = None) -> tuple[str, int]:
+    """Spawn an agent session for one job application.
+
+    Args:
+        engine: Engine adapter (make_engine("claude" | "droid")). Defaults
+            to the Claude engine, whose behavior is identical to the
+            pre-adapter implementation.
 
     Returns:
         Tuple of (status_string, duration_ms). Status is one of:
         'applied', 'expired', 'captcha', 'login_issue',
         'failed:reason', or 'skipped'.
     """
+    engine = engine or make_engine("claude")
     # Read tailored resume text
     resume_path = job.get("tailored_resume_path")
     txt_path = Path(resume_path).with_suffix(".txt") if resume_path else None
@@ -354,37 +354,25 @@ def run_job(job: dict, port: int, worker_id: int = 0,
         dry_run=dry_run,
     )
 
-    # Write per-worker MCP config
-    mcp_config_path = config.APP_DIR / f".mcp-apply-{worker_id}.json"
-    mcp_config_path.write_text(json.dumps(_make_mcp_config(port)), encoding="utf-8")
-
-    # Build claude command
-    cmd = [
-        "claude",
-        "--model", model,
-        "-p",
-        "--mcp-config", str(mcp_config_path),
-        "--permission-mode", "bypassPermissions",
-        "--no-session-persistence",
-        "--disallowedTools", (
-            "mcp__gmail__draft_email,mcp__gmail__modify_email,"
-            "mcp__gmail__delete_email,mcp__gmail__download_attachment,"
-            "mcp__gmail__batch_modify_emails,mcp__gmail__batch_delete_emails,"
-            "mcp__gmail__create_label,mcp__gmail__update_label,"
-            "mcp__gmail__delete_label,mcp__gmail__get_or_create_label,"
-            "mcp__gmail__list_email_labels,mcp__gmail__create_filter,"
-            "mcp__gmail__list_filters,mcp__gmail__get_filter,"
-            "mcp__gmail__delete_filter"
-        ),
-        "--output-format", "stream-json",
-        "--verbose", "-",
-    ]
-
-    env = os.environ.copy()
-    env.pop("CLAUDECODE", None)
-    env.pop("CLAUDE_CODE_ENTRYPOINT", None)
+    # Engine-specific setup: claude writes its per-worker MCP config; droid
+    # merges this run's servers into the global ~/.factory/mcp.json.
+    engine.setup(worker_id, port)
 
     worker_dir = reset_worker_dir(worker_id)
+
+    # Prompt delivery: claude pipes the prompt on stdin; droid reads it from
+    # a file passed with -f. The functional file for file-delivery engines
+    # lives in the per-worker scratch dir (under APP_DIR, 0700 since S2) —
+    # it still carries the CapSolver key the agent needs at runtime. Nothing
+    # is written to LOG_DIR here (it is a log-viewer surface); --gen's
+    # reference copies are redacted (S1).
+    prompt_path: Path | None = None
+    if engine.prompt_delivery == "file":
+        prompt_path = worker_dir / "prompt.txt"
+        prompt_path.write_text(agent_prompt, encoding="utf-8")
+
+    cmd = engine.build_command(prompt_path, model, worker_dir)
+    env = engine.child_env()
 
     update_state(worker_id, status="applying", job_title=job["title"],
                  company=job.get("site", ""), score=job.get("fit_score", 0),
@@ -407,22 +395,13 @@ def run_job(job: dict, port: int, worker_id: int = 0,
     watchdog: threading.Timer | None = None
 
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=env,
-            cwd=str(worker_dir),
-        )
-        with _claude_lock:
-            _claude_procs[worker_id] = proc
+        proc = engine.spawn(cmd, env, worker_dir)
+        with _engine_lock:
+            _engine_procs[worker_id] = proc
 
-        proc.stdin.write(agent_prompt)
-        proc.stdin.close()
+        if engine.prompt_delivery == "stdin":
+            proc.stdin.write(agent_prompt)
+            proc.stdin.close()
 
         # B13: the streaming read blocks indefinitely if the agent hangs
         # without producing output, and the old post-EOF wait never covered
@@ -439,8 +418,8 @@ def run_job(job: dict, port: int, worker_id: int = 0,
             )
             # Look the process up in the registry instead of closing over the
             # local: the finally block may already have cleared it.
-            with _claude_lock:
-                current = _claude_procs.get(worker_id)
+            with _engine_lock:
+                current = _engine_procs.get(worker_id)
             if current is not None and current.poll() is None:
                 _kill_process_tree(current.pid)
 
@@ -456,52 +435,26 @@ def run_job(job: dict, port: int, worker_id: int = 0,
                 line = line.strip()
                 if not line:
                     continue
-                try:
-                    msg = json.loads(line)
-                    msg_type = msg.get("type")
-                    if msg_type == "assistant":
-                        for block in msg.get("message", {}).get("content", []):
-                            bt = block.get("type")
-                            if bt == "text":
-                                text_parts.append(block["text"])
-                                lf.write(block["text"] + "\n")
-                            elif bt == "tool_use":
-                                name = (
-                                    block.get("name", "")
-                                    .replace("mcp__playwright__", "")
-                                    .replace("mcp__gmail__", "gmail:")
-                                )
-                                inp = block.get("input", {})
-                                if "url" in inp:
-                                    desc = f"{name} {inp['url'][:60]}"
-                                elif "ref" in inp:
-                                    desc = f"{name} {inp.get('element', inp.get('text', ''))}"[:50]
-                                elif "fields" in inp:
-                                    desc = f"{name} ({len(inp['fields'])} fields)"
-                                elif "paths" in inp:
-                                    desc = f"{name} upload"
-                                else:
-                                    desc = name
-
-                                lf.write(f"  >> {desc}\n")
-                                ws = get_state(worker_id)
-                                cur_actions = ws.actions if ws else 0
-                                update_state(worker_id,
-                                             actions=cur_actions + 1,
-                                             last_action=desc[:35])
-                    elif msg_type == "result":
-                        stats = {
-                            "input_tokens": msg.get("usage", {}).get("input_tokens", 0),
-                            "output_tokens": msg.get("usage", {}).get("output_tokens", 0),
-                            "cache_read": msg.get("usage", {}).get("cache_read_input_tokens", 0),
-                            "cache_create": msg.get("usage", {}).get("cache_creation_input_tokens", 0),
-                            "cost_usd": msg.get("total_cost_usd", 0),
-                            "turns": msg.get("num_turns", 0),
-                        }
-                        text_parts.append(msg.get("result", ""))
-                except json.JSONDecodeError:
+                events = engine.parse_stream(line)
+                if events is None:
+                    # Raw (non-JSON) line — keep it in the transcript
                     text_parts.append(line)
                     lf.write(line + "\n")
+                    continue
+                for event in events:
+                    if event.kind == "text":
+                        text_parts.append(event.text)
+                        lf.write(event.text + "\n")
+                    elif event.kind == "action":
+                        lf.write(f"  >> {event.action_desc}\n")
+                        ws = get_state(worker_id)
+                        cur_actions = ws.actions if ws else 0
+                        update_state(worker_id,
+                                     actions=cur_actions + 1,
+                                     last_action=event.action_desc[:35])
+                    elif event.kind == "usage":
+                        stats = event.stats
+                        text_parts.append(event.text)
 
         proc.wait(timeout=apply_timeout)
         returncode = proc.returncode
@@ -525,7 +478,7 @@ def run_job(job: dict, port: int, worker_id: int = 0,
         duration_ms = int((time.time() - start) * 1000)
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        job_log = config.LOG_DIR / f"claude_{ts}_w{worker_id}_{job.get('site', 'unknown')[:20]}.txt"
+        job_log = config.LOG_DIR / f"{engine.name}_{ts}_w{worker_id}_{job.get('site', 'unknown')[:20]}.txt"
         job_log.write_text(output, encoding="utf-8")
 
         if stats:
@@ -534,40 +487,30 @@ def run_job(job: dict, port: int, worker_id: int = 0,
             prev_cost = ws.total_cost if ws else 0.0
             update_state(worker_id, total_cost=prev_cost + cost)
 
-        def _clean_reason(s: str) -> str:
-            return re.sub(r'[*`"]+$', '', s).strip()
+        result = engine.extract_result(output)
 
-        for result_status in ["APPLIED", "EXPIRED", "CAPTCHA", "LOGIN_ISSUE"]:
-            if f"RESULT:{result_status}" in output:
-                add_event(f"[W{worker_id}] {result_status} ({elapsed}s): {_job_title(job)[:30]}")
-                update_state(worker_id, status=result_status.lower(),
-                             last_action=f"{result_status} ({elapsed}s)")
-                return result_status.lower(), duration_ms
+        if result.status in ("applied", "expired", "captcha", "login_issue"):
+            label = result.status.upper()
+            add_event(f"[W{worker_id}] {label} ({elapsed}s): {_job_title(job)[:30]}")
+            update_state(worker_id, status=result.status,
+                         last_action=f"{label} ({elapsed}s)")
+            return result.status, duration_ms
 
-        if "RESULT:FAILED" in output:
-            for out_line in output.split("\n"):
-                if "RESULT:FAILED" in out_line:
-                    reason = (
-                        out_line.split("RESULT:FAILED:")[-1].strip()
-                        if ":" in out_line[out_line.index("FAILED") + 6:]
-                        else "unknown"
-                    )
-                    reason = _clean_reason(reason)
-                    PROMOTE_TO_STATUS = {"captcha", "expired", "login_issue"}
-                    if reason in PROMOTE_TO_STATUS:
-                        add_event(f"[W{worker_id}] {reason.upper()} ({elapsed}s): {_job_title(job)[:30]}")
-                        update_state(worker_id, status=reason,
-                                     last_action=f"{reason.upper()} ({elapsed}s)")
-                        return reason, duration_ms
-                    add_event(f"[W{worker_id}] FAILED ({elapsed}s): {reason[:30]}")
-                    update_state(worker_id, status="failed",
-                                 last_action=f"FAILED: {reason[:25]}")
-                    return f"failed:{reason}", duration_ms
-            return "failed:unknown", duration_ms
+        if result.status == "failed:unknown":
+            # Bare RESULT:FAILED with no reason — no event for it (matches
+            # the original parser's path).
+            return result.status, duration_ms
 
-        add_event(f"[W{worker_id}] NO RESULT ({elapsed}s)")
-        update_state(worker_id, status="failed", last_action=f"no result ({elapsed}s)")
-        return "failed:no_result_line", duration_ms
+        if result.status == "failed:no_result_line":
+            add_event(f"[W{worker_id}] NO RESULT ({elapsed}s)")
+            update_state(worker_id, status="failed", last_action=f"no result ({elapsed}s)")
+            return result.status, duration_ms
+
+        reason = result.status.split(":", 1)[1]
+        add_event(f"[W{worker_id}] FAILED ({elapsed}s): {reason[:30]}")
+        update_state(worker_id, status="failed",
+                     last_action=f"FAILED: {reason[:25]}")
+        return result.status, duration_ms
 
     except subprocess.TimeoutExpired:
         duration_ms = int((time.time() - start) * 1000)
@@ -583,8 +526,8 @@ def run_job(job: dict, port: int, worker_id: int = 0,
     finally:
         if watchdog is not None:
             watchdog.cancel()
-        with _claude_lock:
-            _claude_procs.pop(worker_id, None)
+        with _engine_lock:
+            _engine_procs.pop(worker_id, None)
         if proc is not None and proc.poll() is None:
             _kill_process_tree(proc.pid)
 
@@ -635,7 +578,8 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
                 target_url: str | None = None,
                 min_score: int = 7, headless: bool = False,
                 model: str = "sonnet", dry_run: bool = False,
-                continuous: bool = False) -> tuple[int, int]:
+                continuous: bool = False,
+                engine: str = "claude") -> tuple[int, int]:
     """Run jobs sequentially until limit is reached or queue is empty.
 
     Args:
@@ -644,11 +588,12 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
         target_url: Apply to a specific URL.
         min_score: Minimum fit_score threshold.
         headless: Run Chrome headless.
-        model: Claude model name.
+        model: Model id passed verbatim to the engine.
         dry_run: Don't click Submit.
         continuous: Poll the queue forever (B1: no longer inferred from
             ``limit == 0`` — a zero slice in non-continuous mode exits
             cleanly instead of running forever).
+        engine: Engine name ("claude" | "droid").
 
     Returns:
         Tuple of (applied_count, failed_count).
@@ -658,6 +603,7 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
     jobs_done = 0
     empty_polls = 0
     port = BASE_CDP_PORT + worker_id
+    engine_obj = make_engine(engine)
 
     while not _stop_event.is_set():
         if not continuous and jobs_done >= limit:
@@ -667,7 +613,7 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
                      last_action="waiting for job", actions=0)
 
         job = acquire_job(target_url=target_url, min_score=min_score,
-                          worker_id=worker_id)
+                          worker_id=worker_id, agent_label=engine_obj.name)
         if not job:
             if not continuous:
                 add_event(f"[W{worker_id}] Queue empty")
@@ -691,7 +637,8 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
             chrome_proc = launch_chrome(worker_id, port=port, headless=headless)
 
             result, duration_ms = run_job(job, port=port, worker_id=worker_id,
-                                            model=model, dry_run=dry_run)
+                                          model=model, dry_run=dry_run,
+                                          engine=engine_obj)
 
             if result == "skipped":
                 release_lock(job["url"])
@@ -742,7 +689,8 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
 def main(limit: int = 1, target_url: str | None = None,
          min_score: int = 7, headless: bool = False, model: str = "sonnet",
          dry_run: bool = False, continuous: bool = False,
-         poll_interval: int = 60, workers: int = 1) -> None:
+         poll_interval: int = 60, workers: int = 1,
+         engine: str = "claude") -> None:
     """Launch the apply pipeline.
 
     Args:
@@ -751,11 +699,12 @@ def main(limit: int = 1, target_url: str | None = None,
         target_url: Apply to a specific URL.
         min_score: Minimum fit_score threshold.
         headless: Run Chrome in headless mode.
-        model: Claude model name.
+        model: Model id passed verbatim to the engine.
         dry_run: Don't click Submit.
         continuous: Run forever, polling for new jobs.
         poll_interval: Seconds between DB polls when queue is empty.
         workers: Number of parallel workers (default 1).
+        engine: Engine name ("claude" | "droid").
     """
     global POLL_INTERVAL
     POLL_INTERVAL = poll_interval
@@ -763,6 +712,18 @@ def main(limit: int = 1, target_url: str | None = None,
 
     config.ensure_dirs()
     console = Console()
+
+    engine_obj = make_engine(engine)  # readable error for unknown names
+
+    if engine_obj.name == "droid" and workers > 1:
+        # Droid reads one global ~/.factory/mcp.json with this run's CDP port
+        # baked in — parallel Droid workers stay a post-spike decision, not a
+        # silent footgun.
+        console.print(
+            "[yellow]Droid runs one worker per machine this release "
+            "(~/.factory/mcp.json is global); clamping workers to 1.[/yellow]"
+        )
+        workers = 1
 
     if continuous:
         effective_limit = 0
@@ -787,16 +748,16 @@ def main(limit: int = 1, target_url: str | None = None,
         _ctrl_c_count += 1
         if _ctrl_c_count == 1:
             console.print("\n[yellow]Skipping current job(s)... (Ctrl+C again to STOP)[/yellow]")
-            # Kill all active Claude processes to skip current jobs
-            with _claude_lock:
-                for wid, cproc in list(_claude_procs.items()):
+            # Kill all active engine processes to skip current jobs
+            with _engine_lock:
+                for wid, cproc in list(_engine_procs.items()):
                     if cproc.poll() is None:
                         _kill_process_tree(cproc.pid)
         else:
             console.print("\n[red bold]STOPPING[/red bold]")
             _stop_event.set()
-            with _claude_lock:
-                for wid, cproc in list(_claude_procs.items()):
+            with _engine_lock:
+                for wid, cproc in list(_engine_procs.items()):
                     if cproc.poll() is None:
                         _kill_process_tree(cproc.pid)
             kill_all_chrome()
@@ -828,6 +789,7 @@ def main(limit: int = 1, target_url: str | None = None,
                     model=model,
                     dry_run=dry_run,
                     continuous=continuous,
+                    engine=engine_obj.name,
                 )
             else:
                 # Multi-worker — distribute limit across workers (B1: a
@@ -848,6 +810,7 @@ def main(limit: int = 1, target_url: str | None = None,
                             model=model,
                             dry_run=dry_run,
                             continuous=continuous,
+                            engine=engine_obj.name,
                         ): i
                         for i in range(workers)
                     }
