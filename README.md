@@ -119,6 +119,29 @@ Job search queries, target titles, locations, boards. Run multiple searches with
 ### `.env`
 API keys and runtime config: `GEMINI_API_KEY`, `LLM_MODEL`, `CAPSOLVER_API_KEY` (optional).
 
+### LLM providers
+
+`LLM_PROVIDER` selects where scoring/tailoring calls go. When set, it is a
+contract: a missing required variable is a startup error that names the
+variable — never a silent fallthrough. Valid values:
+
+| `LLM_PROVIDER` | Required env vars | Notes |
+|----------------|-------------------|-------|
+| `gemini` | `GEMINI_API_KEY` | Google Gemini via its OpenAI-compat endpoint (default model `gemini-2.0-flash`) |
+| `openai` | `OPENAI_API_KEY` | Default model `gpt-4o-mini` |
+| `custom` | `LLM_URL`, `LLM_MODEL` | Any endpoint speaking `POST {LLM_URL}/chat/completions` — OpenRouter, vLLM, llama.cpp server, Gemini's compat route. `LLM_API_KEY` optional for endpoints that need no bearer auth |
+| `local` | `LLM_URL` | Ollama/llama.cpp on this machine (e.g. `http://localhost:11434/v1`) |
+
+When `LLM_PROVIDER` is unset, the legacy detection order applies unchanged:
+`GEMINI_API_KEY` → `OPENAI_API_KEY` → `LLM_URL`. `LLM_MODEL` overrides the
+model name for any provider.
+
+**Wire parameter caveat:** requests use `max_tokens`, which is accepted by
+llama.cpp, Ollama, vLLM, and legacy OpenAI models. Newer OpenAI-branded
+models (the `o*`/`gpt-5*` reasoning families) reject it in favor of
+`max_completion_tokens` — if you target those, prefer a model id that still
+accepts `max_tokens` on your endpoint.
+
 ### Package configs (shipped with ApplyPilot)
 - `config/employers.yaml` - Workday employer registry (48 preconfigured)
 - `config/sites.yaml` - Direct career sites (30+), blocked sites, base URLs, manual ATS domains
