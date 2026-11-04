@@ -549,7 +549,7 @@ def test_b15_concurrent_first_use_constructs_one_client(monkeypatch):
     created = []
 
     class _Stub:
-        def __init__(self, base_url, model, api_key):
+        def __init__(self, *args, **kwargs):  # PR #2 passes provider_name= too
             created.append(self)
             # Widen the race window so unguarded construction would overlap
             import time
