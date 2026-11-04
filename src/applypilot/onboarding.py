@@ -416,12 +416,14 @@ def normalize_profile(draft: dict) -> tuple[dict, dict]:
             "password": "",  # never collected here — wizard-only (S2)
         },
         "work_authorization": {
-            "legally_authorized_to_work": _yes_no(auth.get("legally_authorized_to_work")) or "Yes",
-            "require_sponsorship": _yes_no(auth.get("require_sponsorship")) or "No",
+            # Gating questions: no defaults. A fabricated "Yes"/"No" would be
+            # submitted to real ATS forms on the candidate's behalf (sweep A S2-1).
+            "legally_authorized_to_work": _yes_no(auth.get("legally_authorized_to_work")),
+            "require_sponsorship": _yes_no(auth.get("require_sponsorship")),
             "work_permit_type": _str(auth, "work_permit_type"),
         },
         "availability": {
-            "earliest_start_date": _str(availability, "earliest_start_date") or "Immediately",
+            "earliest_start_date": _str(availability, "earliest_start_date"),
         },
         "compensation": {
             "salary_expectation": _str(comp, "salary_expectation"),
@@ -468,6 +470,14 @@ def normalize_profile(draft: dict) -> tuple[dict, dict]:
 def missing_review_fields(profile: dict) -> list[str]:
     """Human names for fields the review screen shows as "add later"."""
     missing = []
+    auth = profile["work_authorization"]
+    availability = profile["availability"]
+    if not auth["legally_authorized_to_work"]:
+        missing.append("Work authorization (yes/no)")
+    if not auth["require_sponsorship"]:
+        missing.append("Sponsorship needed (yes/no)")
+    if not availability["earliest_start_date"]:
+        missing.append("Earliest start date")
     if not profile["personal"]["full_name"]:
         missing.append("Full name")
     if not profile["personal"]["email"]:
@@ -497,8 +507,8 @@ def render_profile_md(profile: dict, search_meta: dict) -> str:
         f"- Base: {search_meta.get('location') or personal['city'] or '_(not given)_'}",
         f"- Remote: {'open to remote' if search_meta.get('remote') else 'onsite/hybrid only'}",
         f"- Salary: {comp['salary_expectation'] or '_(not given)_'} {comp['salary_currency']}".strip(),
-        f"- Work authorization: {auth['legally_authorized_to_work']}, "
-        f"sponsorship needed: {auth['require_sponsorship']}",
+        f"- Work authorization: {auth['legally_authorized_to_work'] or '_(needs answer)_'}, "
+        f"sponsorship needed: {auth['require_sponsorship'] or '_(needs answer)_'}",
         f"- Education: {exp['education_level'] or '_(add later)_'}",
     ]
     skills = profile["skills_boundary"]
