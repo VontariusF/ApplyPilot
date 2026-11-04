@@ -39,6 +39,14 @@
     {% if job.agent_id %}<li><span>Agent</span> <span>{{ job.agent_id }}</span></li>{% endif %}
   </ul>
 
+  <h3>Regenerate</h3>
+  <form method="post" action="/jobs/regenerate" class="inline-form">
+    <input type="hidden" name="url" value="{{ job.url }}">
+    <label><input type="checkbox" name="include_cover" value="1"> include cover letter</label>
+    <button type="submit">Regenerate</button>
+  </form>
+  <p class="dim">Clears tailoring state and re-enqueues this job for the tailor stage on the next run. Existing documents stay on disk.</p>
+
   <h3>Description</h3>
   <pre class="description">{{ (job.full_description or job.description or "No description captured.") }}</pre>
 

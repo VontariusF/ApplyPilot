@@ -51,6 +51,10 @@ FIELDS: list[dict] = [
      "choices": ["", "claude", "droid"],
      "label": "Default apply engine",
      "help": "Default engine for apply runs (claude | droid). Runs launched from the Runs page inherit this."},
+    {"key": "HISTORY_ENABLED", "kind": CHOICE,
+     "choices": ["on", "off"],
+     "label": "Document history",
+     "help": "Keep every generated resume and cover letter as a new version (on) or overwrite in place (off). Default on."},
 ]
 
 _SECRET_KEYS = [f["key"] for f in FIELDS if f["kind"] == SECRET]

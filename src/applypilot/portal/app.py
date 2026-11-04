@@ -168,6 +168,16 @@ def create_app() -> FastAPI:
         mark_job(url, status, reason)
         return RedirectResponse(f"/jobs/detail?url={url}", status_code=303)
 
+    @app.post("/jobs/regenerate")
+    async def jobs_regenerate(request: Request):
+        form = await request.form()
+        url = str(form.get("url", "")).strip()
+        if not url:
+            return PlainTextResponse("invalid regenerate request", status_code=400)
+        include_cover = str(form.get("include_cover", "")).strip() in ("1", "on", "true")
+        database.reset_job_tailoring(database.get_connection(), url, include_cover=include_cover)
+        return RedirectResponse(f"/jobs/detail?url={url}", status_code=303)
+
     @app.post("/jobs/reset-failed")
     async def jobs_reset_failed():
         reset_failed()

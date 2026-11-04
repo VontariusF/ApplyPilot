@@ -16,8 +16,14 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from applypilot.config import RESUME_PATH, TAILORED_DIR, load_profile
-from applypilot.database import get_connection, get_jobs_by_stage
+from applypilot.config import RESUME_PATH, TAILORED_DIR, history_enabled, load_profile
+from applypilot.database import (
+    KIND_RESUME,
+    get_connection,
+    get_jobs_by_stage,
+    next_document_version,
+    record_document_version,
+)
 from applypilot.llm import get_client
 from applypilot.scoring import docs
 from applypilot.scoring.validator import (
@@ -484,6 +490,7 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
     completed = 0
     results: list[dict] = []
     stats: dict[str, int] = {"approved": 0, "failed_validation": 0, "failed_judge": 0, "error": 0}
+    history_on = history_enabled()
 
     for job in jobs:
         completed += 1
@@ -495,12 +502,24 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
             # title collisions; B12: title is nullable — guard)
             prefix = docs.output_prefix(job)
 
+            # History on (D1/D2): every generation is a new version at a
+            # _v{N} stem; a pre-history legacy file is backfilled as version 1
+            # by next_document_version and never touched. History off: the
+            # exact pre-history overwrite behavior at the bare prefix.
+            if history_on:
+                version = next_document_version(
+                    conn, job["url"], KIND_RESUME,
+                    legacy_path=TAILORED_DIR / f"{prefix}.txt")
+                stem = docs.versioned_stem(prefix, version)
+            else:
+                stem = prefix
+
             # Save tailored resume text
-            txt_path = TAILORED_DIR / f"{prefix}.txt"
+            txt_path = TAILORED_DIR / f"{stem}.txt"
             txt_path.write_text(tailored, encoding="utf-8")
 
             # Save job description for traceability
-            job_path = TAILORED_DIR / f"{prefix}_JOB.txt"
+            job_path = TAILORED_DIR / f"{stem}_JOB.txt"
             job_desc = (
                 f"Title: {job['title']}\n"
                 f"Company: {job['site']}\n"
@@ -512,7 +531,7 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
             job_path.write_text(job_desc, encoding="utf-8")
 
             # Save validation report
-            report_path = TAILORED_DIR / f"{prefix}_REPORT.json"
+            report_path = TAILORED_DIR / f"{stem}_REPORT.json"
             report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
             # Generate PDF for approved resumes (best-effort)
@@ -525,6 +544,15 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
                 except Exception:
                     log.debug("PDF generation failed for %s", txt_path, exc_info=True)
 
+            # Record the version row (spec D2): file path + validation outcome
+            # for every written document, approved or not.
+            version_id = None
+            if history_on:
+                version_id = record_document_version(
+                    conn, job["url"], KIND_RESUME, version, str(txt_path),
+                    validation_status=report["status"],
+                )
+
             result = {
                 "url": job["url"],
                 "path": str(txt_path),
@@ -533,11 +561,13 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
                 "site": job["site"],
                 "status": report["status"],
                 "attempts": report["attempts"],
+                "version_id": version_id,
             }
         except Exception as e:
             result = {
                 "url": job["url"], "title": job["title"], "site": job["site"],
                 "status": "error", "attempts": 0, "path": None, "pdf_path": None,
+                "version_id": None,
             }
             log.error("%d/%d [ERROR] %s -- %s", completed, len(jobs), (job.get("title") or "untitled")[:40], e)
 

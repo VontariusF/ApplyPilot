@@ -16,6 +16,10 @@ from applypilot.config import DB_PATH
 # (required for SQLite thread safety with parallel workers)
 _local = threading.local()
 
+# Document kinds tracked in document_versions (spec D2)
+KIND_RESUME = "resume"
+KIND_COVER_LETTER = "cover_letter"
+
 # B16: ORDER BY ... NULLS LAST (database.py queue queries) requires SQLite >= 3.30.
 _MIN_SQLITE_VERSION = (3, 30)
 _sqlite_version_checked = False
@@ -159,6 +163,26 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             verification_confidence TEXT
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS document_versions (
+            -- One row per generated document version (spec D2). Version 1
+            -- may be a backfill row pointing at a pre-history legacy
+            -- deterministic file; validation_status records the generation
+            -- outcome ('legacy' for backfilled rows).
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_url           TEXT NOT NULL,
+            kind              TEXT NOT NULL,
+            version           INTEGER NOT NULL,
+            file_path         TEXT NOT NULL,
+            validation_status TEXT,
+            created_at        TEXT NOT NULL,
+            UNIQUE (job_url, kind, version)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_document_versions_job
+            ON document_versions (job_url, kind, version)
+    """)
     conn.commit()
 
     # Run migrations for any columns added after initial schema
@@ -209,6 +233,10 @@ _ALL_COLUMNS: dict[str, str] = {
     "apply_duration_ms": "INTEGER",
     "apply_task_id": "TEXT",
     "verification_confidence": "TEXT",
+    # Apply-time document snapshot (spec D3): the document_versions ids that
+    # were actually uploaded when the application was submitted.
+    "applied_resume_version_id": "INTEGER",
+    "applied_cover_version_id": "INTEGER",
 }
 
 
@@ -460,3 +488,124 @@ def get_jobs_by_stage(conn: sqlite3.Connection | None = None,
         columns = rows[0].keys()
         return [dict(zip(columns, row)) for row in rows]
     return []
+
+
+# ---------------------------------------------------------------------------
+# Document version history (spec PR F, decisions D1/D2)
+# ---------------------------------------------------------------------------
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def next_document_version(conn: sqlite3.Connection, job_url: str, kind: str,
+                          legacy_path: str | Path | None = None) -> int:
+    """Return the next version number for a job's document kind.
+
+    Legacy compatibility (spec D2): a job whose document predates history has
+    its file at the deterministic legacy path. The first versioned write
+    backfills that file as version 1 (status 'legacy') and returns 2 — the
+    legacy file itself is never touched. The regeneration trigger clears the
+    jobs pointer before the tailor stage runs, so the legacy file on disk is
+    the durable signal, not the pointer. A job with no prior document starts
+    at version 1.
+    """
+    row = conn.execute(
+        "SELECT MAX(version) FROM document_versions WHERE job_url = ? AND kind = ?",
+        (job_url, kind),
+    ).fetchone()
+    max_version = row[0] if row else None
+    if max_version is None and legacy_path and Path(legacy_path).exists():
+        conn.execute(
+            "INSERT INTO document_versions "
+            "(job_url, kind, version, file_path, validation_status, created_at) "
+            "VALUES (?, ?, 1, ?, 'legacy', ?)",
+            (job_url, kind, str(legacy_path), _utc_now()),
+        )
+        conn.commit()
+        return 2
+    return (max_version or 0) + 1
+
+
+def record_document_version(conn: sqlite3.Connection, job_url: str, kind: str,
+                            version: int, file_path: str | Path,
+                            validation_status: str | None = None) -> int:
+    """Insert a document version row and return its id (the version id).
+
+    Args:
+        conn: Database connection.
+        job_url: The job the document was generated for.
+        kind: KIND_RESUME or KIND_COVER_LETTER.
+        version: Version number (from next_document_version).
+        file_path: Path the document was written to.
+        validation_status: Generation outcome (e.g. 'approved',
+            'failed_validation') or 'legacy' for backfilled rows.
+    """
+    cur = conn.execute(
+        "INSERT INTO document_versions "
+        "(job_url, kind, version, file_path, validation_status, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (job_url, kind, version, str(file_path), validation_status, _utc_now()),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def get_document_versions(conn: sqlite3.Connection | None = None,
+                          job_url: str | None = None,
+                          kind: str | None = None) -> list[dict]:
+    """Version rows for a job (optionally one kind), oldest first."""
+    if conn is None:
+        conn = get_connection()
+    sql = "SELECT * FROM document_versions"
+    clauses: list[str] = []
+    params: list = []
+    if job_url is not None:
+        clauses.append("job_url = ?")
+        params.append(job_url)
+    if kind is not None:
+        clauses.append("kind = ?")
+        params.append(kind)
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY kind, version"
+    rows = conn.execute(sql, params).fetchall()
+    return [dict(zip(row.keys(), row)) for row in rows]
+
+
+def resolve_version_id(conn: sqlite3.Connection, job_url: str, kind: str,
+                       file_path: str | None) -> int | None:
+    """The version id whose file_path matches, or None (pre-history/unknown).
+
+    Pre-history documents (written before the history feature, or with
+    history disabled) have no version row; their snapshot id is honestly
+    NULL rather than guessed.
+    """
+    if not file_path:
+        return None
+    row = conn.execute(
+        "SELECT id FROM document_versions "
+        "WHERE job_url = ? AND kind = ? AND file_path = ? "
+        "ORDER BY version DESC LIMIT 1",
+        (job_url, kind, str(file_path)),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def reset_job_tailoring(conn: sqlite3.Connection, url: str,
+                        include_cover: bool = False) -> bool:
+    """Clear a job's tailoring state so the tailor stage re-enqueues it (D3).
+
+    Keeps fit_score and full_description (the tailor stage needs both) and
+    resets the attempt counters so a previously-exhausted job can try again.
+    Existing files and version rows stay on disk — history is never deleted.
+    Returns True when the job exists.
+    """
+    sets = ["tailored_resume_path = NULL", "tailored_at = NULL", "tailor_attempts = 0"]
+    params: list = []
+    if include_cover:
+        sets += ["cover_letter_path = NULL", "cover_letter_at = NULL", "cover_attempts = 0"]
+    params.append(url)
+    cur = conn.execute(f"UPDATE jobs SET {', '.join(sets)} WHERE url = ?", params)
+    conn.commit()
+    return cur.rowcount > 0
