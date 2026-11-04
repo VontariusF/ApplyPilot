@@ -18,11 +18,20 @@ LLM_MODEL env var overrides the model name for any provider.
 
 import logging
 import os
+import threading
 import time
 
 import httpx
 
 log = logging.getLogger(__name__)
+
+
+class LLMParseError(RuntimeError):
+    """Raised when an LLM response cannot be parsed into assistant text (B8/B9).
+
+    Carries a readable description of the response shape instead of letting a
+    raw KeyError/IndexError/AttributeError escape from nested dict walks.
+    """
 
 # ---------------------------------------------------------------------------
 # Provider detection
@@ -249,7 +258,29 @@ class LLMClient:
         )
         resp.raise_for_status()
         data = resp.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"]
+
+        # B8: safety-blocked responses have no candidates; tool-call or
+        # functionCall parts carry no text. Raise a readable error instead of
+        # a raw IndexError/KeyError from the dict walk.
+        candidates = data.get("candidates") or []
+        if not candidates:
+            raise LLMParseError(
+                "Gemini response contained no candidates (likely safety-blocked): "
+                f"{str(data)[:200]}"
+            )
+
+        first = candidates[0] if isinstance(candidates[0], dict) else {}
+        parts = (first.get("content") or {}).get("parts") or []
+        texts = [
+            p["text"] for p in parts
+            if isinstance(p, dict) and isinstance(p.get("text"), str)
+        ]
+        if not texts:
+            raise LLMParseError(
+                "Gemini response contained no text parts (e.g. functionCall or "
+                f"empty part): {str(data)[:200]}"
+            )
+        return "".join(texts)
 
     # -- OpenAI-compat API --------------------------------------------------
 
@@ -288,7 +319,15 @@ class LLMClient:
     def _handle_compat_response(resp: httpx.Response) -> str:
         resp.raise_for_status()
         data = resp.json()
-        return data["choices"][0]["message"]["content"]
+        content = data["choices"][0]["message"]["content"]
+        # B8: tool-call/refusal responses return content: null. Return a
+        # readable error rather than None (which crashed downstream .strip()).
+        if not isinstance(content, str):
+            raise LLMParseError(
+                "OpenAI-compatible response had null/non-text message content "
+                f"(likely a tool call or refusal): {str(data)[:200]}"
+            )
+        return content
 
     # -- public API ---------------------------------------------------------
 
@@ -301,10 +340,17 @@ class LLMClient:
         """Send a chat completion request and return the assistant message text."""
         # Qwen3 optimization: prepend /no_think to skip chain-of-thought
         # reasoning, saving tokens on structured extraction tasks.
+        # B9: first message content may be None (structured content) — guard
+        # instead of raising AttributeError before any network call.
         if "qwen" in self.model.lower() and messages:
             first = messages[0]
-            if first.get("role") == "user" and not first["content"].startswith("/no_think"):
-                messages = [{"role": first["role"], "content": f"/no_think\n{first['content']}"}] + messages[1:]
+            first_content = first.get("content") if isinstance(first, dict) else None
+            if (
+                first.get("role") == "user"
+                and isinstance(first_content, str)
+                and not first_content.startswith("/no_think")
+            ):
+                messages = [{"role": first["role"], "content": f"/no_think\n{first_content}"}] + messages[1:]
 
         for attempt in range(_MAX_RETRIES):
             try:
@@ -394,14 +440,21 @@ class _GeminiCompatForbidden(Exception):
 # ---------------------------------------------------------------------------
 
 _instance: LLMClient | None = None
+_instance_lock = threading.Lock()
 
 
 def get_client() -> LLMClient:
-    """Return (or create) the module-level LLMClient singleton."""
+    """Return (or create) the module-level LLMClient singleton.
+
+    B15: guarded by a module lock so concurrent first use (parallel
+    enrichment workers) constructs exactly one client.
+    """
     global _instance
     if _instance is None:
-        base_url, model, api_key = _detect_provider()
-        label = _provider_label(base_url)
-        log.info("LLM provider: %s (%s)  model: %s", label, base_url, model)
-        _instance = LLMClient(base_url, model, api_key, provider_name=label)
+        with _instance_lock:
+            if _instance is None:  # re-check inside the lock
+                base_url, model, api_key = _detect_provider()
+                label = _provider_label(base_url)
+                log.info("LLM provider: %s (%s)  model: %s", label, base_url, model)
+                _instance = LLMClient(base_url, model, api_key, provider_name=label)
     return _instance

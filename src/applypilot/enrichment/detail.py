@@ -87,6 +87,7 @@ def resolve_all_urls(conn: sqlite3.Connection) -> dict:
     resolved = 0
     failed = 0
     already_absolute = 0
+    collisions = 0
 
     for row in rows:
         url, site = row[0], row[1]
@@ -100,8 +101,20 @@ def resolve_all_urls(conn: sqlite3.Connection) -> dict:
                 conn.execute("UPDATE jobs SET url = ? WHERE url = ?", (new_url, url))
                 resolved += 1
             except sqlite3.IntegrityError:
-                conn.execute("DELETE FROM jobs WHERE url = ?", (url,))
-                resolved += 1
+                # B5: another row already owns the absolute URL. Deleting that
+                # row destroyed real data (possibly the richer record). Keep
+                # both rows: leave the relative-url row untouched and flag the
+                # collision for manual resolution.
+                collisions += 1
+                log.warning(
+                    "URL-resolution collision: '%s' resolves to '%s' which already "
+                    "exists in the DB — both rows kept, relative-url row flagged",
+                    url, new_url,
+                )
+                conn.execute(
+                    "UPDATE jobs SET detail_error = ? WHERE url = ?",
+                    (f"url-collision: resolved url already exists ({new_url})", url),
+                )
         else:
             failed += 1
 
@@ -121,7 +134,7 @@ def resolve_all_urls(conn: sqlite3.Connection) -> dict:
 
     conn.commit()
     return {"resolved": resolved, "failed": failed, "already_absolute": already_absolute,
-            "app_resolved": app_resolved}
+            "app_resolved": app_resolved, "collisions": collisions}
 
 
 def resolve_wttj_urls(conn: sqlite3.Connection) -> int:

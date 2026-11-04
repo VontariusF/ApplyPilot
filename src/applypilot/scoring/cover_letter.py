@@ -266,7 +266,7 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
             rate = completed / elapsed if elapsed > 0 else 0
             log.info(
                 "%d/%d [OK] | %.1f jobs/min | %s",
-                completed, len(jobs), rate * 60, result["title"][:40],
+                completed, len(jobs), rate * 60, (result.get("title") or "untitled")[:40],
             )
         except Exception as e:
             result = {
@@ -275,7 +275,7 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
             }
             error_count += 1
             results.append(result)
-            log.error("%d/%d [ERROR] %s -- %s", completed, len(jobs), job["title"][:40], e)
+            log.error("%d/%d [ERROR] %s -- %s", completed, len(jobs), (job.get("title") or "untitled")[:40], e)
 
     # Persist to DB: increment attempt counter for ALL, save path only for successes
     now = datetime.now(timezone.utc).isoformat()

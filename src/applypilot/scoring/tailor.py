@@ -490,8 +490,8 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
             tailored, report = tailor_resume(resume_text, job, profile,
                                              validation_mode=validation_mode)
 
-            # Build safe filename prefix
-            safe_title = re.sub(r"[^\w\s-]", "", job["title"])[:50].strip().replace(" ", "_")
+            # Build safe filename prefix (B12: title is nullable — guard)
+            safe_title = re.sub(r"[^\w\s-]", "", job.get("title") or "untitled")[:50].strip().replace(" ", "_")
             safe_site = re.sub(r"[^\w\s-]", "", job["site"])[:20].strip().replace(" ", "_")
             prefix = f"{safe_site}_{safe_title}"
 
@@ -539,7 +539,7 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
                 "url": job["url"], "title": job["title"], "site": job["site"],
                 "status": "error", "attempts": 0, "path": None, "pdf_path": None,
             }
-            log.error("%d/%d [ERROR] %s -- %s", completed, len(jobs), job["title"][:40], e)
+            log.error("%d/%d [ERROR] %s -- %s", completed, len(jobs), (job.get("title") or "untitled")[:40], e)
 
         results.append(result)
         stats[result.get("status", "error")] = stats.get(result.get("status", "error"), 0) + 1
@@ -552,7 +552,7 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
             result["status"].upper(),
             result.get("attempts", "?"),
             rate * 60,
-            result["title"][:40],
+            (result.get("title") or "untitled")[:40],
         )
 
     # Persist to DB: increment attempt counter for ALL, save path only for approved

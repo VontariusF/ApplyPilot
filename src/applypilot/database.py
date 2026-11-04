@@ -16,6 +16,26 @@ from applypilot.config import DB_PATH
 # (required for SQLite thread safety with parallel workers)
 _local = threading.local()
 
+# B16: ORDER BY ... NULLS LAST (database.py queue queries) requires SQLite >= 3.30.
+_MIN_SQLITE_VERSION = (3, 30)
+_sqlite_version_checked = False
+
+
+def _check_sqlite_version(version_info: tuple[int, ...] | None = None) -> None:
+    """Raise a readable error if the runtime SQLite is too old (B16).
+
+    Args:
+        version_info: Override the version to check (for tests). Defaults to
+            sqlite3.sqlite_version_info.
+    """
+    ver = tuple(version_info if version_info is not None else sqlite3.sqlite_version_info)
+    if ver < _MIN_SQLITE_VERSION:
+        raise RuntimeError(
+            f"ApplyPilot requires SQLite >= {'.'.join(map(str, _MIN_SQLITE_VERSION))} "
+            f"(for 'ORDER BY ... NULLS LAST'); found {sqlite3.sqlite_version}. "
+            "Upgrade your Python build or system SQLite."
+        )
+
 
 def get_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
     """Get a thread-local cached SQLite connection with WAL mode enabled.
@@ -30,6 +50,12 @@ def get_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
         sqlite3.Connection configured with WAL mode and row factory.
     """
     path = str(db_path or DB_PATH)
+
+    # B16: check once per process before any query that uses NULLS LAST.
+    global _sqlite_version_checked
+    if not _sqlite_version_checked:
+        _check_sqlite_version()
+        _sqlite_version_checked = True
 
     if not hasattr(_local, 'connections'):
         _local.connections = {}
@@ -201,22 +227,30 @@ def ensure_columns(conn: sqlite3.Connection | None = None) -> list[str]:
     if conn is None:
         conn = get_connection()
 
-    existing = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
-    added = []
+    # B4.8/spike-confirmed race: two threads can both pass the PRAGMA check
+    # before either commits its ALTER TABLE, raising a duplicate-column
+    # OperationalError. Serialize the whole check-and-migrate section.
+    with _migration_lock:
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+        added = []
 
-    for col, dtype in _ALL_COLUMNS.items():
-        if col not in existing:
-            # PRIMARY KEY columns can't be added via ALTER TABLE, but url
-            # is always created with the table itself so this is safe
-            if "PRIMARY KEY" in dtype:
-                continue
-            conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} {dtype}")
-            added.append(col)
+        for col, dtype in _ALL_COLUMNS.items():
+            if col not in existing:
+                # PRIMARY KEY columns can't be added via ALTER TABLE, but url
+                # is always created with the table itself so this is safe
+                if "PRIMARY KEY" in dtype:
+                    continue
+                conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} {dtype}")
+                added.append(col)
 
-    if added:
-        conn.commit()
+        if added:
+            conn.commit()
 
     return added
+
+
+# B4.8: serializes ensure_columns across threads (confirmed migration race).
+_migration_lock = threading.Lock()
 
 
 def get_stats(conn: sqlite3.Connection | None = None) -> dict:
