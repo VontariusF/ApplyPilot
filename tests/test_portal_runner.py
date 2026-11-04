@@ -64,6 +64,66 @@ def test_invalid_params_rejected(portal_env):
         runner.build_apply_command({"limit": "abc"})
 
 
+# --- Automation (spec Automation): target-URL apply and one-job tailor ------
+
+def test_apply_command_accepts_target_url(portal_env):
+    argv = runner.build_apply_command({"url": "https://jobs.example/1?ref=x"})
+    assert argv[-2:] == ["--url", "https://jobs.example/1?ref=x"]
+
+
+def test_apply_command_rejects_bad_target_url(portal_env):
+    with pytest.raises(runner.ParamError, match=r"http\(s\) URL"):
+        runner.build_apply_command({"url": "javascript:alert(1)"})
+
+
+def test_pipeline_command_results_per_site(portal_env):
+    argv = runner.build_pipeline_command({"results_per_site": "25"})
+    assert "--results-per-site" in argv and "25" in argv
+
+
+def test_tailor_command_shape(portal_env):
+    argv = runner.build_tailor_command({"url": "https://jobs.example/1"})
+    assert argv[1:4] == ["-m", "applypilot", "run"]
+    assert argv[4:7] == ["tailor", "cover", "pdf"]
+    assert "--url" in argv and "https://jobs.example/1" in argv
+    assert "--min-score" in argv and "0" in argv
+
+
+def test_retry_run_reruns_failed_params(portal_env, monkeypatch):
+    runner.init_registry()
+    conn = get_connection()
+    now = "2026-11-04T00:00:00+00:00"
+    conn.execute(
+        "INSERT INTO runs (id, kind, params, status, started_at) "
+        "VALUES ('dead-1', 'apply', ?, 'failed', ?)",
+        (json.dumps({"min_score": "6", "limit": "3"}), now))
+    conn.commit()
+    captured: dict = {}
+
+    def fake_start(kind, params, **kwargs):
+        captured["kind"], captured["params"] = kind, dict(params)
+        return {"id": "retry-1", "kind": kind, "status": "running"}
+
+    monkeypatch.setattr(runner, "start_run", fake_start)
+    row = runner.retry_run("dead-1")
+    assert captured == {"kind": "apply",
+                        "params": {"min_score": "6", "limit": "3"}}
+    assert row["id"] == "retry-1"
+
+
+def test_retry_run_rejects_non_failed_runs(portal_env):
+    runner.init_registry()
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO runs (id, kind, params, status, started_at) "
+        "VALUES ('live-1', 'pipeline', '{}', 'running', '2026-11-04T00:00:00+00:00')")
+    conn.commit()
+    with pytest.raises(runner.ParamError, match="only failed"):
+        runner.retry_run("live-1")
+    with pytest.raises(runner.ParamError, match="not found"):
+        runner.retry_run("nope-1")
+
+
 def test_start_run_records_row_and_spawns_subprocess(portal_env):
     row = runner.start_run(
         "pipeline", {},
