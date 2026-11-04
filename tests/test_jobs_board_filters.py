@@ -5,7 +5,11 @@ route tests for filter combinations, and the empty-state render test —
 plus the salary parser and the find-jobs-now onboarding handoff route.
 """
 
+import asyncio
 import sys
+import time
+
+import httpx
 
 from applypilot.database import init_db
 from applypilot.portal import queries
@@ -279,3 +283,56 @@ def test_empty_state_find_jobs_button_posts_runs_start(portal_client, seeded_pro
     r = client.post("/runs/start", data={"kind": "pipeline"}, follow_redirects=False)
     assert r.status_code == 303
     assert kinds == ["pipeline"]
+
+
+
+# ---------------------------------------------------------------------------
+# Rescore route: off the event loop (sweep A S2-3)
+# ---------------------------------------------------------------------------
+
+def test_rescore_does_not_block_event_loop(portal_env, portal_client,
+                                           seeded_profile, monkeypatch):
+    """Sweep A S2-3 acceptance: a slow LLM rescore must not freeze the portal.
+
+    The fake scoring call blocks for a known 1s window. A concurrent GET /
+    must complete *inside* that window. With the bug present the scoring
+    call runs directly on the event loop, so the GET cannot even start
+    until the sleep finishes — its completion lands at >= the full blocking
+    duration after scoring began.
+    """
+    from applypilot.portal import app as portal_app_module
+
+    client, _ = portal_client
+    app = client.app
+
+    BLOCK_SECONDS = 1.0
+    t: dict = {}
+
+    def slow_scoring(url: str):
+        t["start"] = time.perf_counter()
+        time.sleep(BLOCK_SECONDS)
+
+    monkeypatch.setattr(portal_app_module, "run_scoring", slow_scoring)
+
+    async def scenario() -> tuple[int, int, float]:
+        transport = httpx.ASGITransport(app=app)
+        headers = {"x-portal-token": app.state.token}
+        # Localhost base URL — the portal's host guard rejects other hosts.
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as ac:
+            rescore = asyncio.create_task(
+                ac.post("/jobs/rescore", data={"url": "https://jobs.example.com/123"},
+                        headers=headers, follow_redirects=False))
+            while "start" not in t:  # wait until scoring is actually running
+                await asyncio.sleep(0.01)
+            page = await ac.get("/", headers=headers)
+            # Time from scoring start to GET completion, measured while the
+            # event loop is live (before awaiting the rescore task).
+            elapsed = time.perf_counter() - t["start"]
+            rescore_response = await rescore
+            return rescore_response.status_code, page.status_code, elapsed
+
+    rescore_status, page_status, elapsed = asyncio.run(scenario())
+    assert rescore_status == 303
+    assert page_status == 200
+    assert elapsed < 0.9 * BLOCK_SECONDS, \
+        f"GET / finished {elapsed:.2f}s after scoring started — event loop was blocked"
