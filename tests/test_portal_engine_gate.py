@@ -250,3 +250,115 @@ def test_onboarding_renders_captured_oauth_link_and_waiting_state(portal_client,
     assert r.status_code == 200
     assert ESCAPED_HREF in r.text
     assert "Waiting for you to finish the Claude sign-in" in r.text
+
+
+# ---------------------------------------------------------------------------
+# POST /engine/droid-key — the Droid key card (Factory CLI has no login)
+# ---------------------------------------------------------------------------
+
+FAKE_KEY = "fk-test-4242-abcd"
+
+
+def _only_droid_binary(monkeypatch):
+    """droid_status()'s which() sees a droid binary; nothing else installed."""
+    import shutil
+
+    real_which = shutil.which
+    monkeypatch.setattr(shutil, "which",
+                        lambda name: "/usr/bin/droid" if name == "droid" else real_which(name))
+
+
+def test_droid_card_signed_out_shows_key_form(portal_client, monkeypatch):
+    client, _ = portal_client
+    patch_gates(monkeypatch, droid=DROID_KEY_MISSING)
+    r = client.get("/engine")
+    assert r.status_code == 200
+    assert 'action="/engine/droid-key"' in r.text
+    assert 'type="password"' in r.text  # never renders the value in the clear
+    assert "docs.factory.com" in r.text  # where to generate the key
+    assert "export FACTORY_API_KEY" in r.text  # terminal fallback
+    assert 'href="/settings"' in r.text  # Settings path still offered
+
+
+def test_droid_card_signed_in_has_no_key_form(portal_client, monkeypatch):
+    client, _ = portal_client
+    ready = engine_auth.EngineStatus("droid", engine_auth.SIGNED_IN, "api_key", "/usr/bin/droid")
+    patch_gates(monkeypatch, droid=ready)
+    r = client.get("/engine")
+    assert "/engine/droid-key" not in r.text
+    assert "Ready" in r.text
+
+
+def test_droid_key_route_saves_and_flips_signed_in(portal_client, monkeypatch):
+    client, _ = portal_client
+    _only_droid_binary(monkeypatch)
+
+    r = client.post("/engine/droid-key", data={"factory_key": FAKE_KEY},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/engine"
+
+    from applypilot import config
+
+    env_text = config.ENV_PATH.read_text(encoding="utf-8")
+    assert "FACTORY_API_KEY=fk-test-4242-abcd" in env_text  # merged into .env
+    assert (config.ENV_PATH.stat().st_mode & 0o777) == 0o600
+    import os
+    assert os.environ["FACTORY_API_KEY"] == FAKE_KEY  # live refresh, no restart
+
+    # The status flip is observable through the real status function.
+    status = engine_auth.droid_status()
+    assert status.state == engine_auth.SIGNED_IN
+    assert status.auth_method == "api_key"
+
+
+def test_droid_key_route_flips_onboarding_gate_too(portal_client, monkeypatch):
+    """The same flow from the onboarding embed returns to onboarding."""
+    client, _ = portal_client
+    _only_droid_binary(monkeypatch)
+    r = client.post("/engine/droid-key",
+                    data={"factory_key": FAKE_KEY, "next": "/onboarding"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/onboarding"
+
+
+def test_droid_key_route_rejects_empty(portal_client, monkeypatch):
+    client, _ = portal_client
+    r = client.post("/engine/droid-key", data={"factory_key": "   "},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert "login_error=" in r.headers["location"]
+    import os
+    assert "FACTORY_API_KEY" not in os.environ  # nothing written, nothing refreshed
+    from applypilot import config
+    assert not config.ENV_PATH.exists() or "FACTORY_API_KEY" not in config.ENV_PATH.read_text()
+
+
+def test_droid_key_route_allows_only_allowlisted_next(portal_client, monkeypatch):
+    client, _ = portal_client
+    _only_droid_binary(monkeypatch)
+    r = client.post("/engine/droid-key",
+                    data={"factory_key": FAKE_KEY, "next": "https://evil.example"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == "/engine"  # non-allowlisted target falls back
+
+
+def test_droid_key_never_appears_in_response(portal_client, monkeypatch):
+    """Redaction boundary: the pasted key shows up nowhere in the response
+    bodies or redirect targets around the save."""
+    client, _ = portal_client
+    _only_droid_binary(monkeypatch)
+    patch_gates(monkeypatch)  # render whatever the cards show after the save
+
+    r = client.post("/engine/droid-key", data={"factory_key": FAKE_KEY},
+                    follow_redirects=False)
+    assert FAKE_KEY not in r.headers["location"]
+    assert FAKE_KEY not in r.text
+
+    followed = client.get("/engine")
+    assert followed.status_code == 200
+    assert FAKE_KEY not in followed.text
+    # The masked settings view keeps only the last four characters visible.
+    assert "fk-test" not in followed.text
