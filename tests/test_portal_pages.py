@@ -120,6 +120,46 @@ def test_mark_rejects_bad_status(portal_client):
     assert r.status_code == 400
 
 
+def test_jobs_mark_redirect_encodes_url(portal_client):
+    """A job URL containing '&' and '=' must survive the redirect intact.
+
+    The redirect Location is percent-encoded, so following it lands on the
+    job detail page instead of a truncated-url 404 (sweep A finding 4).
+    """
+    client, _ = portal_client
+    url = seed_job(url="https://jobs.lever.co/acme/abc?team=platform&mode=board")
+    r = client.post("/jobs/mark", data={"url": url, "status": "applied"},
+                    follow_redirects=True)
+    assert r.status_code == 200
+    assert "Pwidget Engineer" in r.text
+
+
+def test_jobs_redirect_encodes_url_location(portal_client, monkeypatch):
+    """mark/regenerate/rescore build an encoded /jobs/detail?url= target."""
+    from urllib.parse import quote
+
+    import applypilot.portal.app as portal_app
+
+    client, _ = portal_client
+    url = seed_job(url="https://jobs.lever.co/acme/abc?team=platform&mode=board")
+    encoded = f"/jobs/detail?url={quote(url, safe='')}"
+
+    monkeypatch.setattr(portal_app, "run_scoring", lambda url=None: None)
+
+    r = client.post("/jobs/mark", data={"url": url, "status": "applied"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == encoded
+
+    r = client.post("/jobs/regenerate", data={"url": url}, follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == encoded
+
+    r = client.post("/jobs/rescore", data={"url": url}, follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"] == encoded
+
+
 def test_reset_failed_action(portal_client):
     client, _ = portal_client
     url = seed_job()

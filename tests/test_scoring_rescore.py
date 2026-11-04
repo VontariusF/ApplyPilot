@@ -9,6 +9,7 @@ Covers the verifying tests named by the spec:
 """
 
 from datetime import datetime, timezone
+from urllib.parse import unquote
 
 import pytest
 from typer.testing import CliRunner
@@ -257,7 +258,7 @@ def test_portal_rescore_route_scores_job(portal_client, resume, monkeypatch):
 
     r = client.post("/jobs/rescore", data={"url": url}, follow_redirects=False)
     assert r.status_code == 303
-    assert f"url={url}" in r.headers["location"]
+    assert unquote(r.headers["location"]) == f"/jobs/detail?url={url}"
     row = job_row(url)
     assert row["fit_score"] == 8
     assert row["score_error"] is None
