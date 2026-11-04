@@ -20,9 +20,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 
 # The three gate states — the tri-state every consumer switches on.
 NOT_INSTALLED = "not_installed"
@@ -119,13 +121,90 @@ def droid_status() -> EngineStatus:
     return EngineStatus("droid", SIGNED_OUT, None, binary)
 
 
-def start_login() -> tuple[subprocess.Popen | None, str | None]:
-    """Spawn `claude auth login`; the browser OAuth flow opens on the user's machine.
+# The CLI prints its sign-in URL somewhere in its output (banner text around
+# it varies between releases); the capture is format-agnostic — first
+# http(s) URL found wins, on either stream.
+_URL_PATTERN = re.compile(r"https?://[^\s\"'<>]+")
+
+
+def extract_oauth_url(text: str) -> str | None:
+    """First http(s) URL in captured login output, if any."""
+    match = _URL_PATTERN.search(text)
+    if match is None:
+        return None
+    return match.group(0).rstrip(".,;)")
+
+
+@dataclass
+class LoginProcess:
+    """A spawned `claude auth login` whose output is captured in the background.
+
+    On a desktop the CLI opens the browser itself; on a headless portal the
+    OAuth URL it prints is the only way to sign in, so stdout (with stderr
+    merged in) is drained by a daemon thread instead of being discarded.
+    `wait` delegates to the child, so callers keep treating this like the
+    Popen it wraps.
+    """
+
+    proc: subprocess.Popen
+    output: list[str] = field(default_factory=list)
+    capture_error: str | None = None  # why the capture ended early, if it did
+
+    def wait(self, timeout: float | None = None) -> int:
+        """Delegate to the child process."""
+        return self.proc.wait(timeout=timeout)
+
+    def text(self) -> str:
+        """Everything the CLI has printed so far."""
+        return "".join(self.output)
+
+    def oauth_url(self) -> str | None:
+        return extract_oauth_url(self.text())
+
+
+def _capture_output(login: LoginProcess) -> None:
+    """Drain the login process's output into the capture (runs as a daemon).
+
+    The thread must keep the pipe empty so the child never blocks on a
+    full buffer. A capture failure is recorded, not raised — the login
+    outcome is judged by the process exit and claude_status(), never by
+    whether the capture survived.
+    """
+    stream = login.proc.stdout
+    if stream is None:
+        return
+    try:
+        for line in iter(stream.readline, ""):
+            login.output.append(line)
+    except (OSError, ValueError) as exc:
+        login.capture_error = f"output capture ended early: {exc}"
+    finally:
+        try:
+            stream.close()
+        except OSError as exc:
+            login.capture_error = login.capture_error or f"could not close capture: {exc}"
+
+
+# The most recent spawned login. The portal is single-user and one login
+# runs at a time, so a plain module slot is the whole registry.
+_active_login: LoginProcess | None = None
+
+
+def active_login() -> LoginProcess | None:
+    """The most recent spawned login, whose output may carry the OAuth URL."""
+    return _active_login
+
+
+def start_login() -> tuple[LoginProcess | None, str | None]:
+    """Spawn `claude auth login`, capturing its output for the gate pages.
 
     Non-blocking on success: the flow completes in the browser, and the
-    caller polls claude_status() for the flip to signed in. Returns
-    (None, error) when the binary is missing or the spawn fails.
+    caller polls claude_status() for the flip to signed in. The OAuth URL
+    the CLI prints is captured rather than discarded, so a headless portal
+    can re-render it as a clickable sign-in link. Returns (None, error)
+    when the binary is missing or the spawn fails.
     """
+    global _active_login
     binary = shutil.which("claude")
     if binary is None:
         return None, "Claude Code is not installed — install it from https://claude.ai/code first."
@@ -138,16 +217,22 @@ def start_login() -> tuple[subprocess.Popen | None, str | None]:
         proc = subprocess.Popen(
             [binary, "auth", "login"],
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,  # a URL on stderr is still a sign-in link
+            text=True,
             **popen_kwargs,
         )
     except OSError as exc:
         return None, f"could not start `claude auth login`: {exc}"
-    return proc, None
+    login = LoginProcess(proc)
+    threading.Thread(target=_capture_output, args=(login,),
+                     name="claude-login-capture", daemon=True).start()
+    _active_login = login
+    return login, None
 
 
-def login_instant_death(proc: subprocess.Popen, grace: float = LOGIN_GRACE_SECONDS) -> str | None:
+def login_instant_death(proc: LoginProcess | subprocess.Popen,
+                        grace: float = LOGIN_GRACE_SECONDS) -> str | None:
     """Human message when a spawned login died within `grace` seconds.
 
     `claude auth login` blocks for the browser flow, so a process that
@@ -158,4 +243,11 @@ def login_instant_death(proc: subprocess.Popen, grace: float = LOGIN_GRACE_SECON
         code = proc.wait(timeout=grace)
     except subprocess.TimeoutExpired:
         return None
-    return f"`claude auth login` exited with code {code} before the sign-in flow could start."
+    message = f"`claude auth login` exited with code {code} before the sign-in flow could start."
+    # A CLI that died instantly usually printed why; the capture merged
+    # stdout+stderr, so hand the tail along. Best-effort: the reader thread
+    # may not have drained the pipe yet for a large burst of output.
+    text = proc.text().strip() if callable(getattr(proc, "text", None)) else ""
+    if text:
+        message += f" It printed: {text[-200:]}"
+    return message
