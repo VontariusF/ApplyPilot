@@ -277,6 +277,7 @@ def test_onboarding_done_card_offers_find_jobs(portal_client, seeded_profile,
         profile_draft = None
         backend = "llm"
         error = None
+        seq = 7  # render version stamped by _onboarding_context
 
     monkeypatch.setattr(portal_app_module.onboarding, "load_state", lambda: FakeState())
     r = client.get("/onboarding/chat")

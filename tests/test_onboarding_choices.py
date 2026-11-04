@@ -578,6 +578,30 @@ def test_guided_screen_renders_choices_and_something_else(portal_client, fake_ll
     assert "<textarea" in page
 
 
+def test_state_version_stamps_every_render(portal_client, fake_llm, monkeypatch):
+    """SSE staleness guard: renders carry the state seq they were built from.
+
+    save_state bumps a monotonic seq; every rendered surface (wrapper and
+    pushed shell) stamps it, and the signature includes it so a push is
+    regenerated on any save. The client guard (onboarding_surface.html)
+    drops pushes older than what the DOM already shows.
+    """
+    client, _ = portal_client
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    _start(client)
+
+    first = onboarding.load_state()
+    assert first.seq >= 1  # starting the interview already persisted state
+    page = client.get("/onboarding/chat").text
+    assert f'data-chat-seq="{first.seq}"' in page
+
+    _answer(client, "work_authorized", value="yes")
+    second = onboarding.load_state()
+    assert second.seq > first.seq  # every save bumps
+    page = client.get("/onboarding/chat").text
+    assert f'data-chat-seq="{second.seq}"' in page
+
+
 def test_free_text_widget_matches_the_kind(portal_client, fake_llm, monkeypatch):
     client, _ = portal_client
     monkeypatch.setattr(onboarding, "provider_ready", lambda: True)

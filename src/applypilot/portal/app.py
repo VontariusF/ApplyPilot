@@ -1326,6 +1326,8 @@ def _onboarding_context(error: str = "", login_error: str = "", login: int = 0,
     question = onboarding.current_question(state) if in_interview and not agent_led else None
     return {
         "state": state,
+        # Render version for the SSE staleness guard (see onboarding_surface).
+        "chat_seq": state.seq if state else 0,
         "ready": ready,
         "provider_ready": onboarding.provider_ready(),
         "missing": onboarding.missing_review_fields(state.profile_draft) if in_review else [],
@@ -1493,7 +1495,7 @@ def _chat_signature() -> tuple:
             mtime = os.path.getmtime(config.ONBOARDING_STATE_PATH)
         except OSError:
             mtime = None
-        file_sig = (mtime, state.phase, len(state.messages))
+        file_sig = (mtime, state.seq, state.phase, len(state.messages))
     return (file_sig, onboarding.provider_ready(),
             engine_auth.claude_status().state)
 

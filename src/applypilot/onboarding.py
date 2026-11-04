@@ -112,6 +112,11 @@ class InterviewState:
     # "" — answered-but-empty stays flagged on review (PR #22 guard).
     answers: dict[str, str] = field(default_factory=dict)
     mode: str = MODE_CHOICES  # guided buttons vs "let the agent ask"
+    # Monotonic render version: bumped by every save, stamped into every
+    # rendered surface, and used by the portal's SSE guard to drop pushes
+    # that are older than what the DOM already shows (a push rendered
+    # mid-POST can otherwise arrive after the POST's own fresher swap).
+    seq: int = 0
     updated_at: str = ""
 
 
@@ -131,6 +136,7 @@ def load_state() -> InterviewState | None:
 
 def save_state(state: InterviewState) -> None:
     """Persist state at 0600 (it carries resume text and preferences)."""
+    state.seq += 1
     state.updated_at = datetime.now(timezone.utc).isoformat()
     config.write_secret_text(
         config.ONBOARDING_STATE_PATH,

@@ -55,6 +55,13 @@
 {% endif %}
 {% endmacro %}
 
+{# Versioned shell: every push of this partial carries the state sequence it
+   was rendered from. The wrapper's SSE guard (onboarding_surface.html) drops
+   pushes older than what the DOM already shows — a push rendered mid-POST
+   can otherwise arrive after the POST's own fresher swap and replace new
+   content with stale, freezing the flow mid-question. #}
+<div class="chat-shell" data-chat-seq="{{ chat_seq }}">
+
 {% if error %}<p class="alert error">{{ error }}</p>{% endif %}
 {% if login_error %}<p class="alert error">{{ login_error }}</p>{% endif %}
 
@@ -273,3 +280,4 @@
        and results land on the jobs board.</p>
   </section>
 {% endif %}
+</div>
