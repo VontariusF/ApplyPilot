@@ -5,6 +5,7 @@ how to fill out a job application form using Playwright MCP tools. All
 personal data is loaded from the user's profile -- nothing is hardcoded.
 """
 
+import hashlib
 import logging
 import os
 import shutil
@@ -443,6 +444,27 @@ If CapSolver genuinely failed (errorId > 0):
 4. All else fails -> Output RESULT:CAPTCHA."""
 
 
+def _file_sha256(path: Path) -> str:
+    """sha256 of a file's bytes, for copy-integrity verification."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def upload_job_key(job: dict) -> str:
+    """Stable per-job key for worker upload filenames.
+
+    Workers >= 2 all share APPLY_WORKER_DIR, so a name-only upload filename
+    would let one worker's tailored resume overwrite another's between
+    prompt build and agent upload (sweep B F2/F3). Hashing the job identity
+    keeps each job's upload files isolated without coordinating worker ids.
+    """
+    identity = job.get("application_url") or job["url"]
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
+
+
 def build_prompt(job: dict, tailored_resume: str,
                  cover_letter: str | None = None,
                  dry_run: bool = False) -> str:
@@ -474,13 +496,22 @@ def build_prompt(job: dict, tailored_resume: str,
     if not src_pdf.exists():
         raise ValueError(f"Resume PDF not found: {src_pdf}")
 
-    # Copy to a clean filename for upload (recruiters see the filename)
+    # Copy to a clean filename for upload (recruiters see the filename),
+    # job-qualified so concurrent workers can never overwrite each other's
+    # tailored documents (S2 F3).
     full_name = personal["full_name"]
     name_slug = full_name.replace(" ", "_")
+    job_key = upload_job_key(job)
     dest_dir = config.APPLY_WORKER_DIR / "current"
     dest_dir.mkdir(parents=True, exist_ok=True)
-    upload_pdf = dest_dir / f"{name_slug}_Resume.pdf"
+    upload_pdf = dest_dir / f"{name_slug}_{job_key}_Resume.pdf"
     shutil.copy(str(src_pdf), str(upload_pdf))
+    # Verify the file the agent will upload is byte-identical to THIS job's
+    # tailored resume before the prompt references it.
+    if _file_sha256(upload_pdf) != _file_sha256(src_pdf):
+        raise RuntimeError(
+            f"Resume upload copy failed integrity check: {upload_pdf} != {src_pdf}"
+        )
     pdf_path = str(upload_pdf)
 
     # --- Cover letter handling ---
@@ -498,8 +529,13 @@ def build_prompt(job: dict, tailored_resume: str,
         # Upload must be PDF
         cl_pdf_src = cl_src.with_suffix(".pdf")
         if cl_pdf_src.exists():
-            cl_upload = dest_dir / f"{name_slug}_Cover_Letter.pdf"
+            cl_upload = dest_dir / f"{name_slug}_{job_key}_Cover_Letter.pdf"
             shutil.copy(str(cl_pdf_src), str(cl_upload))
+            if _file_sha256(cl_upload) != _file_sha256(cl_pdf_src):
+                raise RuntimeError(
+                    f"Cover letter upload copy failed integrity check: "
+                    f"{cl_upload} != {cl_pdf_src}"
+                )
             cl_upload_path = str(cl_upload)
 
     # --- Build all prompt sections ---
