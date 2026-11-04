@@ -27,6 +27,7 @@ from applypilot.apply.launcher import mark_job, reset_failed
 from applypilot.llm import ModelListError, list_models
 from applypilot.portal import auth, queries, runner
 from applypilot.portal import automation as automation_mod
+from applypilot.portal import assistant
 from applypilot.portal import settings as settings_mod
 from applypilot.scoring.scorer import run_scoring
 
@@ -465,6 +466,23 @@ def create_app() -> FastAPI:
         except (runner.ParamError, ValueError) as e:
             return RedirectResponse(f"/automation?error={quote(str(e))}", status_code=303)
         return RedirectResponse("/automation", status_code=303)
+
+    @app.post("/automation/ask")
+    async def automation_ask(request: Request):
+        """One ask-the-agent turn (spec Automation UI).
+
+        The turn runs in a thread like every other agent call; the answer
+        lands in the in-memory transcript and the page re-renders it.
+        """
+        form = await request.form()
+        text = str(form.get("text", ""))
+        error = ""
+        try:
+            await asyncio.to_thread(assistant.handle_message, text)
+        except assistant.AssistantError as e:
+            error = str(e)
+        return _render(request, "automation.html",
+                       **_automation_context(error=error))
 
     @app.get("/automation/stream")
     async def automation_stream():
@@ -937,6 +955,7 @@ def _automation_context(error: str = "") -> dict:
         "status": status,
         "presets": presets,
         "error": error,
+        "transcript": assistant.transcript(),
         "min_score_choices": automation_mod.MIN_SCORE_CHOICES,
         "daily_cap_choices": automation_mod.DAILY_CAP_CHOICES,
         "results_levels": automation_mod.RESULTS_LEVELS,

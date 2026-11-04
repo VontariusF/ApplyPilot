@@ -1,0 +1,16 @@
+<section class="panel" id="agent-panel">
+  <h2>Ask the agent</h2>
+  <p class="dim">Ask in plain words — it can start or stop a preset, flip a toggle, or tell you where things stand. It uses the same controls the buttons use.</p>
+  {% if error %}<p class="alert error">{{ error }}</p>{% endif %}
+  <div class="chat-log" data-testid="assistant-transcript">
+    {% for msg in transcript %}
+    <p class="chat-msg {{ msg['role'] }}">{{ msg['text'] }}</p>
+    {% else %}
+    <p class="empty">No questions yet — try "find me jobs" or "is auto-apply on?".</p>
+    {% endfor %}
+  </div>
+  <form method="post" action="/automation/ask" class="composer">
+    <input type="text" name="text" placeholder="e.g. find me jobs" aria-label="Ask the agent">
+    <button type="submit">Ask</button>
+  </form>
+</section>

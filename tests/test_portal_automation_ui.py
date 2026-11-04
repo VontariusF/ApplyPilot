@@ -9,8 +9,10 @@ offered must be refused.
 
 import asyncio
 import json
+import re
 import sys
 import time
+from html import unescape
 
 import pytest
 
@@ -100,14 +102,17 @@ def test_adjust_disclosures_offer_buttons_and_selects_only(portal_client):
     client, _ = portal_client
     r = client.get("/automation")
     # The Adjust disclosures render selects and radio/checkbox buttons —
-    # never free-text inputs.
+    # never free-text inputs. (The agent panel's composer is chat, not
+    # an adjustment, so it may be a text input.)
     assert '<select name="results_level">' in r.text
     for score in ("5", "6", "7", "8", "9"):
         assert f'name="min_score" value="{score}"' in r.text
     for cap in ("5", "10", "25"):
         assert f'name="daily_cap" value="{cap}"' in r.text
     assert 'name="keep_going"' in r.text
-    assert '<input type="text"' not in r.text.split('class="preset-grid"')[1]
+    for block in re.findall(r'<details class="adjust">.*?</details>', r.text,
+                            re.DOTALL):
+        assert '<input type="text"' not in block
 
 
 def test_both_themes_render_automation_page(portal_client):
@@ -490,3 +495,104 @@ def test_progress_stream_pushes_on_change(portal_client):
     event = asyncio.run(first_event())
     assert event["event"] == "progress"
     assert "Working: Applying" in event["data"]
+
+
+# ---------------------------------------------------------------------------
+# Ask-the-agent panel
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def agent_panel(monkeypatch):
+    """Clean in-memory transcript + provider gate opened for the fake LLM."""
+    from applypilot.portal import assistant
+    from applypilot import onboarding
+
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    assistant.clear_transcript()
+    yield
+    assistant.clear_transcript()
+
+
+def test_agent_panel_renders_on_the_automation_page(portal_client):
+    client, _ = portal_client
+    r = client.get("/automation")
+    assert 'id="agent-panel"' in r.text
+    assert 'data-testid="assistant-transcript"' in r.text
+    assert 'action="/automation/ask"' in r.text
+
+
+def test_agent_starts_a_preset_via_the_button_path(portal_client, real_spawns,
+                                                   agent_panel, fake_llm):
+    fake_llm.respond('{"action": "start", "preset": "find_jobs"}')
+    client, _ = portal_client
+    r = client.post("/automation/ask", data={"text": "find me jobs"})
+    assert r.status_code == 200
+    runs = runner.list_runs()
+    assert len(runs) == 1 and runs[0]["kind"] == "pipeline"
+    assert "Started find jobs" in r.text
+
+
+def test_agent_flips_toggle_and_reports_status(portal_client, real_spawns,
+                                               agent_panel, fake_llm):
+    fake_llm.respond('{"action": "toggle", "name": "auto_apply_enabled", "value": "on"}')
+    client, _ = portal_client
+    r = client.post("/automation/ask", data={"text": "turn on auto-apply"})
+    assert "Auto-apply is now on." in r.text
+    assert automation.load()["auto_apply_enabled"] is True
+
+    fake_llm.respond('{"action": "status"}')
+    seed_applied(4)
+    r = client.post("/automation/ask", data={"text": "where do things stand?"})
+    assert "auto-apply is on, capped at 10/day; 4 used today" in r.text
+
+
+def test_agent_stop_reports_when_nothing_ran(portal_client, agent_panel, fake_llm):
+    fake_llm.respond('{"action": "stop", "preset": "refresh_scores"}')
+    client, _ = portal_client
+    r = client.post("/automation/ask", data={"text": "stop refreshing"})
+    # The page HTML-escapes text; compare on the unescaped answer.
+    assert "Refresh scores wasn't running." in unescape(r.text)
+
+
+def test_agent_refuses_an_unknown_preset(portal_client, agent_panel, fake_llm):
+    fake_llm.respond('{"action": "start", "preset": "delete_everything"}')
+    client, _ = portal_client
+    r = client.post("/automation/ask", data={"text": "do something else"})
+    assert "unknown preset" in r.text
+    assert 'class="alert error"' in r.text
+    assert runner.list_runs() == []
+
+
+def test_agent_falls_back_for_out_of_scope_asks(portal_client, agent_panel,
+                                                fake_llm):
+    fake_llm.respond('{"action": "unknown"}')
+    client, _ = portal_client
+    r = client.post("/automation/ask", data={"text": "rewrite my resume"})
+    assert "I can start or stop Find jobs" in r.text
+    assert runner.list_runs() == []
+
+
+def test_agent_without_provider_shows_the_gate(portal_client):
+    """No fake_llm, no provider configured: a visible error, no crash."""
+    from applypilot.portal import assistant
+
+    assistant.clear_transcript()
+    client, _ = portal_client
+    r = client.post("/automation/ask", data={"text": "hello"})
+    assert "No LLM provider is configured" in r.text
+
+
+def test_agent_transcript_persists_across_page_views(portal_client, agent_panel,
+                                                     fake_llm):
+    fake_llm.respond('{"action": "status"}')
+    client, _ = portal_client
+    client.post("/automation/ask", data={"text": "status please"})
+    r = client.get("/automation")
+    assert "status please" in r.text
+    assert "auto-apply is off" in r.text
+
+
+def test_agent_empty_ask_is_refused(portal_client, agent_panel, fake_llm):
+    client, _ = portal_client
+    r = client.post("/automation/ask", data={"text": "   "})
+    assert "Ask the agent something first." in r.text
