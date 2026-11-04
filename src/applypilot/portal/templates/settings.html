@@ -33,7 +33,10 @@
 {% endmacro %}
 
 {% block content %}
-<h1>Settings</h1>
+<div class="page-head">
+  <h1>Settings</h1>
+  <p class="dim">Provider, keys, and auto-apply configuration. Secrets are stored masked in <code>~/.applypilot/.env</code>.</p>
+</div>
 
 {% if saved %}<p class="alert success">Settings saved to <code>~/.applypilot/.env</code> (0600).</p>{% endif %}
 

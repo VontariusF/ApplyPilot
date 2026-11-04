@@ -1,7 +1,9 @@
 {% extends "base.html" %}
 {% block title %}Run {{ run.id }} · ApplyPilot Portal{% endblock %}
 {% block content %}
-<h1>Run <code>{{ run.id }}</code> <span class="badge {{ run.status }}">{{ run.status }}</span></h1>
+<div class="page-head">
+  <h1>Run <code>{{ run.id }}</code> <span class="badge {{ run.status }}">{{ run.status }}</span></h1>
+</div>
 
 <section class="panel">
   <p class="dim">{{ run.kind }} · started {{ run.started_at[:19] }}

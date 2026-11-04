@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}{{ "Tailored resume" if doc == "resume" else "Cover letter" }} · {{ job.title or "(untitled)" }} · ApplyPilot{% endblock %}
+{% block content %}
+<p class="breadcrumb"><a href="/jobs/detail?url={{ job.url | urlencode }}">← {{ job.title or "(untitled)" }}</a></p>
+
+<div class="page-head">
+  <h1>{{ "Tailored resume" if doc == "resume" else "Cover letter" }}</h1>
+  <p class="dim">
+    {% if job.fit_score is not none %}Fit {{ job.fit_score }}/10 · {% endif %}{{ job.site or "unknown site" }} · {{ job.location or "location unknown" }}
+  </p>
+</div>
+
+{% if missing %}
+<section class="panel">
+  <p class="empty">No {{ "tailored resume" if doc == "resume" else "cover letter" }} has been generated for this job yet.
+     Run the pipeline's tailor stage, or use Regenerate on the job detail page to enqueue one.</p>
+</section>
+{% else %}
+<section class="panel">
+  <div class="doc-actions">
+    <a class="button" href="/jobs/download?url={{ job.url | urlencode }}&amp;doc={{ doc }}">Download .txt</a>
+    {% if pdf_exists %}
+    <a class="button" href="/jobs/download?url={{ job.url | urlencode }}&amp;doc={{ doc }}&amp;format=pdf">Download PDF</a>
+    {% endif %}
+    <a class="button secondary-button" href="/jobs/versions?url={{ job.url | urlencode }}">Version history</a>
+  </div>
+  <p class="doc-path">{{ docs_path }}</p>
+</section>
+
+<section class="panel">
+  <h2>Document</h2>
+  <pre class="doc-preview">{{ text }}</pre>
+  <p class="hint">Rendered from the stored text; the PDF (when present) is the pixel-exact version a human would see.</p>
+</section>
+{% endif %}
+{% endblock %}

@@ -1,7 +1,10 @@
 {% extends "base.html" %}
 {% block title %}Dashboard · ApplyPilot Portal{% endblock %}
 {% block content %}
-<h1>Dashboard</h1>
+<div class="page-head">
+  <h1>Dashboard</h1>
+  <p class="dim">Pipeline health at a glance. The <a href="/jobs">jobs board</a> is the working surface.</p>
+</div>
 
 <section class="stat-grid">
   <a class="stat-card" href="/jobs?stage=discovered">
