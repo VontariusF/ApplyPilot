@@ -63,6 +63,20 @@ def _model_param(params: dict, key: str, default: str) -> str:
     return raw
 
 
+def _url_param(params: dict, key: str = "url", required: bool = False) -> str | None:
+    """Validated job URL from a form value (http/https only, argv-safe)."""
+    raw = (params.get(key) or "").strip()
+    if not raw:
+        if required:
+            raise ParamError(f"{key} is required")
+        return None
+    if not raw.startswith(("http://", "https://")) or len(raw) > 2048:
+        raise ParamError(f"{key} must be an http(s) URL")
+    if not set(raw) <= _MODEL_CHARS | {"?", "&", "=", "#", "%", "~", "[", "]", "@", "!", "$", "'", "(", ")", "*", "+", ",", ";"}:
+        raise ParamError(f"{key} has unsupported characters")
+    return raw
+
+
 def build_pipeline_command(params: dict) -> list[str]:
     """Validated argv for a pipeline run (never shell-interpolated)."""
     stages_raw = (params.get("stages") or "all").strip() or "all"
@@ -79,6 +93,9 @@ def build_pipeline_command(params: dict) -> list[str]:
     argv = [sys.executable, "-m", "applypilot", "run", *stages,
             "--min-score", str(min_score), "--workers", str(workers),
             "--validation", validation]
+    results_per_site = _int_param(params, "results_per_site", 0, 0, 500)
+    if results_per_site:  # 0 = not set — discovery falls back to searches.yaml
+        argv += ["--results-per-site", str(results_per_site)]
     if params.get("stream"):
         argv.append("--stream")
     if params.get("dry_run"):
@@ -92,6 +109,10 @@ def build_apply_command(params: dict) -> list[str]:
             "--min-score", str(_int_param(params, "min_score", 7, 0, 10)),
             "--workers", str(_int_param(params, "workers", 1, 1, 4)),
             "--model", _model_param(params, "model", "haiku")]
+    url = _url_param(params)
+    if url:
+        # One-job apply run: PR #6's exact-first --url matching does the rest.
+        argv += ["--url", url]
     if params.get("limit", "").strip():
         argv += ["--limit", str(_int_param(params, "limit", 1, 0, 500))]
     if params.get("dry_run"):
@@ -100,6 +121,21 @@ def build_apply_command(params: dict) -> list[str]:
         argv.append("--headless")
     if params.get("continuous"):
         argv.append("--continuous")
+    return argv
+
+
+def build_tailor_command(params: dict) -> list[str]:
+    """Validated argv for a single-job tailor run (tailor + cover + pdf).
+
+    min_score defaults to 0: the user explicitly picked this job, so its
+    stored fit score must not gate the run (a NULL score tailors nothing).
+    """
+    url = _url_param(params, required=True)
+    min_score = _int_param(params, "min_score", 0, 0, 10)
+    argv = [sys.executable, "-m", "applypilot", "run", "tailor", "cover", "pdf",
+            "--url", str(url), "--min-score", str(min_score)]
+    if params.get("dry_run"):
+        argv.append("--dry-run")
     return argv
 
 
@@ -323,7 +359,7 @@ def start_run(kind: str, params: dict, command: list[str] | None = None,
     """Spawn a run subprocess and record it.
 
     Args:
-        kind: "pipeline", "apply", or "rescore".
+        kind: "pipeline", "apply", "rescore", or "tailor".
         params: Form dict; validated by the build functions.
         command: Override argv (tests use a fake entry point). Must never
             come from raw user input — routes pass build_* output.
@@ -335,7 +371,7 @@ def start_run(kind: str, params: dict, command: list[str] | None = None,
     Raises:
         ParamError: on invalid form values.
     """
-    if kind not in ("pipeline", "apply", "rescore"):
+    if kind not in ("pipeline", "apply", "rescore", "tailor"):
         raise ParamError(f"unknown run kind {kind!r}")
     init_registry()  # idempotent; start_run must work without prior setup
     if command is None:
@@ -343,6 +379,8 @@ def start_run(kind: str, params: dict, command: list[str] | None = None,
             command = build_pipeline_command(params)
         elif kind == "apply":
             command = build_apply_command(params)
+        elif kind == "tailor":
+            command = build_tailor_command(params)
         else:
             command = build_rescore_command(params)
 
@@ -442,6 +480,30 @@ def cancel_run(run_id: str) -> bool:
 
     _append_run_event(row["event_path"], "cancelled by user (process group killed)")
     return True
+
+
+def retry_run(run_id: str) -> dict:
+    """Re-run a failed run with identical parameters.
+
+    The registry's `params` column holds the original form dict (the same
+    data _params_summary renders), so re-validating it through the build
+    functions reproduces the failed run's exact command. Runs spawned with
+    a command override (tests) rebuild from params instead.
+
+    Raises:
+        ParamError: when the run doesn't exist, isn't failed, or its stored
+            params no longer validate.
+    """
+    row = get_run(run_id)
+    if row is None:
+        raise ParamError(f"run {run_id} not found")
+    if row["status"] != "failed":
+        raise ParamError("only failed runs can be retried")
+    try:
+        params = json.loads(row["params"]) if row["params"] else {}
+    except (TypeError, json.JSONDecodeError) as e:
+        raise ParamError("stored run parameters are unreadable") from e
+    return start_run(row["kind"], params)
 
 
 def _signal_group(pgid: int, sig: signal.Signals) -> None:

@@ -463,13 +463,15 @@ def tailor_resume(
 # ── Batch Entry Point ────────────────────────────────────────────────────
 
 def run_tailoring(min_score: int = 7, limit: int = 20,
-                  validation_mode: str = "normal") -> dict:
+                  validation_mode: str = "normal",
+                  url: str | None = None) -> dict:
     """Generate tailored resumes for high-scoring jobs.
 
     Args:
         min_score:       Minimum fit_score to tailor for.
         limit:           Maximum jobs to process.
         validation_mode: "strict", "normal", or "lenient".
+        url:             Exact job URL — tailor only this job (single-job runs).
 
     Returns:
         {"approved": int, "failed": int, "errors": int, "elapsed": float}
@@ -478,7 +480,8 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
     resume_text = RESUME_PATH.read_text(encoding="utf-8")
     conn = get_connection()
 
-    jobs = get_jobs_by_stage(conn=conn, stage="pending_tailor", min_score=min_score, limit=limit)
+    jobs = get_jobs_by_stage(conn=conn, stage="pending_tailor", min_score=min_score,
+                             limit=limit, url=url)
 
     if not jobs:
         log.info("No untailored jobs with score >= %d.", min_score)
