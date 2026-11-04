@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Agent sign-in · ApplyPilot Portal{% endblock %}
+{% block content %}
+<h1>Agent sign-in</h1>
+<p class="dim">Onboarding step 1 — the auto-apply engine must be installed, signed in, and ready before
+   anything else runs. Sign-in opens the normal browser flow on this machine; this page polls until it completes.</p>
+
+{% if login_error %}<p class="alert error">{{ login_error }}</p>{% endif %}
+
+{% include "partials/engine_gates.html" %}
+{% endblock %}

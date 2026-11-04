@@ -9,6 +9,7 @@ store and ~/.applypilot config the CLI uses; long jobs run as subprocesses
 import asyncio
 import json
 import logging
+import time
 from pathlib import Path
 from typing import AsyncIterator
 from urllib.parse import quote
@@ -20,7 +21,7 @@ from fastapi.templating import Jinja2Templates
 from markupsafe import escape
 from sse_starlette.sse import EventSourceResponse
 
-from applypilot import config, database
+from applypilot import config, database, engine_auth
 from applypilot.apply.launcher import mark_job, reset_failed
 from applypilot.llm import ModelListError, list_models
 from applypilot.portal import auth, queries, runner
@@ -35,6 +36,10 @@ log = logging.getLogger(__name__)
 POLL_SECONDS = 0.5
 IDLE_POLLS_BEFORE_CLOSE = 4  # ~2s with no data after the run ends
 BACKFILL_BYTES = 16 * 1024  # initial tail bound for long logs
+
+# Agent sign-in gate: how long the cards poll `claude auth status` after a
+# sign-in attempt before falling back to the terminal-command instructions.
+LOGIN_TIMEOUT_SECONDS = 300.0
 
 templates = Jinja2Templates(directory=str(PORTAL_DIR / "templates"))
 
@@ -227,6 +232,34 @@ def create_app() -> FastAPI:
         ))
 
     # ------------------------------------------------------------------
+    # Agent sign-in (onboarding step 1): the engine gate cards. Status
+    # checks run per request; HTMX polls /engine/status every 2s until
+    # the signed-in flip or the polling window expires.
+    # ------------------------------------------------------------------
+    @app.get("/engine", response_class=HTMLResponse)
+    async def engine_page(request: Request, t0: float | None = None,
+                          login: int = 0, login_error: str = ""):
+        ctx = _engine_gate_context(t0, bool(login))
+        return _render(request, "engine.html", login_error=login_error, **ctx)
+
+    @app.get("/engine/status", response_class=HTMLResponse)
+    async def engine_status(request: Request, t0: float | None = None, login: int = 0):
+        ctx = _engine_gate_context(t0, bool(login))
+        return _render(request, "partials/engine_gates.html", **ctx)
+
+    @app.post("/engine/login")
+    async def engine_login():
+        proc, error = engine_auth.start_login()
+        if error:
+            return RedirectResponse(f"/engine?login_error={quote(error)}", status_code=303)
+        # `claude auth login` blocks for the browser flow, so a process
+        # already dead within the grace beat died before sign-in started.
+        death = await asyncio.to_thread(engine_auth.login_instant_death, proc)
+        if death:
+            return RedirectResponse(f"/engine?login_error={quote(death)}", status_code=303)
+        return RedirectResponse(f"/engine?login=1&t0={time.time():.0f}", status_code=303)
+
+    # ------------------------------------------------------------------
     # Settings
     # ------------------------------------------------------------------
     @app.get("/settings", response_class=HTMLResponse)
@@ -305,6 +338,30 @@ def _active_stream_run() -> dict | None:
         if run["kind"] == "apply":
             return run
     return running[0]
+
+
+def _engine_gate_context(t0: float | None, login_started: bool) -> dict:
+    """Shared context for the agent sign-in cards (page render and polls).
+
+    `t0` is the epoch the current polling window started; it rides through
+    every poll URL so the timeout is judged against one consistent start.
+    """
+    claude = engine_auth.claude_status()
+    droid = engine_auth.droid_status()
+    now = time.time()
+    window_start = t0 if t0 else now
+    waiting = claude.state == engine_auth.SIGNED_OUT or droid.state == engine_auth.SIGNED_OUT
+    timed_out = waiting and (now - window_start) >= LOGIN_TIMEOUT_SECONDS
+    return {
+        "claude": claude,
+        "droid": droid,
+        "t0": window_start,
+        "now_ts": now,
+        "login_started": login_started,
+        "timed_out": timed_out,
+        "polling": waiting and not timed_out,
+        "login_timeout_min": int(LOGIN_TIMEOUT_SECONDS // 60),
+    }
 
 
 def _read_log_tail(path: Path) -> str:
