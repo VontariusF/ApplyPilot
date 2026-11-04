@@ -72,8 +72,64 @@ def barrier():
 
 
 # ---------------------------------------------------------------------------
-# Portal fixtures
+# LLM provider fake
 # ---------------------------------------------------------------------------
+
+class FakeLLMClient:
+    """Scripted stand-in for llm.LLMClient at the provider boundary.
+
+    Duck-types the client surface the codebase consumes (`chat`, `ask`).
+    Queued responses are popped FIFO; once the queue is empty, `default`
+    answers. Every chat() call is recorded in `calls` (the message lists),
+    so tests can assert on what was actually sent to the provider.
+    """
+
+    def __init__(self, responses=(), default="ok"):
+        self.responses = list(responses)
+        self.default = default
+        self.calls = []
+
+    def chat(self, messages, temperature=0.0, max_tokens=4096):
+        self.calls.append([dict(m) for m in messages])
+        if self.responses:
+            return self.responses.pop(0)
+        return self.default
+
+    def ask(self, prompt, **kwargs):
+        return self.chat([{"role": "user", "content": prompt}], **kwargs)
+
+    def respond(self, *responses):
+        """Queue replies for upcoming chat() calls (FIFO)."""
+        self.responses.extend(responses)
+
+
+@pytest.fixture()
+def fake_llm(monkeypatch):
+    """Swap the LLM provider for a scripted fake, at the provider level.
+
+    The seam is `llm._instance` — the singleton every get_client() call
+    returns — so ONE patch covers every import style: onboarding.LLMBackend
+    calls llm.get_client() at call time, while the scoring/enrichment/
+    discovery modules bind `from applypilot.llm import get_client` at
+    import time and still reach the same singleton. The llm.get_client
+    module attribute is swapped too, so a mid-test reset_client() (the
+    settings-save path) cannot rebuild a real client on that path.
+
+    Known edge: code that resets the singleton and then calls a *directly
+    imported* get_client() would rebuild from the environment and fail
+    loudly (tests run with no provider keys) — a visible error, never a
+    real network call.
+    """
+    from applypilot import llm
+
+    fake = FakeLLMClient()
+    monkeypatch.setattr(llm, "_instance", fake)
+    monkeypatch.setattr(llm, "get_client", lambda: fake)
+    return fake
+
+
+# ---------------------------------------------------------------------------
+# Portal fixtures
 
 @pytest.fixture()
 def portal_env(app_dir, tmp_path, monkeypatch):
