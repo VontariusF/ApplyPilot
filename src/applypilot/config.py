@@ -105,14 +105,36 @@ def _tighten_file(path: Path, mode: int = 0o600) -> None:
         os.chmod(path, mode)
 
 
+def _ensure_secret_parent(path: Path) -> None:
+    """Create path's missing parent directories, each owner-only (S2).
+
+    A fresh install could crash the first secret write (portal token,
+    .env) because the app dir did not exist yet; only directories this
+    call creates are tightened to 0700 — pre-existing ones keep their
+    modes (ensure_dirs still owns ~/.applypilot's mode).
+    """
+    missing: list[Path] = []
+    probe = path.parent
+    while not probe.exists() and probe != probe.parent:  # `!= parent` = filesystem root
+        missing.append(probe)
+        probe = probe.parent
+    for d in reversed(missing):
+        d.mkdir()
+        if os.name == "posix":
+            os.chmod(d, 0o700)
+
+
 def write_secret_text(path: Path, text: str) -> None:
     """Write a secret file (.env, profile.json) owner-only (S2).
 
+    Missing parent directories are created first, owner-only, so a fresh
+    install's first secret write cannot crash on a nonexistent app dir.
     os.open with mode 0o600 avoids a world-readable window between file
     creation and a later chmod. The explicit chmod at the end also tightens
     files that already existed with looser modes (rewrites). chmod is a
     no-op on Windows, which has no POSIX permission bits.
     """
+    _ensure_secret_parent(path)
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(text)
