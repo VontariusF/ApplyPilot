@@ -506,6 +506,37 @@ def create_app() -> FastAPI:
         return _render(request, "partials/onboarding_surface.html",
                        **_onboarding_context(error=error))
 
+    @app.post("/onboarding/answer")
+    async def onboarding_answer(request: Request):
+        """One guided answer: record it, advance the agenda, ack via agent."""
+        form = await request.form()
+        error = ""
+        try:
+            await asyncio.to_thread(
+                onboarding.record_answer,
+                str(form.get("question_id", "")),
+                str(form.get("value", "") or ""),
+                str(form.get("free_text", "") or ""),
+                str(form.get("skip", "")).strip() in ("1", "on", "true"),
+            )
+        except onboarding.OnboardingError as exc:
+            error = str(exc)
+        return _render(request, "partials/onboarding_surface.html",
+                       **_onboarding_context(error=error))
+
+    @app.post("/onboarding/agent-mode")
+    async def onboarding_agent_mode(request: Request):
+        """'Let the agent ask' ↔ back to guided buttons (session mode)."""
+        form = await request.form()
+        enabled = str(form.get("enabled", "")).strip() in ("1", "on", "true")
+        error = ""
+        try:
+            await asyncio.to_thread(onboarding.set_agent_led, enabled)
+        except onboarding.OnboardingError as exc:
+            error = str(exc)
+        return _render(request, "partials/onboarding_surface.html",
+                       **_onboarding_context(error=error))
+
     @app.post("/onboarding/resume")
     async def onboarding_resume(request: Request):
         form = await request.form()
@@ -800,12 +831,17 @@ def _onboarding_context(error: str = "", login_error: str = "", login: int = 0,
         profile_md = onboarding.render_profile_md(
             state.profile_draft, state.profile_draft.get("_applypilot_search", {}))
     login_process = engine_auth.active_login()
+    in_interview = state is not None and state.phase == onboarding.INTERVIEW
+    agent_led = in_interview and state.mode == onboarding.MODE_AGENT
+    question = onboarding.current_question(state) if in_interview and not agent_led else None
     return {
         "state": state,
         "ready": ready,
         "provider_ready": onboarding.provider_ready(),
         "missing": onboarding.missing_review_fields(state.profile_draft) if in_review else [],
         "profile_md": profile_md,
+        "question": question,
+        "agent_led": agent_led,
         "error": error,
         "login_error": login_error,
         "login_started": bool(login) and not ready["can_start_claude"],

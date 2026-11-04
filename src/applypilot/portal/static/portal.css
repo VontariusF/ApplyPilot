@@ -594,6 +594,11 @@ pre.logview {
 .login-card input { width: 100%; }
 .login-card button { width: 100%; }
 
+/* Onboarding guided-question card */
+.wizard-question { border-top: 1px solid var(--line); margin-top: var(--space-3); padding-top: var(--space-3); }
+.wizard-question h3 { margin: 0 0 var(--space-2); }
+.wizard-question details.agent-assist summary { cursor: pointer; color: var(--ink-2); font-size: var(--text-sm); }
+
 /* Onboarding interview chat */
 .onboard-steps {
   display: flex;
