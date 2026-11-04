@@ -27,6 +27,7 @@ dependencies = [
     "pyyaml>=6.0",
     "pandas>=2.0",
     "python-jobspy>=1.4",
+    "pypdf>=3.0",
     ]
 
 [project.optional-dependencies]
