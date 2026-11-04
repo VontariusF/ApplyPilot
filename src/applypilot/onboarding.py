@@ -1130,7 +1130,10 @@ def record_answer(question_id: str, value: str = "", free_text: str = "",
                     raise OnboardingError("pick one of the listed choices")
                 state.answers[spec.id] = choice.value
                 label = choice.label
-            state.messages.append({"role": _ROLE_USER, "content": label})
+            # kind="choice" marks wizard answers: the UI renders them as the
+            # clicked button / filled widget, not as a chat bubble — typed
+            # messages (no kind) always stay in the transcript.
+            state.messages.append({"role": _ROLE_USER, "content": label, "kind": "choice"})
 
         if current_question(state) is None:
             # Agenda complete: the wizard's answers (plus anything the agent

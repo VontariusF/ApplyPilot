@@ -513,3 +513,77 @@ def test_pdf_resume_route_extracts(portal_client, fake_llm, monkeypatch):
     assert page.status_code == 200
     state = onboarding.load_state()
     assert "Ops Manager" in state.pending_context
+
+
+
+# ---------------------------------------------------------------------------
+# The wizard screens: choice buttons first, "Something else…" for typing
+
+def test_guided_screen_renders_choices_and_something_else(portal_client, fake_llm, monkeypatch):
+    client, _ = portal_client
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    page = _start(client)
+
+    # First question (work_authorized): buttons, no free text allowed.
+    assert "choice-grid" in page and 'data-question-id="work_authorized"' in page
+    assert "Something else…" not in page
+
+    # The permit question carries both buttons and the typed escape hatch.
+    _answer(client, "work_authorized", value="yes")
+    page = client.get("/onboarding/chat").text  # sponsorship is current
+    _answer(client, "sponsorship", value="no")
+    page = client.get("/onboarding/chat").text  # permit_type is current
+    assert 'data-question-id="permit_type"' in page
+    assert "Something else…" in page  # the collapsed typed-answer box
+    page = _answer(client, "permit_type", value="Citizen")
+    _answer(client, "work_style", value="remote")
+    page = _answer(client, "currency", value="USD")
+    assert "Something else…" in page  # currency also allows a typed code
+
+    # A free-text-only question renders the widget directly — typing is
+    # the answer, no "Something else…" gate in the way.
+    page = _answer(client, "salary_band", free="145000")
+    page = _answer(client, "start_date", value="Immediately")
+    page = _answer(client, "education", value="Bachelor's")
+    page = _answer(client, "experience_years", value="3–5")
+    page = _answer(client, "target_roles", free="Data Engineer\nAnalytics Engineer")
+    assert "Something else…" not in page  # no choices on target_roles
+    assert "<textarea" in page
+
+
+def test_free_text_widget_matches_the_kind(portal_client, fake_llm, monkeypatch):
+    client, _ = portal_client
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    _start(client)
+    for _ in range(8):  # walk to salary_band: choices + a number widget
+        page = client.get("/onboarding/chat").text
+        qid = _qid(page)
+        if qid == "salary_band":
+            break
+        spec = onboarding.QUESTIONS[qid]
+        _answer(client, qid, value=spec.choices[0].value)
+    assert '<input type="number"' in page
+
+    # The date kind renders a date input (start_date question).
+    page = _answer(client, "salary_band", free="145000")
+    page = _answer(client, "start_date", value="Immediately")
+    page = _answer(client, "education", value="Bachelor's")
+    page = _answer(client, "experience_years", value="3–5")
+    page = _answer(client, "target_roles", free="Data Engineer")
+    assert "<textarea" in page  # multiline kind for the skills/roles questions
+
+
+def test_choice_answers_stay_out_of_the_transcript_typed_chat_shows(portal_client, fake_llm, monkeypatch):
+    client, _ = portal_client
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    _start(client)
+    page = _answer(client, "work_authorized", value="yes")
+    # The picked answer renders as the clicked button, not a chat bubble.
+    assert "chat-msg user" not in page
+    assert "choice-grid" in page
+
+    # A typed question in the Ask-the-agent box is a real chat turn —
+    # it stays in the log even in guided mode.
+    page = client.post("/onboarding/send", data={"text": "Why does this matter for the search?"}).text
+    assert "Why does this matter for the search?" in page
+    assert "chat-msg user" in page

@@ -594,10 +594,31 @@ pre.logview {
 .login-card input { width: 100%; }
 .login-card button { width: 100%; }
 
-/* Onboarding guided-question card */
-.wizard-question { border-top: 1px solid var(--line); margin-top: var(--space-3); padding-top: var(--space-3); }
-.wizard-question h3 { margin: 0 0 var(--space-2); }
-.wizard-question details.agent-assist summary { cursor: pointer; color: var(--ink-2); font-size: var(--text-sm); }
+/* Onboarding guided-question card: choice buttons first, typing second */
+.question-card { border-top: 1px solid var(--line); margin-top: var(--space-3); padding-top: var(--space-3); }
+.question-card h3 { margin: 0 0 var(--space-2); }
+.question-progress { margin: 0 0 var(--space-2); }
+.choice-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: var(--space-2);
+  margin: var(--space-3) 0;
+}
+.choice-grid .inline-form { display: flex; }
+.choice-grid button {
+  width: 100%;
+  min-height: 42px;
+  padding: 10px var(--space-4);
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+}
+.choice-grid button:hover { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.free-text-box { margin: var(--space-2) 0; }
+.free-text-box summary { cursor: pointer; color: var(--accent); font-size: var(--text-sm); font-weight: 600; }
+.free-text-box[open] summary { margin-bottom: var(--space-2); }
+.question-card details.agent-assist summary { cursor: pointer; color: var(--ink-2); font-size: var(--text-sm); }
 
 /* Onboarding interview chat */
 .onboard-steps {
