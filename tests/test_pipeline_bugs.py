@@ -612,6 +612,10 @@ def test_ensure_columns_concurrent_migration_no_duplicate_column(
     path = str(tmp_path / "old.db")
     setup = sqlite3.connect(path)
     setup.execute("CREATE TABLE jobs (url TEXT PRIMARY KEY, title TEXT)")
+    # Switch to WAL up front: the mode switch itself needs exclusive access,
+    # and racing it from both threads raises 'database is locked' before the
+    # migration-under-test even starts.
+    setup.execute("PRAGMA journal_mode=WAL")
     setup.commit()
     setup.close()
 
@@ -622,7 +626,6 @@ def test_ensure_columns_concurrent_migration_no_duplicate_column(
         try:
             gate.wait()
             conn = sqlite3.connect(path, timeout=30)
-            conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=10000")
             database.ensure_columns(conn)
             conn.close()
