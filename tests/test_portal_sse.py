@@ -1,0 +1,143 @@
+"""SSE and event-log tests: ordered JSONL events, rotation bound, redaction.
+
+Spec D acceptance: events appended to JSONL appear on the stream in order;
+the bounded file rotates rather than growing unboundedly; log/stream output
+carries no configured secrets and no raw HTML.
+"""
+
+import asyncio
+import json
+
+from applypilot import config
+from applypilot.apply import dashboard, eventlog
+from applypilot.database import get_connection
+from applypilot.portal.app import _stream_log_lines, _stream_events
+
+
+def collect(agen):
+    async def run():
+        return [e async for e in agen]
+    return asyncio.run(run())
+
+
+def test_dashboard_hook_writes_jsonl(portal_env, monkeypatch):
+    log = portal_env / "runs" / "hook.jsonl"
+    monkeypatch.setenv("APPLYPILOT_EVENT_LOG", str(log))
+    eventlog.reset_writer_cache()
+
+    dashboard.init_worker(0)
+    dashboard.update_state(0, status="applying", job_title="Pwidget Engineer",
+                           company="ExampleCorp", score=9)
+    dashboard.add_event("[dim]12:00:00[/dim] [W0] Starting: Pwidget Engineer @ ExampleCorp")
+
+    lines = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    kinds = [entry["kind"] for entry in lines]
+    assert kinds[0] == "state"  # init emits the starting snapshot
+    state = next(e for e in lines if e["kind"] == "state" and e.get("status") == "applying")
+    assert state["job_title"] == "Pwidget Engineer"
+    assert state["company"] == "ExampleCorp"
+    assert state["score"] == 9
+    event = next(e for e in lines if e["kind"] == "event")
+    assert event["msg"] == "12:00:00 [W0] Starting: Pwidget Engineer @ ExampleCorp"  # markup stripped
+
+
+def test_no_jsonl_without_env(portal_env):
+    dashboard.add_event("quiet run")
+    # No writer configured -> nothing written anywhere; just no crash.
+
+
+def test_event_log_rotates_at_bound(portal_env):
+    log = portal_env / "runs" / "rot.jsonl"
+    writer = eventlog.EventLogWriter(log, max_bytes=1000)
+    for i in range(100):
+        writer.write({"kind": "event", "msg": "x" * 40})
+    rotated = log.with_suffix(".jsonl.1")
+    assert rotated.exists(), "rotation did not happen"
+    assert log.stat().st_size < 1200
+    # Exactly one generation is kept: rewriting .1 never accumulates files.
+    assert list(log.parent.glob("rot.jsonl*")) == [log, rotated]
+
+
+def test_stream_events_in_order(portal_env, monkeypatch):
+    log = portal_env / "runs" / "sse.jsonl"
+    writer = eventlog.EventLogWriter(log)
+    writer.emit_state({"status": "applying", "job_title": "Job A"}, 0)
+    writer.emit_event("first message")
+    writer.emit_event("second message")
+
+    events = collect(_stream_events(log, lambda: {"status": "completed"}))
+    kinds = [e["event"] for e in events]
+    # initial empty panels, then the absorbed data, then close
+    assert kinds[0] == "state"
+    assert kinds[1] == "event"
+    assert "end" in kinds
+    event_payloads = [e["data"] for e in events if e["event"] == "event"]
+    joined = "\n".join(event_payloads)
+    assert "first message" in joined and "second message" in joined
+    state_payloads = [e["data"] for e in events if e["event"] == "state"]
+    assert "Job A" in "\n".join(state_payloads)
+    # Order within the feed: first before second.
+    assert joined.index("first message") < joined.index("second message")
+
+
+def test_stream_events_skips_malformed_lines(portal_env):
+    log = portal_env / "runs" / "broken.jsonl"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text('{"kind": "event", "msg": "good"}\nnot-json-at-all\n', encoding="utf-8")
+    events = collect(_stream_events(log, lambda: {"status": "completed"}))
+    joined = "\n".join(e["data"] for e in events if e["event"] == "event")
+    assert "good" in joined
+    assert "not-json-at-all" not in joined
+
+
+def insert_run(run_id: str, log_path, event_path: str | None, status: str = "completed") -> None:
+    from applypilot.portal import runner
+
+    runner.init_registry()
+    conn = get_connection()
+    conn.execute(
+        "INSERT OR REPLACE INTO runs (id, kind, params, status, pid, pgid, started_at, log_path, event_path) "
+        "VALUES (?, 'pipeline', '{}', ?, 123, 123, '2026-01-01', ?, ?)",
+        (run_id, status, str(log_path), event_path),
+    )
+    conn.commit()
+
+
+def test_log_stream_redacts_secrets_and_escapes_html(portal_env):
+    log = portal_env / "runs" / "leaky.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    config.ENV_PATH.write_text("GEMINI_API_KEY=gemini-live-key-abc\n", encoding="utf-8")
+    log.write_text(
+        "error: request used key gemini-live-key-abc\n"
+        "attempted <script>alert('xss')</script> injection\n",
+        encoding="utf-8",
+    )
+    insert_run("sse1", log, None)
+
+    events = collect(_stream_log_lines(log, lambda: {"status": "completed"}))
+    datas = [e["data"] for e in events if e["event"] == "log"]
+    joined = "\n".join(datas)
+    assert "gemini-live-key-abc" not in joined
+    assert "[REDACTED]" in joined
+    assert "<script>" not in joined          # escaped for innerHTML swaps
+    assert "&lt;script&gt;" in joined
+
+
+def test_stream_route_serves_events_end_to_end(portal_client, portal_env):
+    """Full-stack: registry row -> /runs/{id}/stream emits the JSONL events."""
+    client, _ = portal_client
+    event_file = portal_env / "runs" / "route.jsonl"
+    writer = eventlog.EventLogWriter(event_file)
+    writer.emit_state({"status": "applying", "job_title": "Route Job"}, 0)
+    writer.emit_event("route event one")
+    insert_run("sse2", portal_env / "runs" / "route.log", str(event_file),
+               status="completed")
+
+    with client.stream("GET", "/runs/sse2/stream") as response:
+        assert response.status_code == 200
+        body = b"".join(response.iter_bytes())
+    text = body.decode("utf-8")
+    assert "event: state" in text
+    assert "Route Job" in text
+    assert "route event one" in text
+    assert "event: end" in text

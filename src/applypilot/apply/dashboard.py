@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from applypilot.apply import eventlog
 from rich.console import Group
 from rich.panel import Panel
 from rich.table import Table
@@ -53,6 +54,23 @@ def init_worker(worker_id: int = 0) -> None:
     """Register the worker in the dashboard state."""
     with _lock:
         _worker_states[worker_id] = WorkerState(worker_id=worker_id)
+        _emit_state_event(worker_id)
+
+
+def _emit_state_event(worker_id: int) -> None:
+    """Mirror a worker state snapshot into the bounded JSONL event log.
+
+    Opt-in: only writes when APPLYPILOT_EVENT_LOG is set (the portal sets it
+    for apply-run subprocesses). log_file is a Path — excluded from JSON.
+    """
+    writer = eventlog.get_writer()
+    if writer is None:
+        return
+    state = _worker_states.get(worker_id)
+    if state is None:
+        return
+    payload = {k: v for k, v in state.__dict__.items() if k != "log_file"}
+    writer.emit_state(payload, worker_id)
 
 
 def update_state(worker_id: int = 0, **kwargs) -> None:
@@ -67,6 +85,7 @@ def update_state(worker_id: int = 0, **kwargs) -> None:
         if state is not None:
             for key, value in kwargs.items():
                 setattr(state, key, value)
+            _emit_state_event(worker_id)
 
 
 def get_state(worker_id: int = 0) -> WorkerState | None:
@@ -86,6 +105,9 @@ def add_event(msg: str) -> None:
         _events.append(f"[dim]{ts}[/dim] {msg}")
         if len(_events) > MAX_EVENTS:
             _events.pop(0)
+    writer = eventlog.get_writer()
+    if writer is not None:
+        writer.emit_event(msg)
 
 
 # ---------------------------------------------------------------------------

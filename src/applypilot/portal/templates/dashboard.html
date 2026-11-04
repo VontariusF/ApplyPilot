@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · ApplyPilot Portal{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+
+<section class="stat-grid">
+  <a class="stat-card" href="/jobs?stage=discovered">
+    <span class="stat-num">{{ stats.total }}</span><span class="stat-label">Total jobs</span></a>
+  <a class="stat-card" href="/jobs?stage=pending_detail">
+    <span class="stat-num">{{ stats.pending_detail }}</span><span class="stat-label">Pending enrichment</span></a>
+  <a class="stat-card" href="/jobs?stage=scored">
+    <span class="stat-num">{{ stats.scored }}</span><span class="stat-label">Scored</span></a>
+  <a class="stat-card" href="/jobs?stage=tailored">
+    <span class="stat-num">{{ stats.tailored }}</span><span class="stat-label">Tailored</span></a>
+  <a class="stat-card" href="/jobs?stage=pending_apply">
+    <span class="stat-num">{{ stats.ready_to_apply }}</span><span class="stat-label">Ready to apply</span></a>
+  <a class="stat-card" href="/jobs?stage=applied">
+    <span class="stat-num">{{ stats.applied }}</span><span class="stat-label">Applied</span></a>
+  <a class="stat-card warn {{ 'zero' if not stats.apply_errors }}" href="/jobs?stage=applied">
+    <span class="stat-num">{{ stats.apply_errors }}</span><span class="stat-label">Apply errors</span></a>
+</section>
+
+<section class="panel">
+  <h2>Score distribution</h2>
+  {% set dist = stats.score_distribution %}
+  {% if dist %}
+  <div class="dist">
+    {% for score, count in dist %}
+    <div class="dist-row">
+      <span class="dist-score">{{ score }}</span>
+      <div class="dist-bar-track">
+        <div class="dist-bar {{ 'hot' if score >= 8 else 'warm' if score >= 6 else 'cool' }}"
+             style="width: {{ (100 * count / max_count) | round(1) }}%"></div>
+      </div>
+      <span class="dist-count">{{ count }}</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="empty">No scored jobs yet — run the pipeline.</p>
+  {% endif %}
+</section>
+
+<section class="panel" id="live">
+  <h2>Live workers
+    {% if active_run %}<span class="badge running">{{ active_run.kind }} run {{ active_run.id }}</span>
+    {% else %}<span class="badge idle">no active run</span>{% endif %}
+  </h2>
+  {% if active_run %}
+  <div hx-ext="sse" sse-connect="/runs/{{ active_run.id }}/stream">
+    <div sse-swap="state" hx-swap="innerHTML">
+      {% include "partials/workers.html" with context %}
+    </div>
+    <div sse-swap="event" hx-swap="innerHTML" class="event-feed">
+      <p class="empty">Waiting for events…</p>
+    </div>
+  </div>
+  {% else %}
+  <p class="empty">No runs are active. Start one from the <a href="/runs">Runs</a> page —
+     worker states will stream here live.</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>Recent apply outcomes</h2>
+  {% if outcomes %}
+  <table>
+    <thead><tr><th>Job</th><th>Site</th><th>Score</th><th>Status</th><th>When</th></tr></thead>
+    <tbody>
+      {% for job in outcomes %}
+      <tr>
+        <td class="job-title"><a href="/jobs/detail?url={{ job.url | urlencode }}">{{ job.title or "(untitled)" }}</a></td>
+        <td>{{ job.site or "—" }}</td>
+        <td>{{ job.fit_score if job.fit_score is not none else "—" }}</td>
+        <td><span class="badge {{ (job.apply_status or 'unknown') | lower }}">{{ job.apply_status or "—" }}</span></td>
+        <td class="dim">{{ (job.applied_at or job.discovered_at or "")[:19] }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">No apply outcomes yet.</p>
+  {% endif %}
+</section>
+{% endblock %}

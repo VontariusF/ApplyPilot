@@ -1,0 +1,21 @@
+<p class="result-count">{{ total }} job{{ "" if total == 1 else "s" }} in this view</p>
+{% if jobs %}
+<table>
+  <thead><tr><th>Job</th><th>Site</th><th>Location</th><th>Score</th><th>Apply status</th><th>Discovered</th></tr></thead>
+  <tbody>
+    {% for job in jobs %}
+    <tr>
+      <td class="job-title"><a href="/jobs/detail?url={{ job.url | urlencode }}">{{ job.title or "(untitled)" }}</a>
+        <span class="dim url-cell">{{ job.url[:80] }}</span></td>
+      <td>{{ job.site or "—" }}</td>
+      <td>{{ job.location or "—" }}</td>
+      <td>{{ job.fit_score if job.fit_score is not none else "—" }}</td>
+      <td>{% if job.apply_status %}<span class="badge {{ job.apply_status | lower }}">{{ job.apply_status }}</span>{% else %}—{% endif %}</td>
+      <td class="dim">{{ (job.discovered_at or "")[:19] }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="empty">No jobs match this filter.</p>
+{% endif %}

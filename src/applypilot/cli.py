@@ -359,6 +359,34 @@ def dashboard() -> None:
 
 
 @app.command()
+def portal(
+    port: int = typer.Option(8765, "--port", "-p", help="Port to bind on 127.0.0.1."),
+) -> None:
+    """Launch the localhost web portal (requires the [portal] extra)."""
+    try:
+        import uvicorn
+
+        from applypilot.portal import create_app
+        from applypilot.portal.auth import get_or_create_token
+    except ImportError as e:
+        console.print(f"[red]Portal dependencies missing:[/red] {e}")
+        console.print(
+            "Install with: [bold]pip install 'applypilot[portal]'[/bold]"
+        )
+        raise typer.Exit(code=1)
+
+    token = get_or_create_token()
+    app = create_app()
+
+    console.print("\n[bold green]ApplyPilot portal[/bold green]")
+    console.print(f"  Local URL: http://127.0.0.1:{port}/?token={token}")
+    console.print("  Token saved at ~/.applypilot/portal_token (0600).")
+    console.print("[dim]  Ctrl+C to stop. The portal serves only 127.0.0.1.[/dim]\n")
+
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
+
+
+@app.command()
 def doctor() -> None:
     """Check your setup and diagnose missing requirements."""
     import shutil

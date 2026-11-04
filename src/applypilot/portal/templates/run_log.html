@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Run {{ run.id }} · ApplyPilot Portal{% endblock %}
+{% block content %}
+<h1>Run <code>{{ run.id }}</code> <span class="badge {{ run.status }}">{{ run.status }}</span></h1>
+
+<section class="panel">
+  <p class="dim">{{ run.kind }} · started {{ run.started_at[:19] }}
+    {% if run.ended_at %} · ended {{ run.ended_at[:19] }}{% endif %}
+    {% if run.exit_code is not none %} · exit {{ run.exit_code }}{% endif %}
+  </p>
+  <p class="hint">{{ redaction_note }}</p>
+  <pre class="logview" id="logview" hx-ext="sse" sse-connect="/runs/{{ run.id }}/logstream?backfill=0" sse-swap="log" hx-swap="beforeend">{{ backfill }}</pre>
+</section>
+
+<script>
+  // Keep the tail pinned to the bottom as log events arrive.
+  document.body.addEventListener('htmx:sseMessage', function (evt) {
+    const view = document.getElementById('logview');
+    if (view) { view.scrollTop = view.scrollHeight; }
+  });
+</script>
+{% endblock %}

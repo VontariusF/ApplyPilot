@@ -1,0 +1,28 @@
+{% if runs %}
+<table>
+  <thead><tr><th>Run</th><th>Kind</th><th>Params</th><th>Status</th><th>Started</th><th>Ended</th><th>Exit</th><th></th></tr></thead>
+  <tbody>
+    {% for run in runs %}
+    <tr>
+      <td><code>{{ run.id }}</code></td>
+      <td>{{ run.kind }}</td>
+      <td class="dim params-cell">{{ params_summary(run.params) }}</td>
+      <td><span class="badge {{ run.status }}">{{ run.status }}</span></td>
+      <td class="dim">{{ run.started_at[:19] }}</td>
+      <td class="dim">{{ (run.ended_at or "")[:19] or "—" }}</td>
+      <td>{{ run.exit_code if run.exit_code is not none else "—" }}</td>
+      <td class="run-actions">
+        <a class="button small" href="/runs/{{ run.id }}/log">Log</a>
+        {% if run.status == "running" %}
+        <form method="post" action="/runs/cancel/{{ run.id }}" class="inline-form">
+          <button type="submit" class="danger small">Cancel</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="empty">No runs yet — start one above.</p>
+{% endif %}

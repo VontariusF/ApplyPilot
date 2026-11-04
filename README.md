@@ -273,7 +273,48 @@ applypilot apply --headless             # Headless browser mode
 applypilot apply --url URL              # Apply to a specific job
 applypilot status                       # Pipeline statistics
 applypilot dashboard                    # Open HTML results dashboard
+applypilot portal                       # Launch the localhost web portal
 ```
+
+---
+
+## Local Web Portal
+
+A single-user web cockpit over the same store and config the CLI uses. The
+CLI stays the engine; the portal never replaces it.
+
+```
+pip install 'applypilot[portal]'
+applypilot portal                      # serves http://127.0.0.1:8765
+applypilot portal --port 9000
+```
+
+**Pages**
+
+| Page | What it does |
+|------|--------------|
+| Dashboard | Stage counters, score distribution, recent apply outcomes, live worker states via SSE while a run is active |
+| Jobs | Filter by stage/score, inspect full description, score reasoning, tailored documents; manual mark-applied / mark-failed |
+| Runs | Start pipeline and apply runs, watch a live (redacted) log tail, cancel — the run's whole process group is killed, then Chrome cleanup |
+| Settings | Edit the `.env` surface (LLM provider triple, API keys, apply model/engine defaults) — reads are masked to the last 4 characters |
+
+**Security model**
+
+- Binds to `127.0.0.1` only — never exposed to your network.
+- A token is generated at first launch and stored at `~/.applypilot/portal_token`
+  (mode 0600). Every request requires it: open the URL the CLI prints
+  (`http://127.0.0.1:8765/?token=…`) once, and the browser keeps it as an
+  HttpOnly `SameSite=Strict` cookie. Non-localhost `Host` headers are refused
+  (DNS-rebinding defense).
+- Secrets are never rendered back to the page — settings reads are masked to
+  the last four characters, and the run log viewer redacts configured API
+  keys, tokens, and passwords before display.
+- Pipeline/apply runs execute as their own subprocesses (the package's own
+  entry points), so cancel is a process-group kill and a portal restart never
+  orphans your jobs silently — dead runs are detected at startup and marked.
+
+**Engine note:** the Runs page grows an engine selector when engine selection
+(Droid adapter) lands; on the current release the apply engine is Claude Code.
 
 ---
 
