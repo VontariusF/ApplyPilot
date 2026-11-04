@@ -88,3 +88,9 @@ select = ["E", "F", "W"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    # Browser E2E (tests/e2e/): needs the Playwright Chromium binary
+    # (`playwright install chromium`). CI installs it; locally the suite
+    # skips these when the binary is missing.
+    "e2e: browser end-to-end tests driven by Playwright Chromium",
+]
