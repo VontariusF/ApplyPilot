@@ -1,0 +1,133 @@
+{# The onboarding chat surface: every state — gate, choice, interview, review,
+   done. Pushed verbatim by the SSE stream into #onboarding-surface, so it
+   carries no sse-connect attributes (the wrapper owns the connection). #}
+
+{% macro transcript(state) %}
+<div class="chat-log">
+  {% for m in state.messages %}{% if m.role != "system" %}
+    {% if m.role == "note" %}
+      <div class="chat-note">{{ m.content }}</div>
+    {% else %}
+      <div class="chat-msg {{ m.role }}">
+        <div class="bubble">{{ m.content }}</div>
+      </div>
+    {% endif %}
+  {% endif %}{% endfor %}
+</div>
+{% endmacro %}
+
+{% if error %}<p class="alert error">{{ error }}</p>{% endif %}
+
+<ol class="onboard-steps">
+  <li class="{{ 'done' if (ready.can_start_claude or provider_ready) else 'active' }}">Agent account</li>
+  <li class="{{ 'done' if state and state.phase in ('review', 'done') else ('active' if state and state.phase == 'interview' else '') }}">Interview</li>
+  <li class="{{ 'done' if state and state.phase == 'done' else ('active' if state and state.phase == 'review' else '') }}">Review profile</li>
+  <li>Find jobs</li>
+</ol>
+
+{% if state is none %}
+  {# ---- No interview yet: gate or choice ---- #}
+  {% if ready.can_start_claude %}
+    <section class="panel">
+      <h2>Interview agent ready</h2>
+      <p>The interview runs on your signed-in Claude account — no API key needed.</p>
+      <form hx-post="/onboarding/start" hx-target="#onboarding-surface" hx-swap="outerHTML">
+        <input type="hidden" name="mode" value="claude">
+        <button>Start the interview</button>
+      </form>
+    </section>
+  {% elif ready.can_start_llm %}
+    <section class="panel">
+      <h2>Choose how the interview runs</h2>
+      <p>Claude Code isn't signed in yet, but a provider is configured on the Settings page.
+         Signing in gives the no-API-key experience; the provider works right now.</p>
+      <div class="gate-actions">
+        <form method="post" action="/engine/login" class="inline-form">
+          <input type="hidden" name="next" value="/onboarding">
+          <button>Sign in with Claude</button>
+        </form>
+        <form hx-post="/onboarding/start" hx-target="#onboarding-surface" hx-swap="outerHTML" class="inline-form">
+          <input type="hidden" name="mode" value="llm">
+          <button class="secondary">Use the configured provider instead</button>
+        </form>
+      </div>
+    </section>
+  {% else %}
+    <section class="panel">
+      <h2>Agent account needed</h2>
+      <p>Claude Code is installed but not signed in. Click <strong>Sign in</strong> — a browser window will open
+         for the normal Claude sign-in, and this page picks it up automatically.</p>
+      <div class="gate-actions">
+        <form method="post" action="/engine/login" class="inline-form">
+          <input type="hidden" name="next" value="/onboarding">
+          <button>Sign in with Claude</button>
+        </form>
+        <a class="button-link secondary" href="/settings">Or configure a provider in Settings</a>
+      </div>
+      <details class="terminal-fallback">
+        <summary>Prefer your terminal? Run this instead</summary>
+        <pre>claude auth login</pre>
+      </details>
+    </section>
+  {% endif %}
+
+{% elif state.phase == "interview" %}
+  {# ---- Interview: transcript + composer ---- #}
+  <section class="panel chat-panel">
+    {{ transcript(state) }}
+    <form class="chat-composer" hx-post="/onboarding/send" hx-target="#onboarding-surface"
+          hx-swap="outerHTML" hx-indicator="#chat-busy">
+      <textarea name="text" rows="2" required
+                placeholder="Type your answer — the agent asks one thing at a time"></textarea>
+      <button>Send</button>
+    </form>
+    <span id="chat-busy" class="htmx-indicator dim">The agent is thinking…</span>
+    <details class="resume-upload">
+      <summary>Attach a resume (txt/md file or paste; a PDF is stored but not read here)</summary>
+      <form hx-post="/onboarding/resume" hx-target="#onboarding-surface" hx-swap="outerHTML"
+            enctype="multipart/form-data" class="resume-form">
+        <input type="file" name="resume_file" accept=".txt,.md,.pdf">
+        <textarea name="resume_text" rows="4" placeholder="…or paste your resume text"></textarea>
+        <button class="secondary">Save resume</button>
+      </form>
+    </details>
+  </section>
+
+{% elif state.phase == "review" %}
+  {# ---- Review: the chat stays visible, the profile preview below ---- #}
+  <section class="panel chat-panel">
+    {{ transcript(state) }}
+  </section>
+  <section class="panel">
+    <h2>Here's the profile I'll save — profile.md</h2>
+    {% if missing %}
+      <p class="dim">Not provided yet (you can add these later in Settings, they don't block):
+         {{ missing | join(", ") }}</p>
+    {% endif %}
+    <pre class="profile-preview">{{ profile_md }}</pre>
+    <p class="dim">Confirming writes <code>profile.json</code>, <code>profile.md</code> and
+       <code>searches.yaml</code>, then unlocks the jobs board.</p>
+    <div class="gate-actions">
+      <form hx-post="/onboarding/confirm" hx-target="#onboarding-surface" hx-swap="outerHTML" class="inline-form">
+        <button>Confirm</button>
+      </form>
+      <form hx-post="/onboarding/keep-editing" hx-target="#onboarding-surface" hx-swap="outerHTML" class="inline-form">
+        <button class="secondary">Keep editing</button>
+      </form>
+    </div>
+  </section>
+
+{% else %}
+  {# ---- Done ---- #}
+  <section class="panel">
+    <h2>Profile saved ✓</h2>
+    <p><code>profile.json</code>, <code>profile.md</code> and <code>searches.yaml</code> are written.
+       From here the jobs board is the front page; run discovery whenever you like.</p>
+    <div class="gate-actions">
+      <a class="button-link" href="/jobs">Go to the jobs board</a>
+      <form hx-post="/onboarding/redo" hx-target="#onboarding-surface" hx-swap="outerHTML" class="inline-form">
+        <button class="secondary">Redo interview</button>
+      </form>
+    </div>
+  </section>
+{% endif %}

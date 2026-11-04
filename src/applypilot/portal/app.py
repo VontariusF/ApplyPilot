@@ -9,6 +9,7 @@ store and ~/.applypilot config the CLI uses; long jobs run as subprocesses
 import asyncio
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import AsyncIterator
@@ -21,7 +22,7 @@ from fastapi.templating import Jinja2Templates
 from markupsafe import escape
 from sse_starlette.sse import EventSourceResponse
 
-from applypilot import config, database, engine_auth
+from applypilot import config, database, engine_auth, onboarding
 from applypilot.apply.launcher import mark_job, reset_failed
 from applypilot.llm import ModelListError, list_models
 from applypilot.portal import auth, queries, runner
@@ -41,6 +42,14 @@ BACKFILL_BYTES = 16 * 1024  # initial tail bound for long logs
 # Agent sign-in gate: how long the cards poll `claude auth status` after a
 # sign-in attempt before falling back to the terminal-command instructions.
 LOGIN_TIMEOUT_SECONDS = 300.0
+
+# Onboarding: resume uploads (PDF or text) are capped before they touch disk.
+MAX_RESUME_UPLOAD_BYTES = 5 * 1024 * 1024
+
+# The chat SSE stream polls slower than run streams — each tick runs
+# `claude auth status` for the gate card, a real subprocess.
+CHAT_POLL_SECONDS = 2.0
+CHAT_IDLE_POLLS_BEFORE_CLOSE = 4
 
 templates = Jinja2Templates(directory=str(PORTAL_DIR / "templates"))
 
@@ -121,6 +130,10 @@ def create_app() -> FastAPI:
     # ------------------------------------------------------------------
     @app.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request):
+        # Fresh store: onboarding first (spec step 1 — the gate stops
+        # redirecting only once profile.json exists).
+        if not config.PROFILE_PATH.exists():
+            return RedirectResponse("/onboarding", status_code=303)
         stats = database.get_stats()
         outcomes = queries.recent_outcomes()
         active = _active_stream_run()
@@ -279,16 +292,125 @@ def create_app() -> FastAPI:
         return _render(request, "partials/engine_gates.html", **ctx)
 
     @app.post("/engine/login")
-    async def engine_login():
+    async def engine_login(request: Request):
+        form = await request.form()
+        dest = str(form.get("next", "") or "/engine")
+        if dest not in ("/engine", "/onboarding"):  # allowlisted return paths
+            dest = "/engine"
         proc, error = engine_auth.start_login()
         if error:
-            return RedirectResponse(f"/engine?login_error={quote(error)}", status_code=303)
+            return RedirectResponse(f"{dest}?login_error={quote(error)}", status_code=303)
         # `claude auth login` blocks for the browser flow, so a process
         # already dead within the grace beat died before sign-in started.
         death = await asyncio.to_thread(engine_auth.login_instant_death, proc)
         if death:
-            return RedirectResponse(f"/engine?login_error={quote(death)}", status_code=303)
-        return RedirectResponse(f"/engine?login=1&t0={time.time():.0f}", status_code=303)
+            return RedirectResponse(f"{dest}?login_error={quote(death)}", status_code=303)
+        return RedirectResponse(f"{dest}?login=1&t0={time.time():.0f}", status_code=303)
+
+    # ------------------------------------------------------------------
+    # Onboarding (spec deliverable C): one chat surface carries the
+    # agent-account gate, the interview, and profile review. Agent turns
+    # are blocking CLI/LLM calls, so every route awaits them in a thread.
+    # The SSE stream re-renders the chat partial when the state file or
+    # the gate flips — it is the cross-tab/poll freshness channel.
+    # ------------------------------------------------------------------
+    @app.get("/onboarding", response_class=HTMLResponse)
+    async def onboarding_page(request: Request, error: str = ""):
+        return _render(request, "onboarding.html", **_onboarding_context(error=error))
+
+    @app.get("/onboarding/chat", response_class=HTMLResponse)
+    async def onboarding_chat(request: Request, error: str = ""):
+        return _render(request, "partials/onboarding_surface.html",
+                       **_onboarding_context(error=error))
+
+    @app.get("/onboarding/stream")
+    async def onboarding_stream():
+        baseline = _chat_signature()  # snap at connect; pushes are change-only
+        return EventSourceResponse(_stream_chat(baseline))
+
+    @app.post("/onboarding/start")
+    async def onboarding_start(request: Request):
+        form = await request.form()
+        mode = str(form.get("mode", "claude"))
+        error = ""
+        try:
+            await asyncio.to_thread(onboarding.start_interview, mode)
+        except onboarding.OnboardingError as exc:
+            error = str(exc)
+        return _render(request, "partials/onboarding_surface.html",
+                       **_onboarding_context(error=error))
+
+    @app.post("/onboarding/send")
+    async def onboarding_send(request: Request):
+        form = await request.form()
+        text = str(form.get("text", ""))
+        error = ""
+        try:
+            await asyncio.to_thread(onboarding.send_message, text)
+        except onboarding.OnboardingError as exc:
+            error = str(exc)
+        return _render(request, "partials/onboarding_surface.html",
+                       **_onboarding_context(error=error))
+
+    @app.post("/onboarding/resume")
+    async def onboarding_resume(request: Request):
+        form = await request.form()
+        upload = form.get("resume_file")
+        pasted = str(form.get("resume_text", "") or "")
+        error = ""
+        try:
+            if upload is not None and getattr(upload, "filename", ""):
+                data = await upload.read()
+                if len(data) > MAX_RESUME_UPLOAD_BYTES:
+                    error = (f"That file is {len(data) // (1024 * 1024)} MB — resumes are "
+                             f"capped at {MAX_RESUME_UPLOAD_BYTES // (1024 * 1024)} MB.")
+                elif upload.filename.lower().endswith(".pdf"):
+                    await asyncio.to_thread(
+                        onboarding.add_resume, None, data, upload.filename)
+                else:
+                    # Text uploads (txt/md) are readable by the agent, like a paste.
+                    await asyncio.to_thread(
+                        onboarding.add_resume,
+                        data.decode("utf-8", errors="replace"), None, upload.filename)
+            elif pasted.strip():
+                await asyncio.to_thread(
+                    onboarding.add_resume, pasted, None, "pasted resume")
+            else:
+                error = "Choose a file or paste your resume text first."
+        except onboarding.OnboardingError as exc:
+            error = str(exc)
+        return _render(request, "partials/onboarding_surface.html",
+                       **_onboarding_context(error=error))
+
+    @app.post("/onboarding/confirm")
+    async def onboarding_confirm(request: Request):
+        error = ""
+        try:
+            await asyncio.to_thread(onboarding.confirm_profile)
+        except onboarding.OnboardingError as exc:
+            error = str(exc)
+        return _render(request, "partials/onboarding_surface.html",
+                       **_onboarding_context(error=error))
+
+    @app.post("/onboarding/keep-editing")
+    async def onboarding_keep_editing(request: Request):
+        try:
+            await asyncio.to_thread(onboarding.keep_editing)
+        except onboarding.OnboardingError as exc:
+            return _render(request, "partials/onboarding_surface.html",
+                           **_onboarding_context(error=str(exc)))
+        return _render(request, "partials/onboarding_surface.html",
+                       **_onboarding_context())
+
+    @app.post("/onboarding/redo")
+    async def onboarding_redo(request: Request):
+        error = ""
+        try:
+            await asyncio.to_thread(onboarding.redo_interview)
+        except onboarding.OnboardingError as exc:
+            error = str(exc)
+        return _render(request, "partials/onboarding_surface.html",
+                       **_onboarding_context(error=error))
 
     # ------------------------------------------------------------------
     # Settings
@@ -393,6 +515,70 @@ def _engine_gate_context(t0: float | None, login_started: bool) -> dict:
         "polling": waiting and not timed_out,
         "login_timeout_min": int(LOGIN_TIMEOUT_SECONDS // 60),
     }
+
+
+def _onboarding_context(error: str = "") -> dict:
+    """Shared context for the onboarding chat partial (page, posts, SSE)."""
+    state = onboarding.load_state()
+    ready = onboarding.readiness()
+    in_review = state is not None and state.phase == onboarding.REVIEW
+    profile_md = ""
+    if in_review and state.profile_draft:
+        profile_md = onboarding.render_profile_md(
+            state.profile_draft, state.profile_draft.get("_applypilot_search", {}))
+    return {
+        "state": state,
+        "ready": ready,
+        "provider_ready": onboarding.provider_ready(),
+        "missing": onboarding.missing_review_fields(state.profile_draft) if in_review else [],
+        "profile_md": profile_md,
+        "error": error,
+    }
+
+
+def _chat_html() -> str:
+    """Render the chat partial for the SSE stream (no request context)."""
+    return templates.get_template("partials/onboarding_chat.html").render(
+        **_onboarding_context())
+
+
+def _chat_signature() -> tuple:
+    """Cheap fingerprint of the chat surface inputs (state, gate, provider)."""
+    state = onboarding.load_state()
+    if state is None:
+        file_sig = None
+    else:
+        try:
+            mtime = os.path.getmtime(config.ONBOARDING_STATE_PATH)
+        except OSError:
+            mtime = None
+        file_sig = (mtime, state.phase, len(state.messages))
+    return (file_sig, onboarding.provider_ready(),
+            engine_auth.claude_status().state)
+
+
+async def _stream_chat(last: tuple) -> AsyncIterator[dict]:
+    """SSE generator: the onboarding chat partial, re-pushed on any change.
+
+    The signature watches both the state file (new messages, phase) and
+    the gate (sign-in flip, provider config) so a signed-in flip swaps the
+    gate card for the interview without a manual reload. The route snaps
+    the baseline at connect time and the page renders the current surface
+    server-side, so the stream only pushes on CHANGE — reconnects after
+    the idle close stay swap-free (identical content would otherwise
+    replace the DOM out from under an in-flight click). Idle-closes a few
+    seconds after the last change; the next POST re-anchors the DOM.
+    """
+    idle = 0
+    while idle < CHAT_IDLE_POLLS_BEFORE_CLOSE:
+        await asyncio.sleep(CHAT_POLL_SECONDS)
+        sig = _chat_signature()
+        if sig != last:
+            last, idle = sig, 0
+            yield {"event": "chat", "data": _chat_html()}
+        else:
+            idle += 1
+    yield {"event": "end", "data": "closed"}
 
 
 def _read_log_tail(path: Path) -> str:

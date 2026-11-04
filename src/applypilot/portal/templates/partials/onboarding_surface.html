@@ -1,0 +1,8 @@
+{# The onboarding surface wrapper: owns the SSE connection. The stream pushes
+   the INNER partial (partials/onboarding_chat.html, no sse attributes) so a
+   push never re-nests the connection. Post routes re-render this wrapper to
+   re-anchor the connection after a state flip. #}
+<div id="onboarding-surface"
+     hx-ext="sse" sse-connect="/onboarding/stream" sse-swap="chat">
+  {% include "partials/onboarding_chat.html" %}
+</div>

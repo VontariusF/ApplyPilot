@@ -59,7 +59,7 @@ def auth_cookie(client) -> str | None:
     return jar.get("portal_token")
 
 
-def test_query_token_sets_cookie_and_grants_access(anon_client):
+def test_query_token_sets_cookie_and_grants_access(anon_client, seeded_profile):
     app = anon_client.app
     r = anon_client.get(f"/?token={app.state.token}", follow_redirects=False)
     assert r.status_code == 200
