@@ -130,7 +130,6 @@ def create_app() -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.state.token = token
     templates.env.globals["run_summary"] = automation_mod.run_summary
-    templates.env.globals["params_summary"] = _params_summary
     templates.env.filters["age"] = _relative_age
 
     # ------------------------------------------------------------------
