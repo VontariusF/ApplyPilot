@@ -9,6 +9,7 @@ store and ~/.applypilot config the CLI uses; long jobs run as subprocesses
 import asyncio
 import json
 import logging
+import math
 import os
 import time
 from datetime import datetime, timezone
@@ -200,30 +201,19 @@ def create_app() -> FastAPI:
     # Jobs
     # ------------------------------------------------------------------
     @app.get("/jobs", response_class=HTMLResponse)
-    async def jobs_page(request: Request, stage: str = "scored", min_score: int = 7,
-                        limit: int = 50, site: str = "", location: str = "",
-                        discovered_from: str = "", discovered_to: str = "",
-                        apply_status: str = "", remote: str = "",
-                        min_salary: str = ""):
+    async def jobs_page(request: Request):
+        view = _board_view(request.query_params)
         return _render(request, "jobs.html",
-                       stages=queries.STAGES,
                        sites=queries.distinct_sites(),
                        statuses=queries.distinct_apply_statuses(),
                        progress=_jobs_progress(),
-                       **_jobs_board_context(stage, min_score, limit, site, location,
-                                             discovered_from, discovered_to,
-                                             apply_status, remote, min_salary))
+                       **_jobs_board_context(view))
 
     @app.get("/jobs/table", response_class=HTMLResponse)
-    async def jobs_table(request: Request, stage: str = "scored", min_score: int = 7,
-                         limit: int = 50, site: str = "", location: str = "",
-                         discovered_from: str = "", discovered_to: str = "",
-                         apply_status: str = "", remote: str = "",
-                         min_salary: str = ""):
+    async def jobs_table(request: Request):
+        view = _board_view(request.query_params)
         return _render(request, "partials/jobs_board.html",
-                       **_jobs_board_context(stage, min_score, limit, site, location,
-                                             discovered_from, discovered_to,
-                                             apply_status, remote, min_salary))
+                       **_jobs_board_context(view))
 
     @app.get("/jobs/detail", response_class=HTMLResponse)
     async def jobs_detail(request: Request, url: str):
@@ -277,14 +267,14 @@ def create_app() -> FastAPI:
             if hx:
                 return _render(request, "partials/jobs_board.html",
                                toast_message=str(e), toast_kind="error",
-                               **_jobs_board_context(**view))
+                               **_jobs_board_context(view))
             return RedirectResponse(f"/jobs?error={quote(str(e))}", status_code=303)
         if hx:
             # Stay on the board: the card shows a busy state and the SSE feed
             # refreshes it when documents are ready.
             return _render(request, "partials/jobs_board.html",
                            toast_message="Tailoring started — the card updates when documents are ready.",
-                           toast_kind="info", **_jobs_board_context(**view))
+                           toast_kind="info", **_jobs_board_context(view))
         return RedirectResponse(f"/jobs/detail?url={quote(url, safe='')}",
                                 status_code=303)
 
@@ -310,7 +300,7 @@ def create_app() -> FastAPI:
             if hx:
                 return _render(request, "partials/jobs_board.html",
                                toast_message=message, toast_kind="error",
-                               **_jobs_board_context(**view))
+                               **_jobs_board_context(view))
             return RedirectResponse(f"/jobs?error={quote(message)}", status_code=303)
         try:
             runner.start_run("apply", {"url": url})
@@ -318,12 +308,12 @@ def create_app() -> FastAPI:
             if hx:
                 return _render(request, "partials/jobs_board.html",
                                toast_message=str(e), toast_kind="error",
-                               **_jobs_board_context(**view))
+                               **_jobs_board_context(view))
             return RedirectResponse(f"/jobs?error={quote(str(e))}", status_code=303)
         if hx:
             return _render(request, "partials/jobs_board.html",
                            toast_message="Applying now — the card updates when the application finishes.",
-                           toast_kind="info", **_jobs_board_context(**view))
+                           toast_kind="info", **_jobs_board_context(view))
         return RedirectResponse(f"/jobs/detail?url={quote(url, safe='')}",
                                 status_code=303)
 
@@ -343,7 +333,7 @@ def create_app() -> FastAPI:
             return _render(request, "partials/jobs_board.html",
                            toast_message="Job dismissed — find it in the Dismissed section below if that was a mistake.",
                            toast_kind="info",
-                           **_jobs_board_context(**_board_form_view(form)))
+                           **_jobs_board_context(_board_form_view(form)))
         return RedirectResponse("/jobs", status_code=303)
 
     @app.post("/jobs/undismiss")
@@ -359,7 +349,7 @@ def create_app() -> FastAPI:
             return _render(request, "partials/jobs_board.html",
                            toast_message="Job restored to the board.",
                            toast_kind="info",
-                           **_jobs_board_context(**_board_form_view(form)))
+                           **_jobs_board_context(_board_form_view(form)))
         return RedirectResponse("/jobs", status_code=303)
 
     @app.post("/jobs/reset-failed")
@@ -497,13 +487,15 @@ def create_app() -> FastAPI:
                 # state's Find-jobs button), not a dead-end /runs redirect.
                 return _render(request, "partials/jobs_board.html",
                                toast_message=str(e), toast_kind="error",
-                               **_jobs_board_context())
+                               **_jobs_board_context(_board_form_view(form)))
             return RedirectResponse(f"{target}?error={quote(str(e))}",
                                     status_code=303)
         if request.headers.get("HX-Request") and target == "/runs":
             # In-context discovery (jobs board empty state): the board itself
-            # shows the run — no dead-end redirect to /runs.
-            return _render(request, "partials/jobs_board.html", **_jobs_board_context())
+            # shows the run — no dead-end redirect to /runs. The POST carries
+            # no view params, so the default board view renders.
+            return _render(request, "partials/jobs_board.html",
+                           **_jobs_board_context(_board_form_view(form)))
         return RedirectResponse(target, status_code=303)
 
     @app.post("/runs/cancel/{run_id}")
@@ -909,26 +901,63 @@ def create_app() -> FastAPI:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _jobs_filters(stage: str, min_score: int, limit: int, site: str,
-                  location: str, discovered_from: str, discovered_to: str,
-                  apply_status: str, remote: str, min_salary: str) -> dict:
-    """Validate + normalize the jobs-board query params into filtered_jobs kwargs.
+# Plain-language board chips (spec Jobs panel): each maps onto existing
+# query surfaces — stage conditions OR'd together (queries._view_condition),
+# plus the read-only apply-failed view for failed attempts. No new
+# pipeline stages, STAGE_CONDITIONS untouched.
+CHIP_STAGES = {
+    # "New" is NOT the literal discovered∪pending_detail∪enriched union:
+    # discovered's condition is 1=1 (every job is discovered), so the union
+    # is degenerate. The semantic is "found, no score outcome yet".
+    "new": "new",
+    "scored": "scored",
+    "ready": "tailored",
+    "applied": "applied",
+    "attention": "score_failed,apply_failed",
+}
+CHIP_LABELS = {
+    "new": "New",
+    "scored": "Scored",
+    "ready": "Ready to apply",
+    "applied": "Applied",
+    "attention": "Needs attention",
+}
 
-    Unknown stages snap to "scored", the salary bound parses to a float
-    (None = filter off, unparseable input ignored), and anything else out
-    of range falls back to its no-op value — filter forms must never 422.
+
+def _jobs_filters(stage: str = "scored", min_score: str | int = 7,
+                  limit: str | int = 50, site: str = "", location: str = "",
+                  discovered_from: str = "", discovered_to: str = "",
+                  apply_status: str = "", remote: str = "",
+                  min_salary: str | float = "", sort: str = "best",
+                  chip: str = "") -> dict:
+    """Validate + normalize board params into filtered_jobs kwargs.
+
+    Query strings and verb forms both arrive as strings, so numeric
+    parsing happens here. Unknown stages snap to "scored", the salary
+    bound parses to a float (None = filter off, unparseable input
+    ignored), and anything else out of range falls back to its no-op
+    value — filter forms must never 422. A chip (plain-language preset)
+    ORs together existing stage conditions and takes precedence over the
+    single-stage param.
     """
+    stages = CHIP_STAGES.get(chip, "")
+    score = _opt_int(str(min_score))
     return {
-        "stage": stage if stage in queries.STAGES else "scored",
-        "min_score": max(min(min_score, 10), 0),
-        "limit": min(max(limit, 1), 500),
+        # Chip views span score-less stages; an empty stage param keeps
+        # the min-score bound (which only applies to scored/tailored/
+        # applied) from hiding rows that have no score yet.
+        "stage": "" if stages else (stage if stage in queries.STAGES else "scored"),
+        "min_score": 7 if score is None else max(min(score, 10), 0),
+        "limit": min(max(_opt_int(str(limit)) or 50, 1), 500),
         "site": site.strip(),
         "location": location.strip(),
         "discovered_from": discovered_from.strip(),
         "discovered_to": discovered_to.strip(),
         "apply_status": apply_status.strip(),
         "remote": remote.strip() if remote.strip() in queries.REMOTE_VALUES else "",
-        "min_salary": _opt_float(min_salary),
+        "min_salary": _opt_float(str(min_salary)),
+        "sort": sort if sort in queries.SORTS else "best",
+        "stages": stages,
     }
 
 
@@ -967,48 +996,136 @@ def _busy_verbs() -> dict[str, str]:
 # response re-renders the same filtered view (not a reset board).
 _BOARD_VIEW_KEYS = ("stage", "min_score", "limit", "site", "location",
                     "discovered_from", "discovered_to", "apply_status",
-                    "remote", "min_salary")
+                    "remote", "min_salary", "sort", "chip", "page")
+
+_FILTER_KEYS = ("stage", "min_score", "limit", "site", "location",
+                "discovered_from", "discovered_to", "apply_status",
+                "remote", "min_salary", "sort", "chip")
 
 
-def _board_form_view(form) -> dict[str, str]:
-    view = {k: str(form.get(k, "") or "") for k in _BOARD_VIEW_KEYS}
-    # Verb forms carry the current view; a blank stage (older form, direct
-    # POST) falls back to the board's default stage instead of "all stages".
+def _normalize_view(raw) -> dict[str, str]:
+    """Board view params (query string or verb form) as normalized strings
+    with the board defaults filled in."""
+    view = {k: str(raw.get(k, "") or "") for k in _BOARD_VIEW_KEYS}
     if not view["stage"].strip():
         view["stage"] = "scored"
+    if not view["sort"].strip():
+        view["sort"] = "best"
+    page = _opt_int(view["page"])
+    view["page"] = str(page) if page and page > 0 else "1"
     return view
 
 
-def _jobs_board_context(stage: str = "scored", min_score: int = 7, limit: int = 50,
-                        site: str = "", location: str = "", discovered_from: str = "",
-                        discovered_to: str = "", apply_status: str = "",
-                        remote: str = "", min_salary: str = "") -> dict:
-    """Context for the jobs-board partial (grid, count, empty states)."""
-    # GET routes get FastAPI-coerced ints; verb forms re-post the view as
-    # raw strings. Coerce both to the typed values _jobs_filters clamps.
-    if isinstance(min_score, str):
-        min_score = _opt_int(min_score) or 0
-    if isinstance(limit, str):
-        limit = _opt_int(limit) or 50
-    filters = _jobs_filters(stage, min_score, limit, site, location,
-                            discovered_from, discovered_to, apply_status,
-                            remote, min_salary)
-    rows = queries.filtered_jobs(**filters)
-    view = dict(zip(_BOARD_VIEW_KEYS,
-                    (stage, min_score, limit, site, location, discovered_from,
-                     discovered_to, apply_status, remote, min_salary)))
+def _board_view(params) -> dict[str, str]:
+    """Board view from a request query string."""
+    return _normalize_view(params)
+
+
+def _board_form_view(form) -> dict[str, str]:
+    """Board view carried by a verb form's hidden fields."""
+    return _normalize_view(form)
+
+
+def _board_url(view: dict[str, str], **overrides: str) -> str:
+    """A /jobs URL for this view with overrides applied (blank = drop)."""
+    merged = {**view, **overrides}
+    qs = urlencode({k: v for k, v in merged.items()
+                    if str(v) != "" and str(v) != "None"})
+    return f"/jobs?{qs}" if qs else "/jobs"
+
+
+def _board_chip_links(view: dict[str, str]) -> list[dict]:
+    """The five plain-language chips; each link toggles that chip on
+    (or off when active) and resets to the first page."""
+    links = []
+    for key, label in CHIP_LABELS.items():
+        active = view["chip"] == key
+        links.append({
+            "key": key,
+            "label": label,
+            "active": active,
+            "href": _board_url(view, chip="" if active else key, page="1"),
+        })
+    return links
+
+
+def _board_active_filters(view: dict[str, str]) -> list[dict]:
+    """Dismissible chips, one per ACTIVE surviving filter, each linking to
+    the same view with that filter removed. min_score sits at 7 by default
+    (the board baseline), so it only reads as a chosen filter when the
+    user changed it."""
+    active: list[dict] = []
+
+    def add(param: str, label: str) -> None:
+        active.append({"label": label,
+                       "href": _board_url(view, page="1", **{param: ""})})
+
+    if view["site"].strip():
+        add("site", f"Board: {view['site'].strip()}")
+    if view["location"].strip():
+        add("location", f"Location: {view['location'].strip()}")
+    if view["apply_status"].strip():
+        add("apply_status", f"Status: {view['apply_status'].strip()}")
+    salary = _opt_float(view["min_salary"])
+    if salary is not None:
+        add("min_salary", f"Pay at least ${salary:,.0f}")
+    fit = _opt_int(view["min_score"])
+    if fit is not None and fit != 7:
+        add("min_score", f"Match {fit}/10 or better")
+    if view["remote"] == "yes":
+        add("remote", "Remote only")
+    elif view["remote"] == "no":
+        add("remote", "Onsite or hybrid")
+    if view["discovered_from"].strip():
+        add("discovered_from", f"Found since {view['discovered_from'].strip()}")
+    if view["discovered_to"].strip():
+        add("discovered_to", f"Found until {view['discovered_to'].strip()}")
+    return active
+
+
+def _jobs_board_context(view: dict[str, str]) -> dict:
+    """Context for the jobs-board partial: cards, chips, pagination,
+    empty states. Takes the normalized string view."""
+    filters = _jobs_filters(**{k: view[k] for k in _FILTER_KEYS})
+    count_kwargs = {k: v for k, v in filters.items() if k not in ("limit", "sort")}
+    total_matching = queries.count_filtered_jobs(**count_kwargs)
+    page_size = filters["limit"]
+    total_pages = max(1, math.ceil(total_matching / page_size))
+    page = min(max(1, _opt_int(view["page"]) or 1), total_pages)
+    rows = queries.filtered_jobs(**filters, offset=(page - 1) * page_size)
+    pagination = {
+        "page": page,
+        "total_pages": total_pages,
+        "total_matching": total_matching,
+        "prev_url": _board_url(view, page=str(page - 1)) if page > 1 else "",
+        "next_url": _board_url(view, page=str(page + 1)) if page < total_pages else "",
+    }
+    # Discovery-in-progress live strip (spec): the SSE board feed refreshes
+    # it, so "found so far" ticks up while the run works.
+    discovery_active = any(run.get("kind") == "pipeline"
+                           for run in runner.running_runs())
+    has_filters = bool(view["chip"]
+                       or any(view[k].strip() for k in ("site", "location",
+                                                        "apply_status",
+                                                        "discovered_from",
+                                                        "discovered_to"))
+                       or filters["min_salary"] is not None
+                       or (filters["min_score"] != 7)
+                       or filters["remote"] != "")
     return {
         "jobs": rows,
         "total": len(rows),
+        "total_matching": total_matching,
         "total_jobs": queries.count_jobs(),
-        "has_filters": bool(site.strip() or location.strip() or discovered_from.strip()
-                            or discovered_to.strip() or apply_status.strip()
-                            or (remote.strip() if remote.strip() in queries.REMOTE_VALUES else "")
-                            or filters["min_salary"] is not None),
+        "pagination": pagination,
+        "chip_links": _board_chip_links(view),
+        "active_filters": _board_active_filters(view),
+        "view_chip": view["chip"],
+        "has_filters": has_filters,
+        "discovery_active": discovery_active,
         "busy": _busy_verbs(),
         "dismissed_jobs": queries.dismissed_jobs(),
-        "board_qs": urlencode({k: v for k, v in view.items()
-                               if str(v) != "" and str(v) != "None"}),
+        "board_qs": urlencode({k: v for k, v in view.items() if v != ""}),
         **filters,
     }
 

@@ -3,7 +3,20 @@
   {% if toast_message %}
   <div class="toast {{ toast_kind or 'info' }}" role="status">{{ toast_message }}</div>
   {% endif %}
-  <p class="result-count">{{ total }} job{{ "" if total == 1 else "s" }} in this view</p>
+  {% if discovery_active %}
+  <div class="live-strip" role="status">
+    <span class="spinner" role="presentation"></span>
+    Finding jobs… {{ total_jobs }} found so far. The board updates as they come in.
+  </div>
+  {% endif %}
+  {% if active_filters %}
+  <div class="chip-row" aria-label="Active filters">
+    {% for f in active_filters %}
+    <a class="chip chip-active" href="{{ f.href }}" title="Remove this filter">{{ f.label }} ✕</a>
+    {% endfor %}
+  </div>
+  {% endif %}
+  <p class="result-count">{{ total_matching }} job{{ "" if total_matching == 1 else "s" }} in this view</p>
   {% if jobs %}
   <div class="card-grid">
     {% for job in jobs %}{% with card_mode = "main", uid = "main-" ~ loop.index %}{% include "partials/job_card.html" %}{% endwith %}{% endfor %}
@@ -32,5 +45,14 @@
       {% for job in dismissed_jobs %}{% with card_mode = "dismissed", uid = "dismissed-" ~ loop.index %}{% include "partials/job_card.html" %}{% endwith %}{% endfor %}
     </div>
   </details>
+  {% endif %}
+  {% if pagination and pagination.total_pages > 1 %}
+  <nav class="pagination" aria-label="Board pages">
+    {% if pagination.prev_url %}<a href="{{ pagination.prev_url }}">← Previous</a>
+    {% else %}<span class="page-disabled" aria-hidden="true">← Previous</span>{% endif %}
+    <span class="page-status">Page {{ pagination.page }} of {{ pagination.total_pages }} · {{ pagination.total_matching }} job{{ "" if pagination.total_matching == 1 else "s" }}</span>
+    {% if pagination.next_url %}<a href="{{ pagination.next_url }}">Next →</a>
+    {% else %}<span class="page-disabled" aria-hidden="true">Next →</span>{% endif %}
+  </nav>
   {% endif %}
 </div>

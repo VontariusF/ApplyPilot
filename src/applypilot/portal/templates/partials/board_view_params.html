@@ -10,3 +10,6 @@
 <input type="hidden" name="apply_status" value="{{ apply_status or '' }}">
 <input type="hidden" name="remote" value="{{ remote or '' }}">
 <input type="hidden" name="min_salary" value="{{ min_salary if min_salary is not none else '' }}">
+<input type="hidden" name="sort" value="{{ sort or 'best' }}">
+<input type="hidden" name="chip" value="{{ view_chip or '' }}">
+<input type="hidden" name="page" value="{{ pagination.page if pagination else 1 }}">
