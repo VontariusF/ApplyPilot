@@ -25,6 +25,7 @@ from playwright.sync_api import sync_playwright
 from applypilot import config
 from applypilot.config import DB_PATH
 from applypilot.database import get_connection, init_db, ensure_columns
+from applypilot.enrichment.remote import infer_remote
 from applypilot.llm import get_client
 
 log = logging.getLogger(__name__)
@@ -676,10 +677,15 @@ def scrape_site_batch(
 
                 if status in ("ok", "partial"):
                     stats[status] += 1
+                    # is_remote is an inference from the listing text (spec
+                    # PR D), refreshed with the description each scrape.
                     conn.execute(
                         "UPDATE jobs SET full_description = ?, application_url = ?, "
-                        "detail_scraped_at = ?, detail_error = NULL WHERE url = ?",
-                        (result.get("full_description"), result.get("application_url"), now, url),
+                        "detail_scraped_at = ?, detail_error = NULL, is_remote = ? "
+                        "WHERE url = ?",
+                        (result.get("full_description"), result.get("application_url"), now,
+                         1 if infer_remote(title, result.get("full_description")) else 0,
+                         url),
                     )
                 else:
                     stats["error"] += 1

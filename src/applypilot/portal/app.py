@@ -147,21 +147,31 @@ def create_app() -> FastAPI:
     # ------------------------------------------------------------------
     @app.get("/jobs", response_class=HTMLResponse)
     async def jobs_page(request: Request, stage: str = "scored", min_score: int = 7,
-                        limit: int = 50):
-        stage = stage if stage in queries.STAGES else "scored"
-        rows = database.get_jobs_by_stage(stage=stage, min_score=min_score,
-                                          limit=min(max(limit, 1), 500))
-        return _render(request, "jobs.html", jobs=rows, stage=stage,
-                       min_score=min_score, limit=limit, stages=queries.STAGES,
-                       total=len(rows))
+                        limit: int = 50, site: str = "", location: str = "",
+                        discovered_from: str = "", discovered_to: str = "",
+                        apply_status: str = "", remote: str = "",
+                        min_salary: str = ""):
+        filters = _jobs_filters(stage, min_score, limit, site, location,
+                                discovered_from, discovered_to, apply_status,
+                                remote, min_salary)
+        rows = queries.filtered_jobs(**filters)
+        return _render(request, "jobs.html", jobs=rows, total=len(rows),
+                       total_jobs=queries.count_jobs(), stages=queries.STAGES,
+                       sites=queries.distinct_sites(),
+                       statuses=queries.distinct_apply_statuses(), **filters)
 
     @app.get("/jobs/table", response_class=HTMLResponse)
     async def jobs_table(request: Request, stage: str = "scored", min_score: int = 7,
-                         limit: int = 50):
-        stage = stage if stage in queries.STAGES else "scored"
-        rows = database.get_jobs_by_stage(stage=stage, min_score=min_score,
-                                          limit=min(max(limit, 1), 500))
-        return _render(request, "partials/jobs_table.html", jobs=rows, total=len(rows))
+                         limit: int = 50, site: str = "", location: str = "",
+                         discovered_from: str = "", discovered_to: str = "",
+                         apply_status: str = "", remote: str = "",
+                         min_salary: str = ""):
+        filters = _jobs_filters(stage, min_score, limit, site, location,
+                                discovered_from, discovered_to, apply_status,
+                                remote, min_salary)
+        rows = queries.filtered_jobs(**filters)
+        return _render(request, "partials/jobs_table.html", jobs=rows,
+                       total=len(rows), total_jobs=queries.count_jobs(), **filters)
 
     @app.get("/jobs/detail", response_class=HTMLResponse)
     async def jobs_detail(request: Request, url: str):
@@ -392,6 +402,16 @@ def create_app() -> FastAPI:
         return _render(request, "partials/onboarding_surface.html",
                        **_onboarding_context(error=error))
 
+    @app.post("/onboarding/find-jobs")
+    async def onboarding_find_jobs():
+        """Find-jobs-now handoff (spec journey step 5): kick off discovery.
+
+        The confirm/done card offers this; the run goes through the same
+        subprocess runner as the Runs page, so progress streams there too.
+        """
+        runner.start_run("pipeline", {})
+        return RedirectResponse("/runs", status_code=303)
+
     @app.post("/onboarding/keep-editing")
     async def onboarding_keep_editing(request: Request):
         try:
@@ -446,6 +466,40 @@ def create_app() -> FastAPI:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _jobs_filters(stage: str, min_score: int, limit: int, site: str,
+                  location: str, discovered_from: str, discovered_to: str,
+                  apply_status: str, remote: str, min_salary: str) -> dict:
+    """Validate + normalize the jobs-board query params into filtered_jobs kwargs.
+
+    Unknown stages snap to "scored", the salary bound parses to a float
+    (None = filter off, unparseable input ignored), and anything else out
+    of range falls back to its no-op value — filter forms must never 422.
+    """
+    return {
+        "stage": stage if stage in queries.STAGES else "scored",
+        "min_score": max(min(min_score, 10), 0),
+        "limit": min(max(limit, 1), 500),
+        "site": site.strip(),
+        "location": location.strip(),
+        "discovered_from": discovered_from.strip(),
+        "discovered_to": discovered_to.strip(),
+        "apply_status": apply_status.strip(),
+        "remote": remote.strip() if remote.strip() in queries.REMOTE_VALUES else "",
+        "min_salary": _opt_float(min_salary),
+    }
+
+
+def _opt_float(raw: str) -> float | None:
+    """Parse a filter-form float; blank/garbage means the filter is off."""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
 
 def _bearer(header: str | None) -> str | None:
     if header and header.lower().startswith("bearer "):

@@ -129,6 +129,11 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             strategy              TEXT,
             discovered_at         TEXT,
 
+            -- Inferred remote-work flag (spec PR D): 0/1, set during
+            -- enrichment and backfilled heuristically. NOT site data —
+            -- the UI must label it inferred.
+            is_remote             INTEGER,
+
             -- Enrichment stage (detail_scraper)
             full_description      TEXT,
             application_url       TEXT,
@@ -187,8 +192,36 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
 
     # Run migrations for any columns added after initial schema
     ensure_columns(conn)
+    backfill_is_remote(conn)
 
     return conn
+
+
+def backfill_is_remote(conn: sqlite3.Connection) -> int:
+    """Infer is_remote for rows the enrichment pass hasn't flagged yet.
+
+    Rows discovered before the is_remote column (and rows from sites that
+    skip detail scraping) would otherwise be invisible to the remote
+    filter forever. The heuristic runs over the text the store already
+    holds; the flag stays an inference (spec PR D). Idempotent: only rows
+    with a NULL flag are touched. Returns the number of rows backfilled.
+    """
+    from applypilot.enrichment.remote import infer_remote
+
+    rows = conn.execute(
+        "SELECT url, title, location, description, full_description "
+        "FROM jobs WHERE is_remote IS NULL"
+    ).fetchall()
+    for row in rows:
+        conn.execute(
+            "UPDATE jobs SET is_remote = ? WHERE url = ?",
+            (1 if infer_remote(row["title"], row["location"],
+                               row["description"], row["full_description"]) else 0,
+             row["url"]),
+        )
+    if rows:
+        conn.commit()
+    return len(rows)
 
 
 # Complete column registry: column_name -> SQL type with optional default.
@@ -204,6 +237,8 @@ _ALL_COLUMNS: dict[str, str] = {
     "site": "TEXT",
     "strategy": "TEXT",
     "discovered_at": "TEXT",
+    # Inferred remote-work flag (spec PR D) — heuristic, labeled inferred in the UI.
+    "is_remote": "INTEGER",
     # Enrichment
     "full_description": "TEXT",
     "application_url": "TEXT",
@@ -427,6 +462,28 @@ def store_jobs(conn: sqlite3.Connection, jobs: list[dict],
     return new, existing
 
 
+# Stage -> WHERE condition, shared by get_jobs_by_stage and the portal's
+# filtered_jobs (spec PR D). "?" placeholders are min-score binds.
+STAGE_CONDITIONS: dict[str, str] = {
+    "discovered": "1=1",
+    "pending_detail": "detail_scraped_at IS NULL",
+    "enriched": "full_description IS NOT NULL",
+    "pending_score": "full_description IS NOT NULL AND fit_score IS NULL",
+    "scored": "fit_score IS NOT NULL",
+    "score_failed": "score_error IS NOT NULL",
+    "pending_tailor": (
+        "fit_score >= ? AND full_description IS NOT NULL "
+        "AND tailored_resume_path IS NULL AND COALESCE(tailor_attempts, 0) < 5"
+    ),
+    "tailored": "tailored_resume_path IS NOT NULL",
+    "pending_apply": (
+        "tailored_resume_path IS NOT NULL AND applied_at IS NULL "
+        "AND application_url IS NOT NULL"
+    ),
+    "applied": "applied_at IS NOT NULL",
+}
+
+
 def get_jobs_by_stage(conn: sqlite3.Connection | None = None,
                       stage: str = "discovered",
                       min_score: int | None = None,
@@ -445,26 +502,7 @@ def get_jobs_by_stage(conn: sqlite3.Connection | None = None,
     if conn is None:
         conn = get_connection()
 
-    conditions = {
-        "discovered": "1=1",
-        "pending_detail": "detail_scraped_at IS NULL",
-        "enriched": "full_description IS NOT NULL",
-        "pending_score": "full_description IS NOT NULL AND fit_score IS NULL",
-        "scored": "fit_score IS NOT NULL",
-        "score_failed": "score_error IS NOT NULL",
-        "pending_tailor": (
-            "fit_score >= ? AND full_description IS NOT NULL "
-            "AND tailored_resume_path IS NULL AND COALESCE(tailor_attempts, 0) < 5"
-        ),
-        "tailored": "tailored_resume_path IS NOT NULL",
-        "pending_apply": (
-            "tailored_resume_path IS NOT NULL AND applied_at IS NULL "
-            "AND application_url IS NOT NULL"
-        ),
-        "applied": "applied_at IS NOT NULL",
-    }
-
-    where = conditions.get(stage, "1=1")
+    where = STAGE_CONDITIONS.get(stage, "1=1")
     params: list = []
 
     if "?" in where and min_score is not None:
