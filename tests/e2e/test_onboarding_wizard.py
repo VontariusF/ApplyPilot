@@ -81,6 +81,11 @@ async def _answer_current(page, plan):
 async def _walk_to_review(page, plan) -> list[str]:
     """Answer every question the wizard presents, in its live order."""
     visited: list[str] = []
+    # CI runners get starved while matrix jobs share the queue's CPU budget;
+    # the default 30s cap timed out on a healthy swap (each theme has failed
+    # this way, and main's e2e flaked the same class). Generous cap, same
+    # instant-pass logic.
+    swap_timeout = 120_000
     while await page.locator(".review-form").count() == 0:
         qid = await _answer_current(page, plan)
         visited.append(qid)
@@ -93,6 +98,7 @@ async def _walk_to_review(page, plan) -> list[str]:
                 return el && el.dataset.questionId !== prev;
             }""",
             arg=qid,
+            timeout=swap_timeout,
         )
     return visited
 
