@@ -5,6 +5,7 @@ via a fake entry point; cancel records a process-group kill; invalid form
 values are rejected with readable errors.
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -158,3 +159,115 @@ def test_sweep_orphans_marks_dead_pids_failed(portal_env):
     assert "orph1" in swept
     row = runner.get_run("orph1")
     assert row["status"] == "failed"
+
+
+# --- PID-reuse identity checks (spec PR13, sweep B F10) ---------------------
+
+
+def _insert_run(run_id: str, pid: int, *, start_time: float | None,
+                cmdline: list[str] | None, started_at: str) -> None:
+    runner.init_registry()
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO runs (id, kind, params, status, pid, pgid, pid_start_time, "
+        "pid_cmdline, started_at, log_path, event_path) "
+        "VALUES (?, 'pipeline', '{}', 'running', ?, ?, ?, ?, ?, 'l', NULL)",
+        (run_id, pid, pid, start_time, json.dumps(cmdline) if cmdline else None, started_at),
+    )
+    conn.commit()
+
+
+def _spawn_unrelated_process() -> subprocess.Popen:
+    # start_new_session makes the victim its own group leader (pgid == pid),
+    # so a killpg at its pid WOULD reach it — the skip must be proven, not an
+    # artifact of an unkillable group id.
+    return subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def test_start_run_records_identity(portal_env):
+    row = runner.start_run(
+        "pipeline", {},
+        command=[sys.executable, "-c", "import time; time.sleep(30)"],
+        emit_jsonl=False,
+    )
+    try:
+        if os.path.isdir("/proc"):
+            assert row["pid_start_time"] is not None
+        assert json.loads(row["pid_cmdline"]) == [sys.executable, "-c", "import time; time.sleep(30)"]
+    finally:
+        runner.cancel_run(row["id"])
+
+
+def test_cancel_does_not_signal_reused_pid(portal_env):
+    # The registry claims a pid that now belongs to an unrelated process
+    # (recorded identity: a run's argv — not the victim's). Cancel must
+    # refuse to signal it.
+    victim = _spawn_unrelated_process()
+    try:
+        _insert_run("reuse1", victim.pid, start_time=None,
+                    cmdline=[sys.executable, "-m", "applypilot", "run", "all"],
+                    started_at=runner._now())
+        assert runner.cancel_run("reuse1") is True
+        time.sleep(0.2)
+        assert victim.poll() is None  # untouched
+        assert runner.get_run("reuse1")["status"] == "cancelled"
+    finally:
+        victim.kill()
+        victim.wait()
+
+
+def test_cancel_legacy_row_skips_reused_pid(portal_env):
+    # A row spawned before identity was recorded: a live process whose start
+    # time postdates the row's started_at cannot be the run's child.
+    victim = _spawn_unrelated_process()
+    try:
+        _insert_run("reuse-legacy", victim.pid, start_time=None,
+                    cmdline=None, started_at="2026-01-01T00:00:00+00:00")
+        assert runner.cancel_run("reuse-legacy") is True
+        time.sleep(0.2)
+        assert victim.poll() is None
+    finally:
+        victim.kill()
+        victim.wait()
+
+
+def test_cancel_still_kills_matching_identity(portal_env):
+    # The identity check must not neuter a legitimate cancel: a row whose
+    # recorded identity matches the live process is signalled normally.
+    row = runner.start_run(
+        "pipeline", {},
+        command=[sys.executable, "-c", "import time; time.sleep(30)"],
+        emit_jsonl=False,
+    )
+    assert runner.cancel_run(row["id"]) is True
+    assert runner.get_run(row["id"])["status"] == "cancelled"
+    with pytest.raises(ProcessLookupError):
+        os.kill(row["pid"], 0)
+
+
+def test_sweep_orphans_sweeps_reused_pid_but_keeps_live_child(portal_env):
+    victim = _spawn_unrelated_process()
+    try:
+        # Identity mismatch (argv differs from the victim's) -> swept.
+        _insert_run("reuse2", victim.pid, start_time=None,
+                    cmdline=[sys.executable, "-m", "applypilot", "run", "all"],
+                    started_at=runner._now())
+        # Identity match -> the run is genuinely alive, left alone.
+        _insert_run("live1", victim.pid, start_time=runner._proc_start_time(victim.pid),
+                    cmdline=[sys.executable, "-c", "import time; time.sleep(60)"],
+                    started_at=runner._now())
+        if not os.path.isdir("/proc"):
+            pytest.skip("identity checks need /proc")
+        swept = runner.sweep_orphans()
+        assert "reuse2" in swept
+        assert runner.get_run("reuse2")["status"] == "failed"
+        assert "live1" not in swept
+        assert runner.get_run("live1")["status"] == "running"
+        assert victim.poll() is None
+    finally:
+        victim.kill()
+        victim.wait()
