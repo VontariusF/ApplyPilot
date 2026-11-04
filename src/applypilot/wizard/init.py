@@ -26,6 +26,7 @@ from applypilot.config import (
     RESUME_PDF_PATH,
     SEARCH_CONFIG_PATH,
     ensure_dirs,
+    quote_env_value,
     write_secret_text,
 )
 from applypilot.llm import ModelListError, _GEMINI_COMPAT_BASE, _OPENAI_BASE, list_models
@@ -288,20 +289,21 @@ def _setup_ai_features() -> None:
         "# ApplyPilot configuration",
         "",
         # Explicit selector: llm.py validates the required variables for this
-        # provider at startup instead of sniffing the environment.
-        f"LLM_PROVIDER={provider}",
+        # provider at startup instead of sniffing the environment. Values are
+        # quoted (F11) so keys with special characters survive round-trips.
+        f"LLM_PROVIDER={quote_env_value(provider)}",
     ]
 
     if provider == "gemini":
         api_key = Prompt.ask("Gemini API key (from aistudio.google.com)")
         model = _ask_model("Model", "gemini-2.0-flash", _GEMINI_COMPAT_BASE, api_key)
-        env_lines.append(f"GEMINI_API_KEY={api_key}")
-        env_lines.append(f"LLM_MODEL={model}")
+        env_lines.append(f"GEMINI_API_KEY={quote_env_value(api_key)}")
+        env_lines.append(f"LLM_MODEL={quote_env_value(model)}")
     elif provider == "openai":
         api_key = Prompt.ask("OpenAI API key")
         model = _ask_model("Model", "gpt-4o-mini", _OPENAI_BASE, api_key)
-        env_lines.append(f"OPENAI_API_KEY={api_key}")
-        env_lines.append(f"LLM_MODEL={model}")
+        env_lines.append(f"OPENAI_API_KEY={quote_env_value(api_key)}")
+        env_lines.append(f"LLM_MODEL={quote_env_value(model)}")
     elif provider == "custom":
         console.print(
             "[dim]Any endpoint speaking POST /chat/completions works: "
@@ -310,15 +312,15 @@ def _setup_ai_features() -> None:
         url = Prompt.ask("Base URL (e.g. https://openrouter.ai/api/v1)")
         api_key = Prompt.ask("API key (leave blank if the endpoint needs no auth)", default="")
         model = _ask_model("Model name (the model id the endpoint expects)", "", url, api_key)
-        env_lines.append(f"LLM_URL={url}")
-        env_lines.append(f"LLM_MODEL={model}")
+        env_lines.append(f"LLM_URL={quote_env_value(url)}")
+        env_lines.append(f"LLM_MODEL={quote_env_value(model)}")
         if api_key:
-            env_lines.append(f"LLM_API_KEY={api_key}")
+            env_lines.append(f"LLM_API_KEY={quote_env_value(api_key)}")
     elif provider == "local":
         url = Prompt.ask("Local LLM endpoint URL", default="http://localhost:11434/v1")
         model = _ask_model("Model name", "local-model", url, "")
-        env_lines.append(f"LLM_URL={url}")
-        env_lines.append(f"LLM_MODEL={model}")
+        env_lines.append(f"LLM_URL={quote_env_value(url)}")
+        env_lines.append(f"LLM_MODEL={quote_env_value(model)}")
 
     env_lines.append("")
     _write_env_file(ENV_PATH, env_lines)
@@ -361,10 +363,14 @@ def _setup_auto_apply() -> None:
             if "CAPSOLVER_API_KEY" not in existing:
                 write_secret_text(
                     ENV_PATH,
-                    existing.rstrip() + f"\nCAPSOLVER_API_KEY={capsolver_key}\n",
+                    existing.rstrip()
+                    + f"\nCAPSOLVER_API_KEY={quote_env_value(capsolver_key)}\n",
                 )
         else:
-            write_secret_text(ENV_PATH, f"# ApplyPilot configuration\nCAPSOLVER_API_KEY={capsolver_key}\n")
+            write_secret_text(
+                ENV_PATH,
+                f"# ApplyPilot configuration\nCAPSOLVER_API_KEY={quote_env_value(capsolver_key)}\n",
+            )
         console.print("[green]CapSolver key saved.[/green]")
     else:
         console.print("[dim]Skipped. Add CAPSOLVER_API_KEY to .env later if needed.[/dim]")
@@ -411,9 +417,9 @@ def _setup_composio() -> None:
     if not existing_lines:
         existing_lines = ["# ApplyPilot configuration", ""]
     env_lines = existing_lines + [
-        f"COMPOSIO_API_KEY={api_key}",
-        f"COMPOSIO_TOOLKITS={toolkits}",
-        f"COMPOSIO_USER_ID={user_id}",
+        f"COMPOSIO_API_KEY={quote_env_value(api_key)}",
+        f"COMPOSIO_TOOLKITS={quote_env_value(toolkits)}",
+        f"COMPOSIO_USER_ID={quote_env_value(user_id)}",
         "",
     ]
     _write_env_file(ENV_PATH, env_lines)

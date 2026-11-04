@@ -450,7 +450,6 @@ def portal(
         import uvicorn
 
         from applypilot.portal import create_app
-        from applypilot.portal.auth import get_or_create_token
     except ImportError as e:
         console.print(f"[red]Portal dependencies missing:[/red] {e}")
         console.print(
@@ -458,12 +457,16 @@ def portal(
         )
         raise typer.Exit(code=1)
 
-    token = get_or_create_token()
     app = create_app()
 
     console.print("\n[bold green]ApplyPilot portal[/bold green]")
-    console.print(f"  Local URL: http://127.0.0.1:{port}/?token={token}")
+    console.print(f"  Local URL: http://127.0.0.1:{port}/")
     console.print("  Token saved at ~/.applypilot/portal_token (0600).")
+    console.print(
+        "[dim]  First visit asks for the token in the portal's login form —"
+        " it is never sent in the URL, so it cannot leak into logs or browser"
+        " history.[/dim]\n"
+    )
     console.print("[dim]  Ctrl+C to stop. The portal serves only 127.0.0.1.[/dim]\n")
 
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")

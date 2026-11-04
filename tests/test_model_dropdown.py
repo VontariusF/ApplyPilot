@@ -256,7 +256,7 @@ def test_wizard_selects_from_fetched_list(monkeypatch, tmp_path):
     model_call = calls[-1]
     assert model_call["kwargs"].get("choices") == ["llama3", "qwen2.5:7b"]
     assert model_call["kwargs"].get("default") == "llama3"  # first choice when no default
-    assert "LLM_MODEL=llama3" in env_path.read_text(encoding="utf-8")
+    assert "LLM_MODEL='llama3'" in env_path.read_text(encoding="utf-8")
 
 
 def test_wizard_falls_back_to_free_text_when_list_fails(monkeypatch, tmp_path, capsys):
@@ -272,7 +272,7 @@ def test_wizard_falls_back_to_free_text_when_list_fails(monkeypatch, tmp_path, c
 
     model_call = calls[-1]
     assert "choices" not in model_call["kwargs"]  # free text, not a select
-    assert "LLM_MODEL=my-typed-model" in env_path.read_text(encoding="utf-8")
+    assert "LLM_MODEL='my-typed-model'" in env_path.read_text(encoding="utf-8")
     # One-line warning (whitespace-normalized: rich may wrap the console line).
     assert "enter the model id manually" in " ".join(capsys.readouterr().out.split())
 
@@ -288,7 +288,7 @@ def test_wizard_falls_back_when_list_is_empty(monkeypatch, tmp_path, capsys):
 
     wizard._setup_ai_features()
 
-    assert "LLM_MODEL=typed-anyway" in env_path.read_text(encoding="utf-8")
+    assert "LLM_MODEL='typed-anyway'" in env_path.read_text(encoding="utf-8")
     assert "returned no models" in " ".join(capsys.readouterr().out.split())
 
 
@@ -303,7 +303,7 @@ def test_wizard_keeps_default_when_default_in_choices(monkeypatch, tmp_path):
 
     wizard._setup_ai_features()
 
-    assert "LLM_MODEL=gemini-2.0-flash" in env_path.read_text(encoding="utf-8")
+    assert "LLM_MODEL='gemini-2.0-flash'" in env_path.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------

@@ -81,6 +81,7 @@ def create_app() -> FastAPI:
     runner.init_registry()
     runner.sweep_orphans()
     token = auth.get_or_create_token()
+    auth.install_access_log_redaction()
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.state.token = token
@@ -88,7 +89,9 @@ def create_app() -> FastAPI:
 
     # ------------------------------------------------------------------
     # Auth middleware: every route requires the token; non-localhost Host
-    # headers are refused outright (DNS-rebinding defense).
+    # headers are refused outright (DNS-rebinding defense). The token is
+    # accepted only from the cookie or a header — never the query string,
+    # which access logs and browser history record verbatim (F9).
     # ------------------------------------------------------------------
     @app.middleware("http")
     async def auth_guard(request: Request, call_next):
@@ -98,7 +101,6 @@ def create_app() -> FastAPI:
             request.cookies.get(auth.COOKIE_NAME),
             request.headers.get("x-portal-token")
             or _bearer(request.headers.get("authorization")),
-            request.query_params.get("token"),
         )
         if not auth.token_matches(provided, app.state.token):
             # POST /login carries its token in the form body — pass it
@@ -106,11 +108,7 @@ def create_app() -> FastAPI:
             if request.method == "POST" and request.url.path == "/login":
                 return await call_next(request)
             return _unauthorized(request)
-        response = await call_next(request)
-        # First visit via ?token= — persist the cookie for subsequent requests.
-        if request.query_params.get("token"):
-            auth.set_token_cookie(response, app.state.token)
-        return response
+        return await call_next(request)
 
     # ------------------------------------------------------------------
     # Auth: POST /login validates the submitted token and sets the cookie.

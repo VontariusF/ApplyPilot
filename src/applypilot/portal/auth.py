@@ -2,12 +2,17 @@
 
 A token is generated at first launch and stored at 0600 under
 ~/.applypilot/. Every request must present it — as a cookie, an
-X-Portal-Token or Bearer header, or a ?token= query parameter (the
-launch URL uses the query form once, then a cookie is set). This defends
+X-Portal-Token or Bearer header. The token is never accepted from the
+URL: a ?token= query string lands verbatim in uvicorn access logs,
+browser history, and Referer headers (sweep F9), so the one-time entry
+point is the POST /login form (served as the 401 body), which swaps the
+submitted token for an HttpOnly SameSite=Strict cookie. This defends
 against other local users (who cannot read the file) and DNS-rebinding
 pages (whose cross-site requests carry no SameSite=Strict cookie).
 """
 
+import logging
+import re
 import secrets
 from pathlib import Path
 
@@ -45,13 +50,45 @@ def token_matches(provided: str | None, expected: str) -> bool:
     return secrets.compare_digest(provided.strip(), expected)
 
 
-def extract_token(
-    cookie_token: str | None,
-    header_token: str | None,
-    query_token: str | None,
-) -> str | None:
-    """First present token source, in cookie > header > query order."""
-    return cookie_token or header_token or query_token
+def extract_token(cookie_token: str | None, header_token: str | None) -> str | None:
+    """First present token source, in cookie > header order.
+
+    Query strings are deliberately not a token source: the token must
+    never appear in a URL, where access logs, browser history, and
+    Referer headers capture it (sweep F9).
+    """
+    return cookie_token or header_token
+
+
+# A stale ?token= link (pre-F9 bookmark, old launch URL) must not leak the
+# token into the uvicorn access log even though the request now 401s — the
+# token is long-lived, so the leaked value stays valid.
+_TOKEN_QUERY_RE = re.compile(r"([?&]token=)[^&\s\"]+")
+
+
+def redact_token_query(text: str) -> str:
+    """Replace any token=<value> query parameter with token=[REDACTED]."""
+    return _TOKEN_QUERY_RE.sub(r"\1[REDACTED]", text)
+
+
+class _TokenQueryRedactionFilter(logging.Filter):
+    """Scrub token query parameters from uvicorn access-log records."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        if "token=" in message:
+            # The record is re-formatted: msg holds the final text, args
+            # are dropped so %-expansion cannot resurrect the raw value.
+            record.msg = redact_token_query(message)
+            record.args = None
+        return True
+
+
+def install_access_log_redaction() -> None:
+    """Attach the token-redaction filter to uvicorn's access logger (once)."""
+    access_logger = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, _TokenQueryRedactionFilter) for f in access_logger.filters):
+        access_logger.addFilter(_TokenQueryRedactionFilter())
 
 
 def host_is_allowed(host_header: str | None) -> bool:
