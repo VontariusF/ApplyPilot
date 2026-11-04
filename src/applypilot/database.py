@@ -272,6 +272,10 @@ _ALL_COLUMNS: dict[str, str] = {
     # were actually uploaded when the application was submitted.
     "applied_resume_version_id": "INTEGER",
     "applied_cover_version_id": "INTEGER",
+    # Board curation (spec Jobs panel): the user dismissed this listing from
+    # the board. A presentation flag with a timestamp — never a pipeline
+    # stage; STAGE_CONDITIONS and the automation queries ignore it.
+    "dismissed_at": "TEXT",
 }
 
 
@@ -649,6 +653,23 @@ def count_applications_on(day: str) -> int:
         "WHERE applied_at IS NOT NULL AND date(applied_at) = ?",
         (day,),
     ).fetchone()[0]
+
+
+def set_job_dismissed(conn: sqlite3.Connection | None = None, url: str = "",
+                      dismissed: bool = True) -> bool:
+    """Dismiss/undismiss a job on the board (spec Jobs panel).
+
+    Sets or clears dismissed_at. Board-level curation only: pipeline stage
+    queries (STAGE_CONDITIONS) never consult this flag, so automation is
+    unaffected. Returns True when the job exists.
+    """
+    if conn is None:
+        conn = get_connection()
+    stamp = datetime.now(timezone.utc).isoformat() if dismissed else None
+    cur = conn.execute("UPDATE jobs SET dismissed_at = ? WHERE url = ?",
+                       (stamp, url))
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def reset_job_tailoring(conn: sqlite3.Connection, url: str,

@@ -112,6 +112,7 @@ def filtered_jobs(stage: str = "discovered",
                   min_score: int | None = None,
                   min_salary: float | None = None,
                   remote: str = "",
+                  dismissed: str = "",
                   limit: int = 50) -> list[dict]:
     """Jobs board rows behind every filter on the filter bar.
 
@@ -126,6 +127,10 @@ def filtered_jobs(stage: str = "discovered",
     are excluded only while min_salary is active. The remote filter uses
     the inferred is_remote column; rows with no inference (NULL) match
     neither "yes" nor "no".
+
+    The dismissed flag (spec Jobs panel) is board curation: the default
+    view (dismissed="") hides dismissed rows, dismissed="only" shows just
+    them (the Undo section). It is not a pipeline stage.
     """
     condition = STAGE_CONDITIONS.get(stage, "1=1")
     where = [condition]
@@ -139,6 +144,11 @@ def filtered_jobs(stage: str = "discovered",
     elif min_score is not None and stage in ("scored", "tailored", "applied"):
         where.append("fit_score >= ?")
         params.append(min_score)
+
+    if dismissed == "only":
+        where.append("dismissed_at IS NOT NULL")
+    else:
+        where.append("dismissed_at IS NULL")
 
     if site:
         where.append("site = ?")
@@ -194,6 +204,22 @@ def distinct_apply_statuses() -> list[str]:
         "WHERE apply_status IS NOT NULL AND apply_status != '' ORDER BY apply_status"
     ).fetchall()
     return [r[0] for r in rows]
+
+
+def dismissed_jobs() -> list[dict]:
+    """All board-dismissed jobs, most recent dismissal first (Undo list)."""
+    rows = get_connection().execute(
+        "SELECT * FROM jobs WHERE dismissed_at IS NOT NULL "
+        "ORDER BY dismissed_at DESC"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def dismissed_count() -> int:
+    """How many jobs sit in the board's collapsed Dismissed section."""
+    return get_connection().execute(
+        "SELECT COUNT(*) FROM jobs WHERE dismissed_at IS NOT NULL"
+    ).fetchone()[0]
 
 
 def count_jobs() -> int:

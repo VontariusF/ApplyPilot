@@ -14,7 +14,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncIterator
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from fastapi import FastAPI, Request
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
@@ -40,6 +40,10 @@ log = logging.getLogger(__name__)
 # SSE tuning
 POLL_SECONDS = 0.5
 IDLE_POLLS_BEFORE_CLOSE = 4  # ~2s with no data after the run ends
+# Board feed: tailor/apply subprocesses take minutes — stay connected
+# through the quiet stretch (~10 min at POLL_SECONDS), then let the client
+# reconnect.
+BOARD_IDLE_POLLS_BEFORE_CLOSE = 1200
 BACKFILL_BYTES = 16 * 1024  # initial tail bound for long logs
 
 # Agent sign-in gate: how long the cards poll `claude auth status` after a
@@ -265,12 +269,98 @@ def create_app() -> FastAPI:
         if not url:
             return PlainTextResponse("invalid tailor-now request", status_code=400)
         include_cover = str(form.get("include_cover", "")).strip() in ("1", "on", "true")
+        view = _board_form_view(form)
+        hx = request.headers.get("HX-Request")
         try:
             automation_mod.start_single_job_tailor(url, include_cover=include_cover)
         except runner.ParamError as e:
+            if hx:
+                return _render(request, "partials/jobs_board.html",
+                               toast_message=str(e), toast_kind="error",
+                               **_jobs_board_context(**view))
             return RedirectResponse(f"/jobs?error={quote(str(e))}", status_code=303)
+        if hx:
+            # Stay on the board: the card shows a busy state and the SSE feed
+            # refreshes it when documents are ready.
+            return _render(request, "partials/jobs_board.html",
+                           toast_message="Tailoring started — the card updates when documents are ready.",
+                           toast_kind="info", **_jobs_board_context(**view))
         return RedirectResponse(f"/jobs/detail?url={quote(url, safe='')}",
                                 status_code=303)
+
+    @app.post("/jobs/apply-now")
+    async def jobs_apply_now(request: Request):
+        """Apply now (spec Jobs panel): start a one-job apply run for this url.
+
+        The confirm modal lists the documents that will be submitted; this
+        route refuses to start without a tailored resume — the card offers
+        Tailor now instead. Never submits anything silently.
+        """
+        form = await request.form()
+        url = str(form.get("url", "")).strip()
+        if not url:
+            return PlainTextResponse("invalid apply-now request", status_code=400)
+        view = _board_form_view(form)
+        hx = request.headers.get("HX-Request")
+        job = queries.job_detail(url)
+        if job is None:
+            return PlainTextResponse("job not found", status_code=404)
+        if not job.get("tailored_resume_path"):
+            message = "This job has no tailored documents yet — run Tailor now first."
+            if hx:
+                return _render(request, "partials/jobs_board.html",
+                               toast_message=message, toast_kind="error",
+                               **_jobs_board_context(**view))
+            return RedirectResponse(f"/jobs?error={quote(message)}", status_code=303)
+        try:
+            runner.start_run("apply", {"url": url})
+        except runner.ParamError as e:
+            if hx:
+                return _render(request, "partials/jobs_board.html",
+                               toast_message=str(e), toast_kind="error",
+                               **_jobs_board_context(**view))
+            return RedirectResponse(f"/jobs?error={quote(str(e))}", status_code=303)
+        if hx:
+            return _render(request, "partials/jobs_board.html",
+                           toast_message="Applying now — the card updates when the application finishes.",
+                           toast_kind="info", **_jobs_board_context(**view))
+        return RedirectResponse(f"/jobs/detail?url={quote(url, safe='')}",
+                                status_code=303)
+
+    @app.post("/jobs/dismiss")
+    async def jobs_dismiss(request: Request):
+        """Dismiss a job from the board (spec Jobs panel): a curation flag
+        with a timestamp, never a pipeline stage. The card leaves the default
+        view into the collapsed Dismissed section, which offers Undo."""
+        form = await request.form()
+        url = str(form.get("url", "")).strip()
+        if not url:
+            return PlainTextResponse("invalid dismiss request", status_code=400)
+        if not database.set_job_dismissed(database.get_connection(), url,
+                                          dismissed=True):
+            return PlainTextResponse("job not found", status_code=404)
+        if request.headers.get("HX-Request"):
+            return _render(request, "partials/jobs_board.html",
+                           toast_message="Job dismissed — find it in the Dismissed section below if that was a mistake.",
+                           toast_kind="info",
+                           **_jobs_board_context(**_board_form_view(form)))
+        return RedirectResponse("/jobs", status_code=303)
+
+    @app.post("/jobs/undismiss")
+    async def jobs_undismiss(request: Request):
+        form = await request.form()
+        url = str(form.get("url", "")).strip()
+        if not url:
+            return PlainTextResponse("invalid undismiss request", status_code=400)
+        if not database.set_job_dismissed(database.get_connection(), url,
+                                          dismissed=False):
+            return PlainTextResponse("job not found", status_code=404)
+        if request.headers.get("HX-Request"):
+            return _render(request, "partials/jobs_board.html",
+                           toast_message="Job restored to the board.",
+                           toast_kind="info",
+                           **_jobs_board_context(**_board_form_view(form)))
+        return RedirectResponse("/jobs", status_code=303)
 
     @app.post("/jobs/reset-failed")
     async def jobs_reset_failed():
@@ -292,6 +382,14 @@ def create_app() -> FastAPI:
         # retries) — off the event loop, or every portal request stalls
         # behind it. Same pattern as the onboarding routes.
         await asyncio.to_thread(run_scoring, url=url)
+        if request.headers.get("HX-Request"):
+            # Inline feedback (spec Jobs panel): the fit-assessment panel
+            # itself re-renders with the fresh score instead of a silent
+            # full-page redirect.
+            job = queries.job_detail(url) or {}
+            keywords, reasoning = queries.split_score_reasoning(job.get("score_reasoning"))
+            return _render(request, "partials/fit_assessment.html", job=job,
+                           keywords=keywords, reasoning=reasoning, rescored=True)
         return RedirectResponse(f"/jobs/detail?url={quote(url, safe='')}",
                                 status_code=303)
 
@@ -431,6 +529,33 @@ def create_app() -> FastAPI:
         return _render(request, "run_log.html", run=run,
                        backfill=escape(backfill),
                        redaction_note=settings_mod.describe_redaction())
+
+    @app.get("/events/board")
+    async def board_events():
+        """SSE feed for the jobs board (spec Jobs panel).
+
+        Emits `board-changed` whenever anything visible on the board may
+        have changed: runs starting/stopping (a single-job tailor/apply run
+        finishing means documents are ready) or the job store growing.
+        Clients refetch the board on the event. Closes after a quiet window;
+        the browser's EventSource reconnects automatically.
+        """
+
+        async def gen() -> AsyncIterator[dict]:
+            last = await asyncio.to_thread(_board_snapshot)
+            idle = 0
+            while idle < BOARD_IDLE_POLLS_BEFORE_CLOSE:
+                await asyncio.sleep(POLL_SECONDS)
+                snapshot = await asyncio.to_thread(_board_snapshot)
+                if snapshot != last:
+                    last = snapshot
+                    idle = 0
+                    yield {"event": "board-changed", "data": "changed"}
+                else:
+                    idle += 1
+            yield {"event": "end", "data": "closed"}
+
+        return EventSourceResponse(gen())
 
     @app.get("/runs/{run_id}/logstream")
     async def run_logstream(run_id: str, backfill: int = 1):
@@ -807,15 +932,71 @@ def _jobs_filters(stage: str, min_score: int, limit: int, site: str,
     }
 
 
+def _board_snapshot() -> str:
+    """Cheap fingerprint of board-relevant state: run lifecycle changes
+    (a single-job tailor/apply finishing = documents ready) plus store size
+    and the dismissed count (so a dismissal refreshes every open board)."""
+    runs = [{"id": r["id"], "kind": r["kind"], "status": r["status"]}
+            for r in runner.list_runs(limit=20)]
+    return json.dumps({"runs": runs, "jobs": queries.count_jobs(),
+                       "dismissed": queries.dismissed_count()}, sort_keys=True)
+
+
+def _busy_verbs() -> dict[str, str]:
+    """url -> verb ("tailor"/"apply") for running single-job runs.
+
+    The board renders a busy state (spinner, no action buttons) on cards
+    whose single-job run is still executing; the SSE board feed triggers a
+    refresh when the run finishes, so the card flips back automatically.
+    """
+    busy: dict[str, str] = {}
+    for run in runner.running_runs():
+        if run.get("kind") not in ("tailor", "apply"):
+            continue
+        try:
+            params = json.loads(run.get("params") or "{}")
+        except json.JSONDecodeError:
+            continue
+        url = str(params.get("url", ""))
+        if url:
+            busy[url] = str(run["kind"])
+    return busy
+
+
+# Canonical board view params carried through verb POSTs so a dismiss/tailor
+# response re-renders the same filtered view (not a reset board).
+_BOARD_VIEW_KEYS = ("stage", "min_score", "limit", "site", "location",
+                    "discovered_from", "discovered_to", "apply_status",
+                    "remote", "min_salary")
+
+
+def _board_form_view(form) -> dict[str, str]:
+    view = {k: str(form.get(k, "") or "") for k in _BOARD_VIEW_KEYS}
+    # Verb forms carry the current view; a blank stage (older form, direct
+    # POST) falls back to the board's default stage instead of "all stages".
+    if not view["stage"].strip():
+        view["stage"] = "scored"
+    return view
+
+
 def _jobs_board_context(stage: str = "scored", min_score: int = 7, limit: int = 50,
                         site: str = "", location: str = "", discovered_from: str = "",
                         discovered_to: str = "", apply_status: str = "",
                         remote: str = "", min_salary: str = "") -> dict:
     """Context for the jobs-board partial (grid, count, empty states)."""
+    # GET routes get FastAPI-coerced ints; verb forms re-post the view as
+    # raw strings. Coerce both to the typed values _jobs_filters clamps.
+    if isinstance(min_score, str):
+        min_score = _opt_int(min_score) or 0
+    if isinstance(limit, str):
+        limit = _opt_int(limit) or 50
     filters = _jobs_filters(stage, min_score, limit, site, location,
                             discovered_from, discovered_to, apply_status,
                             remote, min_salary)
     rows = queries.filtered_jobs(**filters)
+    view = dict(zip(_BOARD_VIEW_KEYS,
+                    (stage, min_score, limit, site, location, discovered_from,
+                     discovered_to, apply_status, remote, min_salary)))
     return {
         "jobs": rows,
         "total": len(rows),
@@ -824,8 +1005,23 @@ def _jobs_board_context(stage: str = "scored", min_score: int = 7, limit: int = 
                             or discovered_to.strip() or apply_status.strip()
                             or (remote.strip() if remote.strip() in queries.REMOTE_VALUES else "")
                             or filters["min_salary"] is not None),
+        "busy": _busy_verbs(),
+        "dismissed_jobs": queries.dismissed_jobs(),
+        "board_qs": urlencode({k: v for k, v in view.items()
+                               if str(v) != "" and str(v) != "None"}),
         **filters,
     }
+
+
+def _opt_int(raw: str) -> int | None:
+    """Parse a filter-form integer; blank/garbage means the filter is off."""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(float(raw))
+    except ValueError:
+        return None
 
 
 def _opt_float(raw: str) -> float | None:

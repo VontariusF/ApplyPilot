@@ -14,24 +14,7 @@
   </div>
 </div>
 
-<section class="panel">
-  <h2>Fit assessment</h2>
-  {% if job.score_error %}
-  <div class="alert error">
-    <strong>Scoring failed:</strong> {{ job.score_error }}
-    <span class="hint">Use Rescore to try again once the problem is fixed.</span>
-  </div>
-  {% elif job.fit_score is none %}
-  <p class="empty">Not scored yet. Run the score stage, or use Rescore below.</p>
-  {% else %}
-  {% if keywords %}
-  <div class="keyword-chips">
-    {% for keyword in keywords.split(",") %}{% if keyword.strip() %}<span class="chip">{{ keyword.strip() }}</span>{% endif %}{% endfor %}
-  </div>
-  {% endif %}
-  <p class="fit-summary"><strong>Why it’s {{ "an" if job.fit_score in (8, 11, 18) else "a" }} {{ job.fit_score }}/10:</strong> {{ reasoning or "No reasoning captured." }}</p>
-  {% endif %}
-</section>
+{% include "partials/fit_assessment.html" %}
 
 <section class="panel">
   <h2>Documents</h2>
@@ -82,10 +65,6 @@
 <section class="panel">
   <h2>Actions</h2>
   <div class="mark-actions">
-    <form method="post" action="/jobs/rescore" class="inline-form">
-      <input type="hidden" name="url" value="{{ job.url }}">
-      <button type="submit" class="secondary">Rescore</button>
-    </form>
     <form method="post" action="/jobs/regenerate" class="inline-form">
       <input type="hidden" name="url" value="{{ job.url }}">
       <label><input type="checkbox" name="include_cover" value="1"> include cover letter</label>

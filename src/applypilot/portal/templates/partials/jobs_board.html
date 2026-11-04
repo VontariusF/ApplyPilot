@@ -1,8 +1,12 @@
-<div id="jobs-board">
+<div id="jobs-board" hx-get="/jobs/table{% if board_qs %}?{{ board_qs }}{% endif %}"
+     hx-trigger="sse:board-changed" hx-target="#jobs-board" hx-swap="outerHTML">
+  {% if toast_message %}
+  <div class="toast {{ toast_kind or 'info' }}" role="status">{{ toast_message }}</div>
+  {% endif %}
   <p class="result-count">{{ total }} job{{ "" if total == 1 else "s" }} in this view</p>
   {% if jobs %}
   <div class="card-grid">
-    {% for job in jobs %}{% include "partials/job_card.html" %}{% endfor %}
+    {% for job in jobs %}{% with card_mode = "main", uid = "main-" ~ loop.index %}{% include "partials/job_card.html" %}{% endwith %}{% endfor %}
   </div>
   {% elif total_jobs == 0 %}
   <div class="empty-state">
@@ -20,5 +24,13 @@
   </div>
   {% else %}
   <p class="empty">Nothing on the board right now.</p>
+  {% endif %}
+  {% if dismissed_jobs %}
+  <details class="dismissed-section">
+    <summary>Dismissed ({{ dismissed_jobs | length }})</summary>
+    <div class="card-grid">
+      {% for job in dismissed_jobs %}{% with card_mode = "dismissed", uid = "dismissed-" ~ loop.index %}{% include "partials/job_card.html" %}{% endwith %}{% endfor %}
+    </div>
+  </details>
   {% endif %}
 </div>

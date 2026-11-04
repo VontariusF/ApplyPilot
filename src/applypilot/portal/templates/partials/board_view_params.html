@@ -1,0 +1,12 @@
+{# Hidden board view params carried through verb POSTs so the response
+   re-renders the same filtered view instead of resetting the board. #}
+<input type="hidden" name="stage" value="{{ stage or '' }}">
+<input type="hidden" name="min_score" value="{{ min_score if min_score is not none else '' }}">
+<input type="hidden" name="limit" value="{{ limit if limit is not none else '' }}">
+<input type="hidden" name="site" value="{{ site or '' }}">
+<input type="hidden" name="location" value="{{ location or '' }}">
+<input type="hidden" name="discovered_from" value="{{ discovered_from or '' }}">
+<input type="hidden" name="discovered_to" value="{{ discovered_to or '' }}">
+<input type="hidden" name="apply_status" value="{{ apply_status or '' }}">
+<input type="hidden" name="remote" value="{{ remote or '' }}">
+<input type="hidden" name="min_salary" value="{{ min_salary if min_salary is not none else '' }}">

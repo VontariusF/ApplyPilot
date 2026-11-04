@@ -62,6 +62,9 @@
 </div>
 
 <div hx-ext="sse" sse-connect="/events/board">
+  {# The board partial is the swap target for verb POSTs and the SSE
+     board-changed feed; the wrapper owns the connection so it survives
+     swaps. #}
   {% include "partials/jobs_board.html" %}
 </div>
 {% endblock %}
