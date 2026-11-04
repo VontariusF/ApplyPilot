@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Automation · ApplyPilot Portal{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Automation</h1>
+  <p class="dim">Start work with a button, or let it run on a schedule. Everything here is optional — nothing starts on its own until you turn it on.</p>
+</div>
+
+<div id="automation-cards"
+     hx-ext="sse" sse-connect="/automation/stream" sse-swap="cards" hx-swap="innerHTML">
+  {% include "partials/automation_cards.html" %}
+</div>
+
+{% include "partials/assistant_panel.html" %}
+{% endblock %}

@@ -485,10 +485,10 @@ def cancel_run(run_id: str) -> bool:
 def retry_run(run_id: str) -> dict:
     """Re-run a failed run with identical parameters.
 
-    The registry's `params` column holds the original form dict (the same
-    data _params_summary renders), so re-validating it through the build
-    functions reproduces the failed run's exact command. Runs spawned with
-    a command override (tests) rebuild from params instead.
+    The registry's `params` column holds the original form dict (rendered
+    in plain language by automation.run_summary), so re-validating it
+    through the build functions reproduces the failed run's exact command.
+    Runs spawned with a command override (tests) rebuild from params instead.
 
     Raises:
         ParamError: when the run doesn't exist, isn't failed, or its stored

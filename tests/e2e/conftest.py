@@ -92,6 +92,28 @@ def portal_server(portal_env, seeded_profile, fake_llm, monkeypatch):
 
 
 @pytest.fixture()
+def harmless_runs(monkeypatch):
+    """Presets spawn real subprocesses that exit immediately (no stage work).
+
+    The route-level pattern (tests/test_portal_pages.py) applied to the
+    serving app: the registry row, streaming, and lifecycle stay real —
+    only the child is swapped for `python -c "pass"`, so a Start click in
+    the browser can never run discovery or apply stages.
+    """
+    import sys
+
+    from applypilot.portal import runner
+
+    original = runner.start_run
+
+    def fake_start(kind, params, command=None, emit_jsonl=None):
+        return original(kind, params, command=[sys.executable, "-c", "pass"],
+                        emit_jsonl=False)
+
+    monkeypatch.setattr(runner, "start_run", fake_start)
+
+
+@pytest.fixture()
 def seeded_job(portal_env):
     """One scored job in the isolated store, so the board has a row to show."""
     from datetime import datetime, timezone

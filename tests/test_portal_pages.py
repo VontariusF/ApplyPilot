@@ -186,9 +186,11 @@ def test_runs_page_renders_history(portal_client):
                      emit_jsonl=False)
     r = client.get("/runs")
     assert r.status_code == 200
-    assert "Start pipeline run" in r.text
-    assert "Start apply run" in r.text
-    assert "pipeline" in r.text
+    # The raw run forms collapsed into the Automation preset cards; the
+    # Runs page is history only.
+    assert "Start pipeline run" not in r.text
+    assert "Start apply run" not in r.text
+    assert "Run history" in r.text
 
 
 def test_runs_start_route_spawns_and_records(portal_client, monkeypatch):

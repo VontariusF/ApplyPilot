@@ -1,0 +1,5 @@
+{% if progress %}
+<p class="progress-strip" data-testid="jobs-progress" role="status">
+  Working: {{ progress.label }} — {{ progress.count }} {{ progress.unit }} so far
+</p>
+{% endif %}
