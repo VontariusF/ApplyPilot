@@ -63,3 +63,49 @@ def test_trailing_slash_still_matches(queue):
     job = launcher.acquire_job(target_url="https://x.com/jobs/plain/")
     assert job is not None
     assert job["url"] == "https://x.com/jobs/plain"
+
+
+# F4: exact matches win, the fallback is suffix-anchored, ambiguity errors.
+
+def test_acquire_url_prefers_exact_match(queue):
+    # Sibling /jobs/1234 inserted FIRST (lower rowid): an unanchored contains
+    # LIKE with LIMIT 1 would acquire it instead of the requested /jobs/123.
+    seed_job(queue, "https://x.com/jobs/1234")
+    seed_job(queue, "https://x.com/jobs/123")
+    job = launcher.acquire_job(target_url="https://x.com/jobs/123")
+    assert job is not None
+    assert job["url"] == "https://x.com/jobs/123"
+
+
+def test_acquire_url_prefers_exact_match_sibling_first_inserted(queue):
+    # Same pair, reverse insertion order — exact must win either way.
+    seed_job(queue, "https://x.com/jobs/123")
+    seed_job(queue, "https://x.com/jobs/1234")
+    job = launcher.acquire_job(target_url="https://x.com/jobs/123")
+    assert job is not None
+    assert job["url"] == "https://x.com/jobs/123"
+
+
+def test_acquire_url_suffix_anchored_does_not_match_sibling(queue):
+    # Only the sibling exists: a suffix-anchored fallback must NOT grab it
+    # (the old contains-LIKE matched /jobs/1234 for a /jobs/123 request).
+    seed_job(queue, "https://x.com/jobs/1234")
+    assert launcher.acquire_job(target_url="https://x.com/jobs/123") is None
+
+
+def test_acquire_url_ambiguous_fallback_raises(queue):
+    # Two distinct suffix-anchored matches and no exact row: refuse to guess.
+    seed_job(queue, "https://x.com/jobs/123/group")
+    seed_job(queue, "https://x.com/jobs/123/apply")
+    with pytest.raises(launcher.AmbiguousJobURLError) as excinfo:
+        launcher.acquire_job(target_url="https://x.com/jobs/123")
+    assert "https://x.com/jobs/123/group" in str(excinfo.value)
+    assert "https://x.com/jobs/123/apply" in str(excinfo.value)
+
+
+def test_acquire_url_trailing_slash_row_still_fallback_matches(queue):
+    # Stored row with a trailing slash: one normalized path, not ambiguity.
+    seed_job(queue, "https://x.com/jobs/plain/")
+    job = launcher.acquire_job(target_url="https://x.com/jobs/plain")
+    assert job is not None
+    assert job["url"] == "https://x.com/jobs/plain/"

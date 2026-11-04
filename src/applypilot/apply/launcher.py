@@ -76,6 +76,43 @@ if platform.system() != "Windows":
 # Database operations
 # ---------------------------------------------------------------------------
 
+class AmbiguousJobURLError(ValueError):
+    """F4: a --url lookup's fallback matched several distinct jobs.
+
+    Raised instead of silently picking one — a wrong pick applies to the
+    wrong posting with the wrong tailored resume.
+    """
+
+
+def _resolve_target_rows(target_url: str, core: str, rows: list) -> dict | None:
+    """F4: pick the job a --url lookup refers to, or refuse loudly.
+
+    Exact matches (url or application_url equal to the target or its
+    query-stripped core) win outright. Fallback rows are suffix-anchored
+    matches; a single distinct normalized path is accepted, several are
+    ambiguous and raise rather than guess.
+    """
+    if not rows:
+        return None
+    exact = [r for r in rows
+             if target_url in (r["url"], r["application_url"])
+             or core in (r["url"], r["application_url"])]
+    if exact:
+        # SQL ORDER BY url made the exact set deterministic.
+        return dict(exact[0])
+    # Trailing-slash variants of the same posting are one job, not ambiguity.
+    cores = {
+        (r["application_url"] or r["url"]).split("?")[0].rstrip("/") for r in rows
+    }
+    if len(cores) > 1:
+        candidates = ", ".join(sorted(r["url"] for r in rows))
+        raise AmbiguousJobURLError(
+            f"--url {target_url!r} matched multiple jobs; "
+            f"pass the exact URL of the intended one. Candidates: {candidates}"
+        )
+    return dict(rows[0])
+
+
 def acquire_job(target_url: str | None = None, min_score: int = 7,
                 worker_id: int = 0, agent_label: str = "claude") -> dict | None:
     """Atomically acquire the next job to apply to.
@@ -98,16 +135,25 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
             # S7: escape LIKE wildcards (and the escape char itself) so a URL
             # containing % or _ matches itself only, never unrelated rows.
             escaped = core.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            like = f"%{escaped}%"
-            row = conn.execute("""
+            # F4: exact rows win over the LIKE fallback, and the fallback is
+            # suffix-anchored (%core or %core/%) so /jobs/123 can never match
+            # the sibling /jobs/1234 the way an unanchored contains-LIKE did.
+            suffix = f"%{escaped}"
+            rows = conn.execute("""
                 SELECT url, title, site, application_url, tailored_resume_path,
                        fit_score, location, full_description, cover_letter_path
                 FROM jobs
-                WHERE (url = ? OR application_url = ? OR application_url LIKE ? ESCAPE '\\' OR url LIKE ? ESCAPE '\\')
+                WHERE (url IN (?, ?) OR application_url IN (?, ?)
+                       OR url LIKE ? ESCAPE '\\' OR application_url LIKE ? ESCAPE '\\'
+                       OR url LIKE ? ESCAPE '\\' OR application_url LIKE ? ESCAPE '\\')
                   AND tailored_resume_path IS NOT NULL
                   AND (apply_status IS NULL OR apply_status != 'in_progress')
-                LIMIT 1
-            """, (target_url, target_url, like, like)).fetchone()
+                ORDER BY CASE WHEN url IN (?, ?) OR application_url IN (?, ?)
+                              THEN 0 ELSE 1 END, url
+            """, (target_url, core, target_url, core,
+                  suffix, suffix, suffix + "/%", suffix + "/%",
+                  target_url, core, target_url, core)).fetchall()
+            row = _resolve_target_rows(target_url, core, rows)
         else:
             blocked_sites, blocked_patterns = _load_blocked()
             # Build parameterized filters to avoid SQL injection
