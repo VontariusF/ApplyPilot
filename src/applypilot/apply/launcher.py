@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from rich.console import Console
@@ -130,7 +130,11 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
         else:
             blocked_sites, blocked_patterns = _load_blocked()
             # Build parameterized filters to avoid SQL injection
-            params: list = [min_score]
+            # B4: an in_progress lock whose last_attempted_at predates the
+            # stale cutoff is reclaimable (the owning worker crashed).
+            params: list = [_stale_lock_cutoff(),
+                            config.DEFAULTS["max_apply_attempts"],
+                            min_score]
             site_clause = ""
             if blocked_sites:
                 placeholders = ",".join("?" * len(blocked_sites))
@@ -145,14 +149,16 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                        fit_score, location, full_description, cover_letter_path
                 FROM jobs
                 WHERE tailored_resume_path IS NOT NULL
-                  AND (apply_status IS NULL OR apply_status = 'failed')
+                  AND (apply_status IS NULL OR apply_status = 'failed'
+                       OR (apply_status = 'in_progress' AND last_attempted_at IS NOT NULL
+                           AND last_attempted_at <= ?))
                   AND (apply_attempts IS NULL OR apply_attempts < ?)
                   AND fit_score >= ?
                   {site_clause}
                   {url_clauses}
                 ORDER BY fit_score DESC, url
                 LIMIT 1
-            """, [config.DEFAULTS["max_apply_attempts"]] + params).fetchone()
+            """, params).fetchone()
 
         if not row:
             conn.rollback()
@@ -217,6 +223,17 @@ def release_lock(url: str) -> None:
         (url,),
     )
     conn.commit()
+
+
+def _stale_lock_cutoff() -> str:
+    """ISO timestamp before which an in_progress lock is stale (B4).
+
+    A worker killed mid-apply never releases its lock; locks older than
+    ``config.DEFAULTS["apply_stale_lock_minutes"]`` are reclaimable.
+    """
+    stale_minutes = config.DEFAULTS["apply_stale_lock_minutes"]
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=stale_minutes)
+    return cutoff.isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +305,10 @@ def mark_job(url: str, status: str, reason: str | None = None) -> None:
 
 
 def reset_failed() -> int:
-    """Reset all failed jobs so they can be retried.
+    """Reset failed jobs so they can be retried.
+
+    Stale in_progress locks (B4: a crashed worker never released its job)
+    are cleared too; fresh locks are left alone.
 
     Returns:
         Number of jobs reset.
@@ -300,7 +320,9 @@ def reset_failed() -> int:
         WHERE apply_status = 'failed'
           OR (apply_status IS NOT NULL AND apply_status != 'applied'
               AND apply_status != 'in_progress')
-    """)
+          OR (apply_status = 'in_progress' AND last_attempted_at IS NOT NULL
+              AND last_attempted_at <= ?)
+    """, (_stale_lock_cutoff(),))
     conn.commit()
     return cursor.rowcount
 
@@ -382,6 +404,7 @@ def run_job(job: dict, port: int, worker_id: int = 0,
     start = time.time()
     stats: dict = {}
     proc = None
+    watchdog: threading.Timer | None = None
 
     try:
         proc = subprocess.Popen(
@@ -400,6 +423,30 @@ def run_job(job: dict, port: int, worker_id: int = 0,
 
         proc.stdin.write(agent_prompt)
         proc.stdin.close()
+
+        # B13: the streaming read blocks indefinitely if the agent hangs
+        # without producing output, and the old post-EOF wait never covered
+        # it. A watchdog enforces the configured apply_timeout over the whole
+        # run — no output or no exit within the budget kills the process.
+        apply_timeout = config.DEFAULTS["apply_timeout"]
+        timed_out = threading.Event()
+
+        def _watchdog_kill() -> None:
+            timed_out.set()
+            logger.warning(
+                "Worker %d exceeded apply_timeout=%ss; killing agent process",
+                worker_id, apply_timeout,
+            )
+            # Look the process up in the registry instead of closing over the
+            # local: the finally block may already have cleared it.
+            with _claude_lock:
+                current = _claude_procs.get(worker_id)
+            if current is not None and current.poll() is None:
+                _kill_process_tree(current.pid)
+
+        watchdog = threading.Timer(apply_timeout, _watchdog_kill)
+        watchdog.daemon = True
+        watchdog.start()
 
         text_parts: list[str] = []
         with open(worker_log, "a", encoding="utf-8") as lf:
@@ -456,9 +503,19 @@ def run_job(job: dict, port: int, worker_id: int = 0,
                     text_parts.append(line)
                     lf.write(line + "\n")
 
-        proc.wait(timeout=300)
+        proc.wait(timeout=apply_timeout)
         returncode = proc.returncode
+        watchdog.cancel()
         proc = None
+
+        # The watchdog kill leaves a negative return code too, so the
+        # timeout must be reported before the signal-exit "skipped" check.
+        if timed_out.is_set():
+            elapsed = int(time.time() - start)
+            add_event(f"[W{worker_id}] TIMEOUT ({elapsed}s)")
+            update_state(worker_id, status="failed",
+                         last_action=f"TIMEOUT ({elapsed}s)")
+            return "failed:timeout", int((time.time() - start) * 1000)
 
         if returncode and returncode < 0:
             return "skipped", int((time.time() - start) * 1000)
@@ -524,6 +581,8 @@ def run_job(job: dict, port: int, worker_id: int = 0,
         update_state(worker_id, status="failed", last_action=f"ERROR: {str(e)[:25]}")
         return f"failed:{str(e)[:100]}", duration_ms
     finally:
+        if watchdog is not None:
+            watchdog.cancel()
         with _claude_lock:
             _claude_procs.pop(worker_id, None)
         if proc is not None and proc.poll() is None:
@@ -560,27 +619,42 @@ def _is_permanent_failure(result: str) -> bool:
 # Worker loop
 # ---------------------------------------------------------------------------
 
+def _split_worker_limits(effective_limit: int, workers: int) -> list[int]:
+    """Divide a finite job limit across workers (B1).
+
+    With ``--limit 2 --workers 4`` two workers get 1 job and two get 0;
+    callers must run zero-slice workers with ``continuous=False`` so they
+    exit cleanly instead of polling the queue forever.
+    """
+    base = effective_limit // workers
+    extra = effective_limit % workers
+    return [base + (1 if i < extra else 0) for i in range(workers)]
+
+
 def worker_loop(worker_id: int = 0, limit: int = 1,
                 target_url: str | None = None,
                 min_score: int = 7, headless: bool = False,
-                model: str = "sonnet", dry_run: bool = False) -> tuple[int, int]:
+                model: str = "sonnet", dry_run: bool = False,
+                continuous: bool = False) -> tuple[int, int]:
     """Run jobs sequentially until limit is reached or queue is empty.
 
     Args:
         worker_id: Numeric worker identifier.
-        limit: Max jobs to process (0 = continuous).
+        limit: Max jobs to process (ignored when continuous=True).
         target_url: Apply to a specific URL.
         min_score: Minimum fit_score threshold.
         headless: Run Chrome headless.
         model: Claude model name.
         dry_run: Don't click Submit.
+        continuous: Poll the queue forever (B1: no longer inferred from
+            ``limit == 0`` — a zero slice in non-continuous mode exits
+            cleanly instead of running forever).
 
     Returns:
         Tuple of (applied_count, failed_count).
     """
     applied = 0
     failed = 0
-    continuous = limit == 0
     jobs_done = 0
     empty_polls = 0
     port = BASE_CDP_PORT + worker_id
@@ -672,7 +746,8 @@ def main(limit: int = 1, target_url: str | None = None,
     """Launch the apply pipeline.
 
     Args:
-        limit: Max jobs to apply to (0 or with continuous=True means run forever).
+        limit: Max jobs to apply to; with continuous=True the limit is
+            ignored and the queue is polled forever.
         target_url: Apply to a specific URL.
         min_score: Minimum fit_score threshold.
         headless: Run Chrome in headless mode.
@@ -752,16 +827,13 @@ def main(limit: int = 1, target_url: str | None = None,
                     headless=headless,
                     model=model,
                     dry_run=dry_run,
+                    continuous=continuous,
                 )
             else:
-                # Multi-worker — distribute limit across workers
-                if effective_limit:
-                    base = effective_limit // workers
-                    extra = effective_limit % workers
-                    limits = [base + (1 if i < extra else 0)
-                              for i in range(workers)]
-                else:
-                    limits = [0] * workers  # continuous mode
+                # Multi-worker — distribute limit across workers (B1: a
+                # zero slice runs non-continuous and exits immediately)
+                limits = (_split_worker_limits(effective_limit, workers)
+                          if effective_limit else [0] * workers)
 
                 with ThreadPoolExecutor(max_workers=workers,
                                         thread_name_prefix="apply-worker") as executor:
@@ -775,6 +847,7 @@ def main(limit: int = 1, target_url: str | None = None,
                             headless=headless,
                             model=model,
                             dry_run=dry_run,
+                            continuous=continuous,
                         ): i
                         for i in range(workers)
                     }

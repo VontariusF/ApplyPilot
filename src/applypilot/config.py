@@ -197,6 +197,9 @@ DEFAULTS = {
     "max_tailor_attempts": 5,
     "poll_interval": 60,
     "apply_timeout": 300,
+    # B4: an in_progress lock older than this is treated as stale (crashed
+    # worker) and may be reclaimed / cleared by reset_failed.
+    "apply_stale_lock_minutes": 60,
     "viewport": "1280x900",
 }
 
