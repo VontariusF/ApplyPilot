@@ -2,7 +2,7 @@
    Pushed verbatim by the SSE stream into #onboarding-surface, so it
    carries no sse-connect attributes (the wrapper owns the connection). #}
 
-{# The transcript: the conversation log. Wizard answers carry kind="choice"
+{# The transcript: the conversation log. Choice answers carry kind="choice"
    — they render as the clicked button / filled widget, not as a chat bubble
    — while typed messages and agent turns always show. #}
 {% macro transcript(state) %}
@@ -114,13 +114,9 @@
           <input type="hidden" name="next" value="/onboarding">
           <button>Sign in with Claude</button>
         </form>
-        <a class="button-link secondary" href="/settings">Or configure a provider in Settings</a>
+        <a class="button-link secondary" href="/settings">Use my AI provider instead</a>
       </div>
       {{ signin_link(card_link) }}
-      <details class="terminal-fallback">
-        <summary>Prefer your terminal? Run this instead</summary>
-        <pre>claude auth login</pre>
-      </details>
     </section>
   {% endif %}
 
@@ -262,8 +258,8 @@
   {# ---- Done ---- #}
   <section class="panel">
     <h2>Profile saved ✓</h2>
-    <p><code>profile.json</code>, <code>profile.md</code> and <code>searches.yaml</code> are written.
-       From here the jobs board is the front page; run discovery whenever you like.</p>
+    <p>Your profile and search setup are saved. From here the jobs board is the
+       front page; run discovery whenever you like.</p>
     <div class="gate-actions">
       <form method="post" action="/onboarding/find-jobs" class="inline-form">
         <button>Find jobs now</button>

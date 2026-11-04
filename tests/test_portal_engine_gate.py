@@ -51,7 +51,8 @@ def test_gate_page_not_installed(portal_client, monkeypatch):
     r = client.get("/engine")
     assert r.status_code == 200
     assert "not installed" in r.text
-    assert "claude.ai/code" in r.text  # install hint
+    assert "Use my AI provider instead" in r.text  # provider switch offered
+    assert 'href="/settings"' in r.text
     assert "/engine/login" not in r.text  # nothing to sign in to
 
 
@@ -61,7 +62,8 @@ def test_droid_card_key_missing_points_at_settings(portal_client, monkeypatch):
     r = client.get("/engine")
     assert r.status_code == 200
     assert "key missing" in r.text
-    assert "FACTORY_API_KEY" in r.text
+    assert "Factory API key" in r.text  # plain name — no env-var jargon
+    assert "FACTORY_API_KEY" not in r.text
     assert 'href="/settings"' in r.text
 
 
@@ -69,7 +71,8 @@ def test_droid_card_not_installed(portal_client, monkeypatch):
     client, _ = portal_client
     patch_gates(monkeypatch, droid=DROID_NOT_INSTALLED)
     r = client.get("/engine")
-    assert "docs.factory.ai" in r.text
+    assert "Use my AI provider instead" in r.text
+    assert "docs.factory.ai" not in r.text  # no install instructions
 
 
 # ---------------------------------------------------------------------------
@@ -87,16 +90,17 @@ def test_status_poll_returns_partial_with_polling(portal_client, monkeypatch):
     assert "login=1" in r.text or "login=0" in r.text
 
 
-def test_poll_timeout_falls_back_to_terminal_instructions(portal_client, monkeypatch):
+def test_poll_timeout_shows_recheck_without_terminal(portal_client, monkeypatch):
     client, _ = portal_client
     patch_gates(monkeypatch)
     stale = time.time() - 10_000  # window opened long ago
     r = client.get("/engine/status", params={"t0": stale})
     assert r.status_code == 200
     assert "every 2s" not in r.text  # polling stopped
-    assert "claude auth login" in r.text  # terminal command shown
     assert "Check again" in r.text  # one-shot recheck offered
-    assert "<details" in r.text and "open" in r.text  # instructions expanded
+    assert "Check your browser window" in r.text  # browser-first guidance
+    assert "claude auth login" not in r.text  # no shell command, ever
+    assert "<details" not in r.text  # the terminal-fallback block is gone
 
 
 def test_poll_timeout_did_not_fire_within_window(portal_client, monkeypatch):
@@ -276,8 +280,8 @@ def test_droid_card_signed_out_shows_key_form(portal_client, monkeypatch):
     assert 'action="/engine/droid-key"' in r.text
     assert 'type="password"' in r.text  # never renders the value in the clear
     assert "docs.factory.com" in r.text  # where to generate the key
-    assert "export FACTORY_API_KEY" in r.text  # terminal fallback
-    assert 'href="/settings"' in r.text  # Settings path still offered
+    assert "export FACTORY_API_KEY" not in r.text  # no shell command, ever
+    assert "Use my AI provider instead" in r.text  # provider switch offered
 
 
 def test_droid_card_signed_in_has_no_key_form(portal_client, monkeypatch):

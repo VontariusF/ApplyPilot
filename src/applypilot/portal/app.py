@@ -150,7 +150,10 @@ def create_app() -> FastAPI:
         if not auth.token_matches(provided, app.state.token):
             # POST /login carries its token in the form body — pass it
             # through; the route validates it (401 on wrong/missing).
-            if request.method == "POST" and request.url.path == "/login":
+            # POST /login/reveal is the login page's own Reveal-token
+            # action: no token yet, guarded by the localhost-only host
+            # check above, same as the login form.
+            if request.method == "POST" and request.url.path in ("/login", "/login/reveal"):
                 return await call_next(request)
             return _unauthorized(request)
         return await call_next(request)
@@ -169,6 +172,19 @@ def create_app() -> FastAPI:
         response = RedirectResponse("/", status_code=303)
         auth.set_token_cookie(response, app.state.token)
         return response
+
+    @app.post("/login/reveal")
+    async def login_reveal(request: Request):
+        """Show the portal token on the login page itself.
+
+        The login page must not point the user at a file path, and the
+        portal is the one interface — so the token renders here on demand.
+        Safe because the middleware's localhost-only host check runs
+        before this route, and POST keeps the value out of URLs, browser
+        history, and access logs (the same reasoning the F9 sweep applied
+        to the login form itself).
+        """
+        return _render(request, "login.html", revealed_token=app.state.token)
 
     # ------------------------------------------------------------------
     # Static (whitelisted, auth-covered by the middleware — no mounts)

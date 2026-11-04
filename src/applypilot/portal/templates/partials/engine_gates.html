@@ -12,8 +12,9 @@
     {% elif claude.state == "signed_out" %}
       <p>Claude Code is installed, but not signed in{% if claude.error %} — <span class="dim">{{ claude.error }}</span>{% endif %}.</p>
       {% if timed_out %}
-        <p class="alert error">Automatic sign-in didn't complete within {{ login_timeout_min }} minutes.
-           Finish it from your own terminal, or check again.</p>
+        <p class="alert error">Still not signed in after {{ login_timeout_min }} minutes.
+           Check your browser window for the sign-in tab — it may still be open —
+           then check again here.</p>
       {% endif %}
       {% if login_url %}
         {# Headless path: the spawned CLI printed its OAuth URL — offer it here. #}
@@ -32,15 +33,14 @@
         {% if timed_out %}
           <button class="secondary" hx-get="/engine/status?t0={{ now_ts }}" hx-target="#engine-gates" hx-swap="outerHTML">Check again</button>
         {% endif %}
+        <a class="button-link secondary" href="/settings">Use my AI provider instead</a>
       </div>
-      <details class="terminal-fallback" {% if timed_out %}open{% endif %}>
-        <summary>Prefer your terminal? Run this instead</summary>
-        <pre>claude auth login</pre>
-        <p class="dim">A browser window opens for the normal Claude sign-in; this page picks it up automatically while it polls.</p>
-      </details>
     {% else %}
-      <p>Claude Code is not installed. Install it from <a href="https://claude.ai/code">claude.ai/code</a> —
-         it's the default auto-apply engine.</p>
+      <p>Claude Code isn't available on this machine yet — it's the default auto-apply engine.
+         You can still run everything through your own AI provider.</p>
+      <div class="gate-actions">
+        <a class="button-link" href="/settings">Use my AI provider instead</a>
+      </div>
     {% endif %}
   </section>
 
@@ -51,29 +51,26 @@
       </span>
     </h2>
     {% if droid.state == "signed_in" %}
-      <p>Ready — FACTORY_API_KEY is set. The Droid engine can auto-apply.</p>
+      <p>Ready — your Factory API key is saved. The Droid engine can auto-apply.</p>
     {% elif droid.state == "signed_out" %}
       <p>Droid is installed, but its API key is missing. Droid has no browser sign-in —
-         paste your <code>FACTORY_API_KEY</code> here (get one from the
+         paste your Factory API key below (generate one from the
          <a href="https://docs.factory.com/droid-exec/overview" rel="noopener noreferrer">Factory settings page</a>)
-         and this gate flips to ready without a restart.</p>
+         and this card flips to ready without a restart.</p>
       <div class="gate-actions">
         <form method="post" action="/engine/droid-key" class="inline-form">
           <input type="password" name="factory_key" placeholder="fk-…" autocomplete="off"
                  aria-label="Factory API key" required>
           <button>Save key</button>
         </form>
-        <a class="button secondary" href="/settings">Open Settings</a>
+        <a class="button-link secondary" href="/settings">Use my AI provider instead</a>
       </div>
-      <details class="terminal-fallback">
-        <summary>Prefer your terminal? Set it there instead</summary>
-        <pre>export FACTORY_API_KEY=fk-…</pre>
-        <p class="dim">Run this in the shell that started the portal, then restart it —
-           or paste the key above to skip the restart entirely.</p>
-      </details>
     {% else %}
-      <p>Not installed. You only need this engine if you prefer it over Claude Code —
-         install it from <a href="https://docs.factory.ai/cli">docs.factory.ai/cli</a>.</p>
+      <p>Droid isn't available on this machine — and that's fine: you only need it if you
+         prefer it over Claude Code. Your own AI provider runs everything in the meantime.</p>
+      <div class="gate-actions">
+        <a class="button-link" href="/settings">Use my AI provider instead</a>
+      </div>
     {% endif %}
   </section>
 </div>
