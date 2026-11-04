@@ -4,13 +4,23 @@
 <div class="login-shell">
   <section class="login-card">
     <h1>Sign in</h1>
-    <p>Enter the portal token to continue. It was printed when the portal
-       started (<code>~/.applypilot/portal_token</code>).</p>
+    <p>Enter the portal token to continue. It was shown when the portal started —
+       use <strong>Reveal token</strong> to show it here again.</p>
+    {% if revealed_token %}
+      <div class="reveal-token">
+        <label for="revealed-token">Your portal token</label>
+        <input id="revealed-token" readonly value="{{ revealed_token }}" onfocus="this.select()">
+        <p class="hint">Copy it into the field above. It unlocks this portal on this machine only.</p>
+      </div>
+    {% endif %}
     <form method="post" action="/login">
       <input type="password" name="token" placeholder="portal token" autofocus autocomplete="off" required>
       <button type="submit">Open portal</button>
     </form>
-    <p class="hint">401 — every route requires the token.</p>
+    <form method="post" action="/login/reveal">
+      <button type="submit" class="secondary">Reveal token</button>
+    </form>
+    <p class="hint">This portal runs only on this machine.</p>
   </section>
 </div>
 {% endblock %}

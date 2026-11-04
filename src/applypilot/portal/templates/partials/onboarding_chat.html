@@ -1,10 +1,13 @@
-{# The onboarding chat surface: every state — gate, choice, interview, review,
-   done. Pushed verbatim by the SSE stream into #onboarding-surface, so it
+{# The onboarding chat surface: every state — gate, choice, interview, review.
+   Pushed verbatim by the SSE stream into #onboarding-surface, so it
    carries no sse-connect attributes (the wrapper owns the connection). #}
 
+{# The transcript: the conversation log. Choice answers carry kind="choice"
+   — they render as the clicked button / filled widget, not as a chat bubble
+   — while typed messages and agent turns always show. #}
 {% macro transcript(state) %}
 <div class="chat-log">
-  {% for m in state.messages %}{% if m.role != "system" %}
+  {% for m in state.messages %}{% if m.role != "system" and not (m.role == "user" and m.kind == "choice") %}
     {% if m.role == "note" %}
       <div class="chat-note">{{ m.content }}</div>
     {% else %}
@@ -16,6 +19,34 @@
 </div>
 {% endmacro %}
 
+{# The typed widget for a question's "something else" answer, shaped by
+   free_text_kind (None | "date" | "number" | "password" | "multiline"). #}
+{% macro free_text_widget(question) %}
+  {% if question.free_text_kind == "multiline" %}
+    <textarea name="free_text" rows="3" placeholder="One per line"></textarea>
+  {% elif question.free_text_kind == "number" %}
+    <input type="number" name="free_text" placeholder="A number">
+  {% elif question.free_text_kind == "date" %}
+    <input type="date" name="free_text">
+  {% elif question.free_text_kind == "password" %}
+    <input type="password" name="free_text" autocomplete="off" placeholder="Type your answer">
+  {% else %}
+    <input type="text" name="free_text" placeholder="Type your answer">
+  {% endif %}
+{% endmacro %}
+
+{# The typed-answer form. Questions WITH choices keep the box collapsed
+   behind "Something else…" (buttons first, typing second); free-text-only
+   questions render it directly — typing is the answer. #}
+{% macro free_text_form(question) %}
+<form class="chat-composer" hx-post="/onboarding/answer" hx-target="#onboarding-surface"
+      hx-swap="outerHTML" hx-indicator="#chat-busy">
+  <input type="hidden" name="question_id" value="{{ question.id }}">
+  {{ free_text_widget(question) }}
+  <button>Save answer</button>
+</form>
+{% endmacro %}
+
 {# Headless sign-in path: the spawned CLI printed its OAuth URL, so it is
    offered as a plain link (the portal has no browser of its own). #}
 {% macro signin_link(url) %}
@@ -23,6 +54,13 @@
    <a href="{{ url }}" rel="noopener noreferrer">{{ url }}</a> — this page updates when you're done.</p>
 {% endif %}
 {% endmacro %}
+
+{# Versioned shell: every push of this partial carries the state sequence it
+   was rendered from. The wrapper's SSE guard (onboarding_surface.html) drops
+   pushes older than what the DOM already shows — a push rendered mid-POST
+   can otherwise arrive after the POST's own fresher swap and replace new
+   content with stale, freezing the flow mid-question. #}
+<div class="chat-shell" data-chat-seq="{{ chat_seq }}">
 
 {% if error %}<p class="alert error">{{ error }}</p>{% endif %}
 {% if login_error %}<p class="alert error">{{ login_error }}</p>{% endif %}
@@ -83,53 +121,45 @@
           <input type="hidden" name="next" value="/onboarding">
           <button>Sign in with Claude</button>
         </form>
-        <a class="button-link secondary" href="/settings">Or configure a provider in Settings</a>
+        <a class="button-link secondary" href="/settings">Use my AI provider instead</a>
       </div>
       {{ signin_link(card_link) }}
-      <details class="terminal-fallback">
-        <summary>Prefer your terminal? Run this instead</summary>
-        <pre>claude auth login</pre>
-      </details>
     </section>
   {% endif %}
 
 {% elif state.phase == "interview" %}
-  {# ---- Interview: transcript + the active question (or agent-led chat) ---- #}
+  {# ---- Interview: the active question (or agent-led chat) + transcript ---- #}
   <section class="panel chat-panel">
     {{ transcript(state) }}
     {% if question %}
       {# Guided mode: the portal owns the order — one question at a time.
-         A pick posts its value; free text (when allowed) posts what the
-         user typed; both land in the transcript as the user's turn. #}
-      <div class="wizard-question">
+         A pick posts its value; "Something else…" reveals the typed widget
+         when the question allows free text; both land in the transcript as
+         the user's turn. #}
+      <div class="question-card" data-question-id="{{ question.id }}">
+        <p class="hint question-progress">{{ state.answers | length }} answered — skipping is fine, review lists anything empty.</p>
         <h3>{{ question.prompt }}</h3>
         {% if question.choices %}
-          <div class="gate-actions choice-actions">
+          <div class="choice-grid">
             {% for c in question.choices %}
               <form class="inline-form" hx-post="/onboarding/answer" hx-target="#onboarding-surface"
                     hx-swap="outerHTML" hx-indicator="#chat-busy">
                 <input type="hidden" name="question_id" value="{{ question.id }}">
                 <input type="hidden" name="value" value="{{ c.value }}">
-                <button class="secondary">{{ c.label }}</button>
+                <button>{{ c.label }}</button>
               </form>
             {% endfor %}
           </div>
         {% endif %}
         {% if question.allow_free_text %}
-          <form class="chat-composer" hx-post="/onboarding/answer" hx-target="#onboarding-surface"
-                hx-swap="outerHTML" hx-indicator="#chat-busy">
-            <input type="hidden" name="question_id" value="{{ question.id }}">
-            {% if question.free_text_kind == "multiline" %}
-              <textarea name="free_text" rows="3" placeholder="One per line"></textarea>
-            {% elif question.free_text_kind == "number" %}
-              <input type="number" name="free_text" placeholder="A number">
-            {% elif question.free_text_kind == "date" %}
-              <input type="date" name="free_text">
-            {% else %}
-              <input type="text" name="free_text" placeholder="Type your answer">
-            {% endif %}
-            <button>Send</button>
-          </form>
+          {% if question.choices %}
+            <details class="free-text-box">
+              <summary>Something else…</summary>
+              {{ free_text_form(question) }}
+            </details>
+          {% else %}
+            {{ free_text_form(question) }}
+          {% endif %}
         {% endif %}
         <div class="gate-actions">
           <form class="inline-form" hx-post="/onboarding/answer" hx-target="#onboarding-surface" hx-swap="outerHTML">
@@ -184,14 +214,43 @@
     {{ transcript(state) }}
   </section>
   <section class="panel">
-    <h2>Here's the profile I'll save — profile.md</h2>
-    {% if missing %}
-      <p class="dim">Not provided yet (you can add these later in Settings, they don't block):
-         {{ missing | join(", ") }}</p>
+    <h2>Review your profile</h2>
+    <p class="dim">Change anything below, then confirm. Empty fields stay empty —
+       nothing is filled in for you.</p>
+    {% set needs = review_fields | selectattr("needs_answer") | list %}
+    {% if needs %}
+      <div class="needs-answer-chips">
+        {% for row in needs %}
+          <a class="chip needs-answer" href="#review-{{ row.spec.id }}">{{ row.spec.prompt }}</a>
+        {% endfor %}
+      </div>
     {% endif %}
-    <pre class="profile-preview">{{ profile_md }}</pre>
-    <p class="dim">Confirming writes <code>profile.json</code>, <code>profile.md</code> and
-       <code>searches.yaml</code>, then unlocks the jobs board.</p>
+    <form hx-post="/onboarding/review" hx-target="#onboarding-surface" hx-swap="outerHTML"
+          hx-indicator="#chat-busy" class="review-form">
+      {% for row in review_fields %}
+        {% set spec = row.spec %}
+        <div class="review-field{{ ' needs-answer' if row.needs_answer }}">
+          <label for="answer-{{ spec.id }}">{{ spec.prompt }}</label>
+          {% if spec.choices %}
+            <select id="answer-{{ spec.id }}" name="answer_{{ spec.id }}">
+              <option value="" {{ 'selected' if not row.value }}>— not answered —</option>
+              {% for c in spec.choices %}
+                <option value="{{ c.value }}" {{ 'selected' if c.value == row.value }}>{{ c.label }}</option>
+              {% endfor %}
+            </select>
+          {% elif spec.free_text_kind == "multiline" %}
+            <textarea id="answer-{{ spec.id }}" name="answer_{{ spec.id }}" rows="2">{{ row.value }}</textarea>
+          {% elif spec.free_text_kind == "number" %}
+            <input id="answer-{{ spec.id }}" type="number" name="answer_{{ spec.id }}" value="{{ row.value }}">
+          {% elif spec.free_text_kind == "date" %}
+            <input id="answer-{{ spec.id }}" type="date" name="answer_{{ spec.id }}" value="{{ row.value }}">
+          {% else %}
+            <input id="answer-{{ spec.id }}" type="text" name="answer_{{ spec.id }}" value="{{ row.value }}">
+          {% endif %}
+        </div>
+      {% endfor %}
+      <button>Save changes</button>
+    </form>
     <div class="gate-actions">
       <form hx-post="/onboarding/confirm" hx-target="#onboarding-surface" hx-swap="outerHTML" class="inline-form">
         <button>Confirm</button>
@@ -206,8 +265,8 @@
   {# ---- Done ---- #}
   <section class="panel">
     <h2>Profile saved ✓</h2>
-    <p><code>profile.json</code>, <code>profile.md</code> and <code>searches.yaml</code> are written.
-       From here the jobs board is the front page; run discovery whenever you like.</p>
+    <p>Your profile and search setup are saved. From here the jobs board is the
+       front page; run discovery whenever you like.</p>
     <div class="gate-actions">
       <form method="post" action="/onboarding/find-jobs" class="inline-form">
         <button>Find jobs now</button>
@@ -221,3 +280,4 @@
        and results land on the jobs board.</p>
   </section>
 {% endif %}
+</div>

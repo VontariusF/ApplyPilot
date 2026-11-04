@@ -112,6 +112,11 @@ class InterviewState:
     # "" — answered-but-empty stays flagged on review (PR #22 guard).
     answers: dict[str, str] = field(default_factory=dict)
     mode: str = MODE_CHOICES  # guided buttons vs "let the agent ask"
+    # Monotonic render version: bumped by every save, stamped into every
+    # rendered surface, and used by the portal's SSE guard to drop pushes
+    # that are older than what the DOM already shows (a push rendered
+    # mid-POST can otherwise arrive after the POST's own fresher swap).
+    seq: int = 0
     updated_at: str = ""
 
 
@@ -131,6 +136,7 @@ def load_state() -> InterviewState | None:
 
 def save_state(state: InterviewState) -> None:
     """Persist state at 0600 (it carries resume text and preferences)."""
+    state.seq += 1
     state.updated_at = datetime.now(timezone.utc).isoformat()
     config.write_secret_text(
         config.ONBOARDING_STATE_PATH,
@@ -831,6 +837,82 @@ def missing_review_fields(profile: dict) -> list[str]:
     return missing
 
 
+# Fields whose emptiness the review screen flags as "needs answer" — the
+# same set missing_review_fields names, keyed to the QuestionSpec that asks
+# for them (spec id -> the profile path it feeds).
+_REVIEW_FLAGGED_PATHS = frozenset({
+    "work_authorization.legally_authorized_to_work",
+    "work_authorization.require_sponsorship",
+    "availability.earliest_start_date",
+    "personal.full_name",
+    "personal.email",
+    "personal.phone",
+    "experience.education_level",
+})
+
+
+def review_fields(state: InterviewState) -> list[dict]:
+    """Rows for the review form: every question with its saved answer and
+    whether the field it feeds is still empty in the draft (the 'needs
+    answer' chips — same fields missing_review_fields flags)."""
+    draft = state.profile_draft or {}
+
+    def draft_value(path: str) -> str:
+        if path.startswith("search."):
+            value = draft.get("_applypilot_search", {}).get(path.split(".", 1)[1], "")
+            return ", ".join(value) if isinstance(value, list) else value
+        section, field = path.split(".", 1)
+        section_data = draft.get(section)
+        return section_data.get(field, "") if isinstance(section_data, dict) else ""
+
+    rows = []
+    for spec in QUESTION_SPECS:
+        if spec.maps_to is None:
+            continue
+        rows.append({
+            "spec": spec,
+            "value": state.answers.get(spec.id, ""),
+            "needs_answer": spec.maps_to in _REVIEW_FLAGGED_PATHS and not draft_value(spec.maps_to),
+        })
+    return rows
+
+
+def update_answers(updates: dict[str, str]) -> InterviewState:
+    """Save review-form edits back into the answers map (phase stays REVIEW).
+
+    The review form shows the same widget set the wizard rendered, so the
+    validation mirrors record_answer: choice questions accept only their
+    listed values (an empty selection clears the answer and stays
+    flagged), typed text only where allow_free_text. Unknown field names
+    are ignored — never stored. No agent turn runs: editing at review is
+    a quiet portal-side correction. The draft re-normalizes from the
+    merged answers, and answers win over anything the agent extracted,
+    so a cleared gating answer serializes to "" and stays flagged — the
+    fabrication guard still holds.
+    """
+    with _STATE_LOCK:
+        state = load_state()
+        if state is None or state.phase != REVIEW:
+            raise OnboardingError("there is no profile to review")
+        for key, value in updates.items():
+            spec = QUESTIONS.get(key)
+            if spec is None:  # not a wizard question — ignore, never store
+                continue
+            value = (value or "").strip()
+            if spec.choices:
+                if value and not any(c.value == value for c in spec.choices):
+                    raise OnboardingError("that question takes one of the listed choices")
+                state.answers[spec.id] = value
+            elif spec.allow_free_text:
+                state.answers[spec.id] = value
+            # neither choices nor free text: not editable — ignore
+        state.error = None
+        profile, meta = normalize_profile(state.profile_draft or {}, state.answers)
+        state.profile_draft = {**profile, "_applypilot_search": meta}
+        save_state(state)
+        return state
+
+
 def render_profile_md(profile: dict, search_meta: dict) -> str:
     """The human-readable review artifact the chat shows before confirm."""
     personal = profile["personal"]
@@ -1130,7 +1212,10 @@ def record_answer(question_id: str, value: str = "", free_text: str = "",
                     raise OnboardingError("pick one of the listed choices")
                 state.answers[spec.id] = choice.value
                 label = choice.label
-            state.messages.append({"role": _ROLE_USER, "content": label})
+            # kind="choice" marks wizard answers: the UI renders them as the
+            # clicked button / filled widget, not as a chat bubble — typed
+            # messages (no kind) always stay in the transcript.
+            state.messages.append({"role": _ROLE_USER, "content": label, "kind": "choice"})
 
         if current_question(state) is None:
             # Agenda complete: the wizard's answers (plus anything the agent

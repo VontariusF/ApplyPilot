@@ -150,7 +150,10 @@ def create_app() -> FastAPI:
         if not auth.token_matches(provided, app.state.token):
             # POST /login carries its token in the form body — pass it
             # through; the route validates it (401 on wrong/missing).
-            if request.method == "POST" and request.url.path == "/login":
+            # POST /login/reveal is the login page's own Reveal-token
+            # action: no token yet, guarded by the localhost-only host
+            # check above, same as the login form.
+            if request.method == "POST" and request.url.path in ("/login", "/login/reveal"):
                 return await call_next(request)
             return _unauthorized(request)
         return await call_next(request)
@@ -169,6 +172,19 @@ def create_app() -> FastAPI:
         response = RedirectResponse("/", status_code=303)
         auth.set_token_cookie(response, app.state.token)
         return response
+
+    @app.post("/login/reveal")
+    async def login_reveal(request: Request):
+        """Show the portal token on the login page itself.
+
+        The login page must not point the user at a file path, and the
+        portal is the one interface — so the token renders here on demand.
+        Safe because the middleware's localhost-only host check runs
+        before this route, and POST keeps the value out of URLs, browser
+        history, and access logs (the same reasoning the F9 sweep applied
+        to the login form itself).
+        """
+        return _render(request, "login.html", revealed_token=app.state.token)
 
     # ------------------------------------------------------------------
     # Static (whitelisted, auth-covered by the middleware — no mounts)
@@ -824,6 +840,20 @@ def create_app() -> FastAPI:
         return _render(request, "partials/onboarding_surface.html",
                        **_onboarding_context(error=error))
 
+    @app.post("/onboarding/review")
+    async def onboarding_review(request: Request):
+        """Save review-form edits: quiet corrections, no agent turn."""
+        form = await request.form()
+        updates = {key.removeprefix("answer_"): str(value)
+                   for key, value in form.items() if key.startswith("answer_")}
+        error = ""
+        try:
+            await asyncio.to_thread(onboarding.update_answers, updates)
+        except onboarding.OnboardingError as exc:
+            error = str(exc)
+        return _render(request, "partials/onboarding_surface.html",
+                       **_onboarding_context(error=error))
+
     @app.post("/onboarding/confirm")
     async def onboarding_confirm(request: Request):
         error = ""
@@ -1290,20 +1320,18 @@ def _onboarding_context(error: str = "", login_error: str = "", login: int = 0,
     state = onboarding.load_state()
     ready = onboarding.readiness()
     in_review = state is not None and state.phase == onboarding.REVIEW
-    profile_md = ""
-    if in_review and state.profile_draft:
-        profile_md = onboarding.render_profile_md(
-            state.profile_draft, state.profile_draft.get("_applypilot_search", {}))
     login_process = engine_auth.active_login()
     in_interview = state is not None and state.phase == onboarding.INTERVIEW
     agent_led = in_interview and state.mode == onboarding.MODE_AGENT
     question = onboarding.current_question(state) if in_interview and not agent_led else None
     return {
         "state": state,
+        # Render version for the SSE staleness guard (see onboarding_surface).
+        "chat_seq": state.seq if state else 0,
         "ready": ready,
         "provider_ready": onboarding.provider_ready(),
         "missing": onboarding.missing_review_fields(state.profile_draft) if in_review else [],
-        "profile_md": profile_md,
+        "review_fields": onboarding.review_fields(state) if in_review else [],
         "question": question,
         "agent_led": agent_led,
         "error": error,
@@ -1467,7 +1495,7 @@ def _chat_signature() -> tuple:
             mtime = os.path.getmtime(config.ONBOARDING_STATE_PATH)
         except OSError:
             mtime = None
-        file_sig = (mtime, state.phase, len(state.messages))
+        file_sig = (mtime, state.seq, state.phase, len(state.messages))
     return (file_sig, onboarding.provider_ready(),
             engine_auth.claude_status().state)
 

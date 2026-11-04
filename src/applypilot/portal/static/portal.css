@@ -567,19 +567,18 @@ pre.logview {
 /* Agent sign-in gate */
 .gate-actions { display: flex; gap: var(--space-2); align-items: center; margin: var(--space-3) 0; flex-wrap: wrap; }
 .gate h2 .badge { vertical-align: 2px; }
-.gate details.terminal-fallback { margin-top: var(--space-3); }
-.gate details.terminal-fallback summary { cursor: pointer; color: var(--ink-2); font-size: var(--text-sm); }
-.gate details.terminal-fallback pre {
-  display: inline-block;
-  background: var(--code-bg);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: var(--space-2) var(--space-3);
-  margin: var(--space-2) 0 4px;
-}
 
 /* Login (on the shared base) */
 .login-shell { max-width: 400px; margin: var(--space-8) auto; }
+.reveal-token { margin-bottom: var(--space-3); }
+.reveal-token label { display: block; font-size: var(--text-sm); color: var(--ink-2); margin-bottom: var(--space-1); }
+.reveal-token input {
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--text-sm);
+  user-select: all;
+}
+.reveal-token .hint { margin: var(--space-1) 0 0; }
 .login-card {
   background: var(--surface);
   border: 1px solid var(--line);
@@ -594,10 +593,31 @@ pre.logview {
 .login-card input { width: 100%; }
 .login-card button { width: 100%; }
 
-/* Onboarding guided-question card */
-.wizard-question { border-top: 1px solid var(--line); margin-top: var(--space-3); padding-top: var(--space-3); }
-.wizard-question h3 { margin: 0 0 var(--space-2); }
-.wizard-question details.agent-assist summary { cursor: pointer; color: var(--ink-2); font-size: var(--text-sm); }
+/* Onboarding guided-question card: choice buttons first, typing second */
+.question-card { border-top: 1px solid var(--line); margin-top: var(--space-3); padding-top: var(--space-3); }
+.question-card h3 { margin: 0 0 var(--space-2); }
+.question-progress { margin: 0 0 var(--space-2); }
+.choice-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: var(--space-2);
+  margin: var(--space-3) 0;
+}
+.choice-grid .inline-form { display: flex; }
+.choice-grid button {
+  width: 100%;
+  min-height: 42px;
+  padding: 10px var(--space-4);
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+}
+.choice-grid button:hover { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.free-text-box { margin: var(--space-2) 0; }
+.free-text-box summary { cursor: pointer; color: var(--accent); font-size: var(--text-sm); font-weight: 600; }
+.free-text-box[open] summary { margin-bottom: var(--space-2); }
+.question-card details.agent-assist summary { cursor: pointer; color: var(--ink-2); font-size: var(--text-sm); }
 
 /* Onboarding interview chat */
 .onboard-steps {
@@ -646,16 +666,28 @@ pre.logview {
 .htmx-request .htmx-indicator, .htmx-request.htmx-indicator { display: inline; }
 .resume-upload summary { cursor: pointer; color: var(--ink-2); font-size: var(--text-sm); }
 .resume-form { display: flex; flex-direction: column; gap: var(--space-2); margin-top: var(--space-2); }
-.profile-preview {
-  background: var(--code-bg);
-  border: 1px solid var(--line);
+.review-form { display: flex; flex-direction: column; gap: var(--space-3); margin: var(--space-3) 0; }
+.review-field { display: flex; flex-direction: column; gap: var(--space-1); max-width: 460px; }
+.review-field label { font-size: var(--text-sm); color: var(--ink-2); }
+.review-field select, .review-field input, .review-field textarea {
+  width: 100%;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
   border-radius: var(--radius);
-  padding: var(--space-3) var(--space-4);
-  white-space: pre-wrap;
-  font-size: var(--text-sm);
-  max-height: 420px;
-  overflow: auto;
+  padding: 8px var(--space-3);
 }
+.review-field.needs-answer > :first-child { color: var(--warn); }
+.needs-answer-chips { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-3); }
+.chip {
+  display: inline-block;
+  padding: 3px 12px;
+  border-radius: 999px;
+  font-size: var(--text-xs);
+  border: 1px solid transparent;
+}
+a.chip.needs-answer { background: var(--warn-bg); color: var(--warn); text-decoration: none; }
+a.chip.needs-answer:hover { filter: brightness(1.1); }
 .button-link.secondary { background: var(--surface); color: var(--ink); border-color: var(--line-strong); }
 .button-link.secondary:hover { background: var(--surface-2); }
 

@@ -71,8 +71,7 @@ FULL_WALK = {
 # What the answers map should hold afterwards: values for choices, the
 # typed text for free text, "" for the intentionally skipped URLs.
 STORED = {
-    qid: raw[5:] if isinstance(raw, str) and raw.startswith("free:") else (raw or "")
-    for qid, raw in FULL_WALK.items()
+    qid: raw[5:] if isinstance(raw, str) and raw.startswith("free:") else (raw or "") for qid, raw in FULL_WALK.items()
 }
 
 
@@ -143,13 +142,31 @@ def _expected_ack_prompts():
 # ---------------------------------------------------------------------------
 # The registry itself
 
+
 def test_registry_covers_the_spec_table():
     expected = [
-        "work_authorized", "sponsorship", "permit_type", "work_style", "currency",
-        "salary_band", "start_date", "education", "experience_years", "target_roles",
-        "location", "skills_languages", "skills_frameworks", "skills_tools",
-        "full_name", "email", "phone", "city", "linkedin_url", "github_url",
-        "website_url", "portfolio_url",
+        "work_authorized",
+        "sponsorship",
+        "permit_type",
+        "work_style",
+        "currency",
+        "salary_band",
+        "start_date",
+        "education",
+        "experience_years",
+        "target_roles",
+        "location",
+        "skills_languages",
+        "skills_frameworks",
+        "skills_tools",
+        "full_name",
+        "email",
+        "phone",
+        "city",
+        "linkedin_url",
+        "github_url",
+        "website_url",
+        "portfolio_url",
     ]
     assert [q.id for q in onboarding.QUESTION_SPECS] == expected
     for spec in onboarding.QUESTION_SPECS:
@@ -172,6 +189,7 @@ def test_registry_covers_the_spec_table():
 
 # ---------------------------------------------------------------------------
 # The HTTP agenda walk (provider backend)
+
 
 def test_walk_renders_records_and_advances_every_question(portal_client, fake_llm, monkeypatch):
     client, _ = portal_client
@@ -261,6 +279,7 @@ def test_free_text_kinds_route_correctly(portal_client, fake_llm, monkeypatch):
 # ---------------------------------------------------------------------------
 # The fabrication guard (PR #22): unanswered never becomes an answer
 
+
 def test_skip_records_empty_and_flags_them_for_review(portal_client, fake_llm, monkeypatch):
     client, _ = portal_client
     monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
@@ -299,9 +318,12 @@ def test_not_sure_sponsorship_stays_unanswered(portal_client, fake_llm, monkeypa
 
 
 def test_answers_win_over_agent_json(app_dir):
-    agent_json = {"_applypilot_profile": {"work_authorization": {
-        "legally_authorized_to_work": "Yes", "require_sponsorship": "No"}},
-        "_applypilot_search": {}}
+    agent_json = {
+        "_applypilot_profile": {
+            "work_authorization": {"legally_authorized_to_work": "Yes", "require_sponsorship": "No"}
+        },
+        "_applypilot_search": {},
+    }
     answers = {"work_authorized": "no", "sponsorship": "not_sure"}
     profile, _ = onboarding.normalize_profile(agent_json, answers)
     assert profile["work_authorization"]["legally_authorized_to_work"] == "No"
@@ -318,13 +340,15 @@ def test_no_answers_means_no_gating_values(app_dir):
 
 
 def test_agent_json_fills_what_the_wizard_does_not_own(app_dir):
-    agent_json = {"_applypilot_profile": {"personal": {"email": "agent@example.com"}},
-                  "_applypilot_search": {"location": "Denver, CO"}}
+    agent_json = {
+        "_applypilot_profile": {"personal": {"email": "agent@example.com"}},
+        "_applypilot_search": {"location": "Denver, CO"},
+    }
     answers = {"full_name": "Test Person", "email": "mine@example.com"}
     profile, meta = onboarding.normalize_profile(agent_json, answers)
-    assert profile["personal"]["full_name"] == "Test Person"   # wizard
+    assert profile["personal"]["full_name"] == "Test Person"  # wizard
     assert profile["personal"]["email"] == "mine@example.com"  # wizard wins
-    assert meta["location"] == "Denver, CO"                    # agent fills
+    assert meta["location"] == "Denver, CO"  # agent fills
 
 
 def test_agent_json_cannot_override_recorded_answers(app_dir, fake_claude, monkeypatch):
@@ -344,8 +368,8 @@ def test_agent_json_cannot_override_recorded_answers(app_dir, fake_claude, monke
 # ---------------------------------------------------------------------------
 # Service-level validation
 
-def test_record_answer_requires_an_active_interview_and_a_listed_choice(
-        app_dir, fake_llm, monkeypatch):
+
+def test_record_answer_requires_an_active_interview_and_a_listed_choice(app_dir, fake_llm, monkeypatch):
     monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
     with pytest.raises(onboarding.OnboardingError):
         onboarding.record_answer("work_authorized", value="yes")
@@ -372,6 +396,7 @@ def test_answers_and_mode_persist_in_onboarding_state(app_dir, fake_llm, monkeyp
 # ---------------------------------------------------------------------------
 # Agent-led mode ("let the agent ask")
 
+
 def test_agent_mode_hands_the_agenda_back_and_resumes(portal_client, fake_llm, monkeypatch):
     client, _ = portal_client
     monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
@@ -390,8 +415,7 @@ def test_agent_mode_hands_the_agenda_back_and_resumes(portal_client, fake_llm, m
     assert page.status_code == 200
     state = onboarding.load_state()
     assert state.answers == {"work_authorized": "yes"}
-    assert any(m["role"] == "user" and m["content"] == "I have a Master's degree"
-               for m in state.messages)
+    assert any(m["role"] == "user" and m["content"] == "I have a Master's degree" for m in state.messages)
 
     # Back to buttons: the agenda resumes at the NEXT unanswered question.
     page = client.post("/onboarding/agent-mode", data={"enabled": "0"})
@@ -425,6 +449,7 @@ def test_agent_mode_directive_reaches_backends_but_not_the_transcript(app_dir, f
 # ---------------------------------------------------------------------------
 # The CLI backend runs the same agenda
 
+
 def test_claude_backend_walk_sends_labels_as_prompts(app_dir, fake_claude, monkeypatch):
     patch_gates(monkeypatch)
     state = onboarding.start_interview("claude")
@@ -454,14 +479,17 @@ def test_claude_backend_walk_sends_labels_as_prompts(app_dir, fake_claude, monke
 # ---------------------------------------------------------------------------
 # PDF resume extraction
 
+
 def _pdf_with_text(text):
     """A minimal one-page PDF whose content stream prints `text`."""
     stream = f"BT /F1 12 Tf 72 720 Td ({text}) Tj ET".encode()
     objects = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R] >>",
-        (b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
-         b"/Resources << /Font << /F1 5 0 R >> >> >>"),
+        (
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+            b"/Resources << /Font << /F1 5 0 R >> >> >>"
+        ),
         b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream",
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
     ]
@@ -475,16 +503,14 @@ def _pdf_with_text(text):
     out += b"0000000000 65535 f\n"
     for offset in offsets:
         out += f"{offset:010d} 00000 n\n".encode()
-    out += (f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
-            f"startxref\n{xref_at}\n%%EOF\n").encode()
+    out += (f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF\n").encode()
     return bytes(out)
 
 
 def test_pdf_resume_is_extracted_into_pending_context(app_dir, fake_llm, monkeypatch):
     monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
     onboarding.save_state(onboarding.InterviewState(phase=onboarding.INTERVIEW, backend="llm"))
-    onboarding.add_resume(pdf_bytes=_pdf_with_text("Senior Data Engineer, eight years of Python."),
-                          filename="me.pdf")
+    onboarding.add_resume(pdf_bytes=_pdf_with_text("Senior Data Engineer, eight years of Python."), filename="me.pdf")
     state = onboarding.load_state()
     assert "Senior Data Engineer" in state.pending_context
     assert config.RESUME_PATH.read_text(encoding="utf-8").startswith("Senior Data Engineer")
@@ -509,7 +535,178 @@ def test_pdf_resume_route_extracts(portal_client, fake_llm, monkeypatch):
     _start(client)
     page = client.post(
         "/onboarding/resume",
-        files={"resume_file": ("me.pdf", _pdf_with_text("Ops Manager, five years."), "application/pdf")})
+        files={"resume_file": ("me.pdf", _pdf_with_text("Ops Manager, five years."), "application/pdf")},
+    )
     assert page.status_code == 200
     state = onboarding.load_state()
     assert "Ops Manager" in state.pending_context
+
+
+# ---------------------------------------------------------------------------
+# The wizard screens: choice buttons first, "Something else…" for typing
+
+
+def test_guided_screen_renders_choices_and_something_else(portal_client, fake_llm, monkeypatch):
+    client, _ = portal_client
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    page = _start(client)
+
+    # First question (work_authorized): buttons, no free text allowed.
+    assert "choice-grid" in page and 'data-question-id="work_authorized"' in page
+    assert "Something else…" not in page
+
+    # The permit question carries both buttons and the typed escape hatch.
+    _answer(client, "work_authorized", value="yes")
+    page = client.get("/onboarding/chat").text  # sponsorship is current
+    _answer(client, "sponsorship", value="no")
+    page = client.get("/onboarding/chat").text  # permit_type is current
+    assert 'data-question-id="permit_type"' in page
+    assert "Something else…" in page  # the collapsed typed-answer box
+    page = _answer(client, "permit_type", value="Citizen")
+    _answer(client, "work_style", value="remote")
+    page = _answer(client, "currency", value="USD")
+    assert "Something else…" in page  # currency also allows a typed code
+
+    # A free-text-only question renders the widget directly — typing is
+    # the answer, no "Something else…" gate in the way.
+    page = _answer(client, "salary_band", free="145000")
+    page = _answer(client, "start_date", value="Immediately")
+    page = _answer(client, "education", value="Bachelor's")
+    page = _answer(client, "experience_years", value="3–5")
+    page = _answer(client, "target_roles", free="Data Engineer\nAnalytics Engineer")
+    assert "Something else…" not in page  # no choices on target_roles
+    assert "<textarea" in page
+
+
+def test_state_version_stamps_every_render(portal_client, fake_llm, monkeypatch):
+    """SSE staleness guard: renders carry the state seq they were built from.
+
+    save_state bumps a monotonic seq; every rendered surface (wrapper and
+    pushed shell) stamps it, and the signature includes it so a push is
+    regenerated on any save. The client guard (onboarding_surface.html)
+    drops pushes older than what the DOM already shows.
+    """
+    client, _ = portal_client
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    _start(client)
+
+    first = onboarding.load_state()
+    assert first.seq >= 1  # starting the interview already persisted state
+    page = client.get("/onboarding/chat").text
+    assert f'data-chat-seq="{first.seq}"' in page
+
+    _answer(client, "work_authorized", value="yes")
+    second = onboarding.load_state()
+    assert second.seq > first.seq  # every save bumps
+    page = client.get("/onboarding/chat").text
+    assert f'data-chat-seq="{second.seq}"' in page
+
+
+def test_free_text_widget_matches_the_kind(portal_client, fake_llm, monkeypatch):
+    client, _ = portal_client
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    _start(client)
+    for _ in range(8):  # walk to salary_band: choices + a number widget
+        page = client.get("/onboarding/chat").text
+        qid = _qid(page)
+        if qid == "salary_band":
+            break
+        spec = onboarding.QUESTIONS[qid]
+        _answer(client, qid, value=spec.choices[0].value)
+    assert '<input type="number"' in page
+
+    # The date kind renders a date input (start_date question).
+    page = _answer(client, "salary_band", free="145000")
+    page = _answer(client, "start_date", value="Immediately")
+    page = _answer(client, "education", value="Bachelor's")
+    page = _answer(client, "experience_years", value="3–5")
+    page = _answer(client, "target_roles", free="Data Engineer")
+    assert "<textarea" in page  # multiline kind for the skills/roles questions
+
+
+def test_choice_answers_stay_out_of_the_transcript_typed_chat_shows(portal_client, fake_llm, monkeypatch):
+    client, _ = portal_client
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    _start(client)
+    page = _answer(client, "work_authorized", value="yes")
+    # The picked answer renders as the clicked button, not a chat bubble.
+    assert "chat-msg user" not in page
+    assert "choice-grid" in page
+
+    # A typed question in the Ask-the-agent box is a real chat turn —
+    # it stays in the log even in guided mode.
+    page = client.post("/onboarding/send", data={"text": "Why does this matter for the search?"}).text
+    assert "Why does this matter for the search?" in page
+    assert "chat-msg user" in page
+
+
+# ---------------------------------------------------------------------------
+# The review form: prefilled widgets, needs-answer chips, quiet edits
+
+
+def test_review_form_renders_prefilled_with_needs_answer_chips(portal_client, fake_llm, monkeypatch):
+    client, _ = portal_client
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    _start(client)
+    walk = {**FULL_WALK, "education": None, "linkedin_url": None}
+    _walk(client, walk)
+    page = client.get("/onboarding/chat").text
+
+    assert "Review your profile" in page
+    # Answered questions prefill their widgets; skipped ones stay empty.
+    assert '<option value="yes" selected>' in page
+    assert 'id="answer-salary_band"' in page and 'value="120000"' in page
+    assert 'id="answer-education"' in page and "selected>— not answered —" in page
+    assert 'id="answer-linkedin_url"' in page and 'value=""' in page
+
+    # Needs-answer chips link to the flagged fields (education feeds a
+    # flagged path; the optional LinkedIn does not).
+    assert 'href="#review-education"' in page
+    assert 'href="#review-linkedin_url"' not in page
+    # The answered required fields raise no chips.
+    assert 'href="#review-work_authorized"' not in page
+
+
+def test_review_update_route_validates_and_saves_quietly(portal_client, fake_llm, monkeypatch):
+    client, _ = portal_client
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    _start(client)
+    _walk(client, FULL_WALK)
+
+    # A value outside the choice list is rejected — nothing stored.
+    page = client.post("/onboarding/review", data={"answer_work_authorized": "hacked"}).text
+    assert "alert error" in page
+    assert onboarding.load_state().answers["work_authorized"] == "yes"
+
+    # A valid edit saves and stays in review (no agent turn ran).
+    page = client.post("/onboarding/review", data={"answer_education": "Master's"}).text
+    assert onboarding.load_state().phase == onboarding.REVIEW
+    assert onboarding.load_state().answers["education"] == "Master's"
+    assert '<option value="Master&#39;s" selected>' in page
+    assert 'href="#review-education"' not in page  # the chip cleared
+
+
+def test_review_cleared_answer_stays_empty_through_confirm(portal_client, fake_llm, monkeypatch):
+    client, _ = portal_client
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    _start(client)
+    # Skip the GATED question: the fabrication guard holds it at "" through
+    # confirm — the agent's extraction may never fill a yes/no the user
+    # declined (PR #22 guard, confirm behavior unchanged).
+    walk = {**FULL_WALK, "work_authorized": None}
+    _walk(client, walk)
+    assert onboarding.load_state().answers["work_authorized"] == ""
+
+    # The review form renders the gated widget empty — never prefilled —
+    # and flags it with a needs-answer chip.
+    page = client.get("/onboarding/chat").text
+    assert 'href="#review-work_authorized"' in page
+    select = re.search(r'<select id="answer-work_authorized"[^>]*>.*?</select>', page, re.S)
+    assert select
+    # Exactly one selected option, and it is the empty "not answered" one.
+    assert select.group(0).count(" selected") == 1
+    assert '<option value="" selected>— not answered —</option>' in select.group(0)
+
+    client.post("/onboarding/confirm")
+    profile = json.loads(config.PROFILE_PATH.read_text())
+    assert profile["work_authorization"]["legally_authorized_to_work"] == ""

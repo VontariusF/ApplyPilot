@@ -2,7 +2,39 @@
    the INNER partial (partials/onboarding_chat.html, no sse attributes) so a
    push never re-nests the connection. Post routes re-render this wrapper to
    re-anchor the connection after a state flip. #}
-<div id="onboarding-surface"
+<div id="onboarding-surface" data-chat-seq="{{ chat_seq }}"
      hx-ext="sse" sse-connect="/onboarding/stream" sse-swap="chat">
   {% include "partials/onboarding_chat.html" %}
 </div>
+<script>
+  (function () {
+    // Version-guarded swaps. Every render stamps the state sequence it was
+    // rendered from (data-chat-seq). A push rendered mid-POST — the answer
+    // is saved before the agent ack — can arrive after the POST's own
+    // fresher swap and would replace new content with stale, freezing the
+    // flow mid-question. Drop any push older than what the DOM shows.
+    window.__apChatSeq = Math.max(window.__apChatSeq || 0, {{ chat_seq }});
+    if (window.__apChatSeqGuard) return;
+    window.__apChatSeqGuard = true;
+    document.body.addEventListener("htmx:sseBeforeMessage", function (evt) {
+      var data = (evt.detail && evt.detail.data) || "";
+      var m = /data-chat-seq="(\d+)"/.exec(data);
+      if (!m) return;
+      var incoming = parseInt(m[1], 10);
+      if (incoming < window.__apChatSeq) evt.preventDefault();
+      else window.__apChatSeq = incoming;
+    });
+    document.body.addEventListener("htmx:afterSwap", function (evt) {
+      // POST swaps replace this wrapper (fresh stamp on the wrapper div);
+      // SSE swaps push the inner shell (stamp on the shell div). Either
+      // way, adopt the newer version.
+      var el = evt.detail && evt.detail.target;
+      if (!el || !el.querySelector) return;
+      var shell = el.matches && el.matches("[data-chat-seq]")
+        ? el : el.querySelector("[data-chat-seq]");
+      if (!shell) return;
+      var seq = parseInt(shell.dataset.chatSeq || "0", 10);
+      if (seq > (window.__apChatSeq || 0)) window.__apChatSeq = seq;
+    });
+  })();
+</script>

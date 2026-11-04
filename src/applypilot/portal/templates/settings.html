@@ -35,10 +35,10 @@
 {% block content %}
 <div class="page-head">
   <h1>Settings</h1>
-  <p class="dim">Provider, keys, and auto-apply configuration. Secrets are stored masked in <code>~/.applypilot/.env</code>.</p>
+  <p class="dim">Provider, keys, and auto-apply configuration. Secrets are stored masked on this machine — they never leave it except to your chosen provider.</p>
 </div>
 
-{% if saved %}<p class="alert success">Settings saved to <code>~/.applypilot/.env</code> (0600) and applied to the running portal — no restart needed.</p>{% endif %}
+{% if saved %}<p class="alert success">Settings saved and applied to the running portal — no restart needed.</p>{% endif %}
 
 <form method="post" action="/settings" class="settings-form">
   <section class="panel">
