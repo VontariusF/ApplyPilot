@@ -487,7 +487,8 @@ STAGE_CONDITIONS: dict[str, str] = {
 def get_jobs_by_stage(conn: sqlite3.Connection | None = None,
                       stage: str = "discovered",
                       min_score: int | None = None,
-                      limit: int = 100) -> list[dict]:
+                      limit: int = 100,
+                      url: str | None = None) -> list[dict]:
     """Fetch jobs filtered by pipeline stage.
 
     Args:
@@ -495,6 +496,8 @@ def get_jobs_by_stage(conn: sqlite3.Connection | None = None,
         stage: One of "discovered", "enriched", "scored", "tailored", "applied".
         min_score: Minimum fit_score filter (only relevant for scored+ stages).
         limit: Maximum number of rows to return.
+        url: Exact job URL filter — scopes the stage query to one job
+            (single-job tailor runs).
 
     Returns:
         List of job dicts.
@@ -513,6 +516,10 @@ def get_jobs_by_stage(conn: sqlite3.Connection | None = None,
     if min_score is not None and "fit_score" not in where and stage in ("scored", "tailored", "applied"):
         where += " AND fit_score >= ?"
         params.append(min_score)
+
+    if url:
+        where += " AND url = ?"
+        params.append(url)
 
     query = f"SELECT * FROM jobs WHERE {where} ORDER BY fit_score DESC NULLS LAST, discovered_at DESC"
     if limit > 0:
@@ -628,6 +635,20 @@ def resolve_version_id(conn: sqlite3.Connection, job_url: str, kind: str,
         (job_url, kind, str(file_path)),
     ).fetchone()
     return row[0] if row else None
+
+
+def count_applications_on(day: str) -> int:
+    """Applications recorded on calendar day `day` (YYYY-MM-DD, UTC).
+
+    The automation daily cap reads this — applied_at is a UTC ISO timestamp
+    written by the apply worker and the mark routes.
+    """
+    conn = get_connection()
+    return conn.execute(
+        "SELECT COUNT(*) FROM jobs "
+        "WHERE applied_at IS NOT NULL AND date(applied_at) = ?",
+        (day,),
+    ).fetchone()[0]
 
 
 def reset_job_tailoring(conn: sqlite3.Connection, url: str,
