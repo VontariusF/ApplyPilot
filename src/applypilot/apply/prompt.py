@@ -82,8 +82,8 @@ def _build_profile_summary(profile: dict) -> str:
         lines.append(f"Website: {personal['website_url']}")
 
     # Work authorization
-    lines.append(f"Work Auth: {work_auth.get('legally_authorized_to_work', 'See profile')}")
-    lines.append(f"Sponsorship Needed: {work_auth.get('require_sponsorship', 'See profile')}")
+    lines.append(f"Work Auth: {work_auth.get('legally_authorized_to_work') or 'Not provided — do not guess'}")
+    lines.append(f"Sponsorship Needed: {work_auth.get('require_sponsorship') or 'Not provided — do not guess'}")
     if work_auth.get("work_permit_type"):
         lines.append(f"Work Permit: {work_auth['work_permit_type']}")
 
@@ -98,7 +98,7 @@ def _build_profile_summary(profile: dict) -> str:
         lines.append(f"Education: {exp['education_level']}")
 
     # Availability
-    lines.append(f"Available: {avail.get('earliest_start_date', 'Immediately')}")
+    lines.append(f"Available: {avail.get('earliest_start_date') or 'Not provided — do not guess'}")
 
     # Standard responses
     lines.extend([

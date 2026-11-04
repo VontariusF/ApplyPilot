@@ -294,11 +294,44 @@ def test_normalize_fills_eight_keys_and_coerces():
     assert profile["personal"]["password"] == ""  # boundary: never from chat
     assert profile["work_authorization"]["legally_authorized_to_work"] == "Yes"
     assert profile["work_authorization"]["require_sponsorship"] == "No"
-    assert profile["availability"]["earliest_start_date"] == "Immediately"
     assert profile["compensation"]["salary_currency"] == "USD"
     assert set(profile["eeo_voluntary"].values()) == {"Decline to self-identify"}
     assert meta["queries"] == ["Data Engineer", "Analytics Engineer"]  # string split
     assert meta["remote"] is True
+
+
+def test_normalize_profile_leaves_unanswered_auth_blank():
+    """Sweep A S2-1: no recorded answer stays unanswered — never a default."""
+    profile, _ = onboarding.normalize_profile(
+        {"_applypilot_profile": {"work_authorization": {}, "availability": {}},
+         "_applypilot_search": {}})
+    assert profile["work_authorization"]["legally_authorized_to_work"] == ""
+    assert profile["work_authorization"]["require_sponsorship"] == ""
+    assert profile["availability"]["earliest_start_date"] == ""
+
+
+def test_review_flags_unanswered_auth_questions(app_dir, fake_llm):
+    """Sweep A S2-1: the review screen names unanswered gating questions."""
+    profile, _ = onboarding.normalize_profile(
+        {"_applypilot_profile": {"personal": {"full_name": "Test Person",
+                                              "email": "test@example.com"},
+                                  "work_authorization": {}, "availability": {}},
+         "_applypilot_search": {}})
+    missing = onboarding.missing_review_fields(profile)
+    assert "Work authorization (yes/no)" in missing
+    assert "Sponsorship needed (yes/no)" in missing
+    assert "Earliest start date" in missing
+    # Answered profiles are not flagged:
+    answered, _ = onboarding.normalize_profile(
+        {"_applypilot_profile": {"personal": {"full_name": "Test Person",
+                                              "email": "test@example.com"},
+                                  "work_authorization": {"legally_authorized_to_work": True,
+                                                         "require_sponsorship": False},
+                                  "availability": {"earliest_start_date": "March 2027"}},
+         "_applypilot_search": {}})
+    missing_answered = onboarding.missing_review_fields(answered)
+    assert not any("authorization" in m or "Sponsorship" in m or "start date" in m
+                   for m in missing_answered)
 
 
 def test_missing_review_fields_named_for_add_later(app_dir, fake_llm):
