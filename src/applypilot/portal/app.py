@@ -235,7 +235,10 @@ def create_app() -> FastAPI:
         url = str(form.get("url", "")).strip()
         if not url:
             return PlainTextResponse("missing url", status_code=400)
-        run_scoring(url=url)
+        # The scoring call is a blocking LLM HTTP request (up to ~240s with
+        # retries) — off the event loop, or every portal request stalls
+        # behind it. Same pattern as the onboarding routes.
+        await asyncio.to_thread(run_scoring, url=url)
         return RedirectResponse(f"/jobs/detail?url={quote(url, safe='')}",
                                 status_code=303)
 
