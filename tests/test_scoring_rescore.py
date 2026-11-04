@@ -346,7 +346,9 @@ def test_portal_rescore_all_spawns_tracked_run(portal_client, monkeypatch):
 
     r = client.post("/jobs/rescore-all", follow_redirects=False)
     assert r.status_code == 303
-    assert r.headers["location"] == "/runs"
+    # The strip on the jobs board replaced the dead-end /runs redirect:
+    # rescoring lands where the progress is visible.
+    assert r.headers["location"] == "/jobs"
     assert seen["kind"] == "rescore"
 
 
