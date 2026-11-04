@@ -1135,3 +1135,21 @@ details.adjust[open] summary { margin-bottom: var(--space-3); }
 .pagination a:hover { text-decoration: underline; }
 .page-disabled { opacity: 0.4; }
 .page-status { color: var(--ink-2); }
+
+/* System Check page: one dependency per row, grouped by area. */
+.syscheck-group { padding: var(--space-2) 0; }
+.syscheck-group h2 { margin: var(--space-3) 0 var(--space-1); }
+.syscheck {
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--surface-2);
+}
+.syscheck-head {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.syscheck-meaning { margin: var(--space-1) 0; color: var(--ink-2); }
+.badge.syscheck-pass { background: var(--ok-bg); color: var(--ok); }
+.badge.syscheck-warn { background: var(--warn-bg); color: var(--warn); }
+.badge.syscheck-fail { background: var(--fail-bg); color: var(--fail); }

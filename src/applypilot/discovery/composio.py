@@ -561,28 +561,43 @@ def run_composio_discovery(cfg: dict | None = None, client: ComposioClient | Non
 # ---------------------------------------------------------------------------
 
 
-def doctor_row() -> tuple[str, str]:
-    """(status, note) row for ``applypilot doctor``.
+def composio_state() -> tuple[str, str]:
+    """(state, note) for the Composio discovery check, in clean vocabulary.
 
-    The API key is masked through llm.mask_key (last 4 max) — the full key
-    never reaches the console (S2 discipline).
+    state is ``"ok"`` | ``"warn"`` | ``"optional"`` — presentation-free, so
+    the portal's System Check page can reuse the same check logic the CLI
+    doctor renders. The note is CLI-console copy (may name config files);
+    portal surfaces use their own plain-language text and read only the
+    state. The API key is masked through llm.mask_key (last 4 max) — the
+    full key never reaches any surface (S2 discipline).
     """
     key = os.getenv("COMPOSIO_API_KEY", "").strip()
     try:
         cfg = config.load_search_config()
     except Exception as exc:  # doctor reports; it never crashes on user config
-        return ("[yellow]WARN[/yellow]",
+        return ("warn",
                 f"searches.yaml unreadable, Composio config unknown: {type(exc).__name__}")
     block_present = isinstance(cfg, dict) and "composio" in cfg
 
     if not key:
         if block_present:
-            return ("[yellow]WARN[/yellow]",
+            return ("warn",
                     "composio source enabled in searches.yaml but COMPOSIO_API_KEY is not set")
-        return ("[dim]optional[/dim]",
+        return ("optional",
                 "Set COMPOSIO_API_KEY in .env to enable web3.career discovery via Composio")
 
     block = (cfg or {}).get("composio") or {}
     toolkits = _resolve_toolkits(block)
     note = f"toolkits: {', '.join(toolkits)} | key {mask_key(key)}"
-    return "[green]OK[/green]", note
+    return "ok", note
+
+
+def doctor_row() -> tuple[str, str]:
+    """(status, note) row for ``applypilot doctor`` — Rich marks over the
+    clean state from composio_state()."""
+    state, note = composio_state()
+    return {
+        "ok": "[green]OK[/green]",
+        "warn": "[yellow]WARN[/yellow]",
+        "optional": "[dim]optional[/dim]",
+    }[state], note

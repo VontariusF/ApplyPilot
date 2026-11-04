@@ -31,6 +31,7 @@ from applypilot.portal import auth, queries, runner
 from applypilot.portal import automation as automation_mod
 from applypilot.portal import assistant
 from applypilot.portal import settings as settings_mod
+from applypilot.portal import system_check as system_check_mod
 from applypilot.scoring.scorer import run_scoring
 
 PORTAL_DIR = Path(__file__).parent
@@ -894,6 +895,23 @@ def create_app() -> FastAPI:
             error = str(exc)
         return _render(request, "partials/onboarding_surface.html",
                        **_onboarding_context(error=error))
+
+    # ------------------------------------------------------------------
+    # System Check — the zero-terminal diagnostic surface (replaces the
+    # CLI doctor for portal users). The partial is the re-run target: the
+    # Check-again button swaps this list in place, never a page redirect.
+    # ------------------------------------------------------------------
+    @app.get("/system-check", response_class=HTMLResponse)
+    async def system_check_page(request: Request):
+        groups = await asyncio.to_thread(system_check_mod.grouped_checks)
+        return _render(request, "system_check.html", groups=groups,
+                       state_labels=system_check_mod.STATE_LABELS)
+
+    @app.get("/system-check/checks", response_class=HTMLResponse)
+    async def system_check_checks(request: Request):
+        groups = await asyncio.to_thread(system_check_mod.grouped_checks)
+        return _render(request, "partials/system_checks.html", groups=groups,
+                       state_labels=system_check_mod.STATE_LABELS)
 
     # ------------------------------------------------------------------
     # Settings

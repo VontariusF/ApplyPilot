@@ -1,0 +1,18 @@
+{# The check list — swapped in place when the page re-runs the checks. #}
+{% for heading, items in groups %}
+  <section class="syscheck-group">
+    <h2>{{ heading }}</h2>
+    {% for check in items %}
+      <div class="syscheck" id="check-{{ check.id }}">
+        <p class="syscheck-head">
+          <strong>{{ check.label }}</strong>
+          <span class="badge syscheck-{{ check.state }}">{{ state_labels[check.state] }}</span>
+        </p>
+        <p class="syscheck-meaning">{{ check.meaning }}</p>
+        {% if check.fix %}
+          <a class="button-link secondary" href="{{ check.fix.href }}">{{ check.fix.label }}</a>
+        {% endif %}
+      </div>
+    {% endfor %}
+  </section>
+{% endfor %}
