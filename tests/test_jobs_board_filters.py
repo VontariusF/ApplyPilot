@@ -73,6 +73,22 @@ def test_filter_by_location_substring(isolated_db):
     assert [j["url"] for j in jobs] == ["https://jobs.example/posting-1"]
 
 
+def test_filter_location_ignores_like_wildcards(isolated_db):
+    """S3: % and _ in the location box are literals, not LIKE wildcards."""
+    seed_job(location="Bay 50% remote")
+    seed_job(url="https://jobs.example/p2", location="Austin, TX")
+    seed_job(url="https://jobs.example/p3", location="Bay 50X remote")
+    # A bare "%" previously matched every row regardless of location.
+    jobs = queries.filtered_jobs(location="%")
+    assert [j["url"] for j in jobs] == ["https://jobs.example/posting-1"]
+    # "_" previously behaved as a single-char wildcard.
+    jobs = queries.filtered_jobs(location="Bay_50")
+    assert [j["url"] for j in jobs] == ["https://jobs.example/posting-1"]
+    # Ordinary substring matching still works alongside the escaping.
+    jobs = queries.filtered_jobs(location="austin")
+    assert [j["url"] for j in jobs] == ["https://jobs.example/p2"]
+
+
 def test_filter_by_discovered_date_range(isolated_db):
     seed_job(discovered_at="2026-10-15T12:00:00+00:00")
     seed_job(url="https://jobs.example/p2", discovered_at="2026-11-02T09:00:00+00:00")

@@ -144,8 +144,11 @@ def filtered_jobs(stage: str = "discovered",
         where.append("site = ?")
         params.append(site)
     if location:
-        where.append("location LIKE ?")
-        params.append(f"%{location}%")
+        # S3: escape LIKE wildcards so user-typed % and _ match
+        # themselves only — "%" as a location must not match every row.
+        escaped = location.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        where.append("location LIKE ? ESCAPE '\\'")
+        params.append(f"%{escaped}%")
     if discovered_from:
         where.append("substr(discovered_at, 1, 10) >= ?")
         params.append(discovered_from)
