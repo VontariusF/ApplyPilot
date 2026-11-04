@@ -124,10 +124,15 @@
     <p><code>profile.json</code>, <code>profile.md</code> and <code>searches.yaml</code> are written.
        From here the jobs board is the front page; run discovery whenever you like.</p>
     <div class="gate-actions">
-      <a class="button-link" href="/jobs">Go to the jobs board</a>
+      <form method="post" action="/onboarding/find-jobs" class="inline-form">
+        <button>Find jobs now</button>
+      </form>
+      <a class="button-link secondary" href="/jobs">Go to the jobs board</a>
       <form hx-post="/onboarding/redo" hx-target="#onboarding-surface" hx-swap="outerHTML" class="inline-form">
         <button class="secondary">Redo interview</button>
       </form>
     </div>
+    <p class="dim">Discovery runs in the background — progress streams on the Runs page,
+       and results land on the jobs board.</p>
   </section>
 {% endif %}

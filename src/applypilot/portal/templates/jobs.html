@@ -12,10 +12,38 @@
         {% endfor %}
       </select>
     </label>
-    <label>Min score <input type="number" name="min_score" min="0" max="10" value="{{ min_score }}"></label>
+    <label>Site
+      <select name="site">
+        <option value="">All</option>
+        {% for s in sites %}
+        <option value="{{ s }}" {{ 'selected' if s == site }}>{{ s }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Location <input type="text" name="location" value="{{ location }}" placeholder="e.g. Austin"></label>
+    <label>Discovered from <input type="date" name="discovered_from" value="{{ discovered_from }}"></label>
+    <label>Discovered to <input type="date" name="discovered_to" value="{{ discovered_to }}"></label>
+    <label>Apply status
+      <select name="apply_status">
+        <option value="">Any</option>
+        {% for st in statuses %}
+        <option value="{{ st }}" {{ 'selected' if st == apply_status }}>{{ st }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Salary ≥ <input type="number" name="min_salary" min="0" step="1000" value="{{ min_salary or '' }}" placeholder="annual"></label>
+    <label>Fit ≥ <input type="number" name="min_score" min="0" max="10" value="{{ min_score }}"></label>
+    <label>Remote
+      <select name="remote">
+        <option value="">Any</option>
+        <option value="yes" {{ 'selected' if remote == 'yes' }}>Remote only</option>
+        <option value="no" {{ 'selected' if remote == 'no' }}>Onsite/hybrid</option>
+      </select>
+    </label>
     <label>Limit <input type="number" name="limit" min="1" max="500" value="{{ limit }}"></label>
     <button type="submit">Filter</button>
   </form>
+  <p class="dim">The Remote filter is inferred from listing text, not site data. Dates are when the job was discovered.</p>
   <form method="post" action="/jobs/reset-failed" class="inline-form">
     <button type="submit" class="secondary">Reset failed</button>
   </form>
