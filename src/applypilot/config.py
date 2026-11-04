@@ -13,10 +13,13 @@ APP_DIR = Path(os.environ.get("APPLYPILOT_DIR", Path.home() / ".applypilot"))
 # Core paths
 DB_PATH = APP_DIR / "applypilot.db"
 PROFILE_PATH = APP_DIR / "profile.json"
+PROFILE_MD_PATH = APP_DIR / "profile.md"
 RESUME_PATH = APP_DIR / "resume.txt"
 RESUME_PDF_PATH = APP_DIR / "resume.pdf"
 SEARCH_CONFIG_PATH = APP_DIR / "searches.yaml"
 ENV_PATH = APP_DIR / ".env"
+# Onboarding interview state (conversation transcript, phase, claude session id)
+ONBOARDING_STATE_PATH = APP_DIR / "onboarding-state.json"
 
 # Generated output
 TAILORED_DIR = APP_DIR / "tailored_resumes"
