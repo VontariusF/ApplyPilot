@@ -142,6 +142,14 @@ class ChromiumMissing(RuntimeError):
     """The Playwright Chromium binary is not installed on this machine."""
 
 
+# CI runners starve while the three Python-matrix jobs share the queue's CPU
+# budget: healthy journeys have hit Playwright's 30s default cap on locator
+# clicks, waits, and text reads — a different e2e test each run, and main's
+# own CI flakes the same way. Raise the class-level default; assertions that
+# genuinely expect absence still pass instantly.
+E2E_TIMEOUT_MS = 120_000
+
+
 @pytest.fixture()
 def chromium():
     """A fresh Chromium page per journey, as an async context manager."""
@@ -158,7 +166,9 @@ def chromium():
                     raise ChromiumMissing(text) from exc
                 raise
             try:
-                yield await browser.new_page()
+                page = await browser.new_page()
+                page.set_default_timeout(E2E_TIMEOUT_MS)
+                yield page
             finally:
                 await browser.close()
 
