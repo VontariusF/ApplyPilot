@@ -12,6 +12,15 @@ State lives in ~/.applypilot/onboarding-state.json (0600 via
 write_secret_text — it holds resume text and preference answers), so a
 portal restart never loses an in-flight interview.
 
+The interview itself runs in one of two session modes. "choices" renders
+a QuestionSpec registry as one guided question at a time (buttons, an
+optional free-text input, depends_on skipping); each pick is stored in
+state.answers and echoed to the agent as the user turn. "agent" hands
+the agenda back to this free-form loop — the user can switch at any
+step, and the final fenced-JSON extraction stays as the fallback path
+for anything the wizard doesn't own (normalize_profile merges answers
+first, agent JSON second; unanswered stays empty — PR #22's guard).
+
 Security boundary: the job-site password never enters the interview. The
 agent prompt forbids asking for credentials, and the profile written on
 confirm keeps personal.password empty (or preserves an existing value on
@@ -28,6 +37,7 @@ protected at runtime by the LLM fallback.
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
@@ -52,6 +62,12 @@ GATE = "gate"  # engine sign-in step (D1) — no interview yet
 INTERVIEW = "interview"  # agent asks; user answers
 REVIEW = "review"  # profile.md rendered; confirm or keep editing
 DONE = "done"  # files written; the onboarding gate stops redirecting
+
+# Interview session modes. "choices" renders the wizard's question buttons
+# (the portal owns the order); "agent" hands the agenda back to free-form
+# chat. The user can flip between them at any step of the interview.
+MODE_CHOICES = "choices"
+MODE_AGENT = "agent"
 
 # `claude -p` is an agentic CLI turn — it can think for a while, but a
 # wedged CLI must not hold the portal's chat route forever.
@@ -91,6 +107,11 @@ class InterviewState:
     profile_draft: dict | None = None  # agent-emitted, pre-confirm
     pending_context: str = ""  # resume text injected into the next agent turn
     error: str | None = None  # last user-facing failure, shown in the chat
+    # Guided-choice protocol: question id -> chosen Choice.value (or the
+    # typed free text). An intentionally skipped question is present with
+    # "" — answered-but-empty stays flagged on review (PR #22 guard).
+    answers: dict[str, str] = field(default_factory=dict)
+    mode: str = MODE_CHOICES  # guided buttons vs "let the agent ask"
     updated_at: str = ""
 
 
@@ -123,6 +144,236 @@ def clear_state() -> None:
 
 
 # ---------------------------------------------------------------------------
+# The guided-question registry (spec: structured-choice onboarding)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Choice:
+    """One wizard button.
+
+    `value` is stored verbatim in state.answers; `label` is what the
+    button says — and the user turn the agent reads, so the agent sees
+    prose exactly as in free-form chat.
+    """
+
+    value: str
+    label: str
+
+
+@dataclass(frozen=True)
+class QuestionSpec:
+    """One wizard question.
+
+    `choices` render as buttons; `allow_free_text` adds a "something
+    else" input typed per `free_text_kind` (None | "date" | "number" |
+    "password" | "multiline" — password is supported by the contract but
+    no question uses it: credentials never enter the interview). `maps_to`
+    is a dotted path into the normalized profile ("personal.email") or
+    the search meta ("search.location"); `depends_on` asks the question
+    only when every parent's answer is in its comma-separated allowlist.
+    `agent_hint` says what the "ask the agent" card should clarify.
+
+    The resume is deliberately not a QuestionSpec: it is a file, handled
+    by the existing /onboarding/resume route.
+    """
+
+    id: str
+    prompt: str
+    choices: tuple[Choice, ...] = ()
+    allow_free_text: bool = False
+    free_text_kind: str | None = None
+    maps_to: str = ""
+    depends_on: dict[str, str] | None = None
+    agent_hint: str = ""
+
+
+QUESTION_SPECS: tuple[QuestionSpec, ...] = (
+    # -- Eligibility: the gating pair first (the fields PR #22 guards) --
+    QuestionSpec(
+        id="work_authorized",
+        prompt="Are you legally authorized to work in the country you're applying in?",
+        choices=(Choice("yes", "Yes"), Choice("no", "No")),
+        maps_to="work_authorization.legally_authorized_to_work",
+        agent_hint="what counts as work authorization and how it's usually proved",
+    ),
+    QuestionSpec(
+        id="sponsorship",
+        prompt="Will you now or in the future need visa sponsorship?",
+        choices=(Choice("yes", "Yes"), Choice("no", "No"), Choice("not_sure", "Not sure")),
+        maps_to="work_authorization.require_sponsorship",
+        agent_hint="what sponsorship means and when employers offer it",
+    ),
+    QuestionSpec(
+        id="permit_type",
+        prompt="Which best describes your right to work?",
+        choices=(Choice("Citizen", "Citizen"),
+                 Choice("Permanent resident", "Permanent resident"),
+                 Choice("Open work permit", "Open work permit"),
+                 Choice("H-1B", "H-1B")),
+        allow_free_text=True,  # "something else…" — the typed text is the answer
+        maps_to="work_authorization.work_permit_type",
+        depends_on={"work_authorized": "yes"},
+        agent_hint="visa and permit categories beyond the four listed",
+    ),
+    # -- Preferences --
+    QuestionSpec(
+        id="work_style",
+        prompt="How do you want to work?",
+        choices=(Choice("remote", "Remote"), Choice("hybrid", "Hybrid"),
+                 Choice("onsite", "On-site")),
+        maps_to="search.remote",
+        agent_hint="the trade-offs of remote, hybrid, and onsite",
+    ),
+    QuestionSpec(
+        id="currency",
+        prompt="Which currency should salary conversations use?",
+        choices=(Choice("USD", "USD"), Choice("EUR", "EUR"),
+                 Choice("GBP", "GBP"), Choice("CAD", "CAD")),
+        allow_free_text=True,
+        maps_to="compensation.salary_currency",
+        agent_hint="any ISO currency code works",
+    ),
+    QuestionSpec(
+        id="salary_band",
+        prompt="What's the minimum annual salary you'd accept?",
+        choices=(Choice("120000", "120k – 140k"), Choice("140000", "140k – 170k"),
+                 Choice("170000", "170k – 200k"), Choice("200000", "200k+")),
+        allow_free_text=True,
+        free_text_kind="number",
+        maps_to="compensation.salary_expectation",
+        agent_hint="picking a floor you won't want to renegotiate later",
+    ),
+    QuestionSpec(
+        id="start_date",
+        prompt="When could you start?",
+        choices=(Choice("Immediately", "Immediately"), Choice("In 2 weeks", "In 2 weeks"),
+                 Choice("In 1 month", "In 1 month"), Choice("In 3 months", "In 3 months")),
+        allow_free_text=True,
+        free_text_kind="date",
+        maps_to="availability.earliest_start_date",
+        agent_hint="typical notice periods",
+    ),
+    QuestionSpec(
+        id="education",
+        prompt="What's your highest education?",
+        choices=(Choice("Bachelor's", "Bachelor's"), Choice("Master's", "Master's"),
+                 Choice("PhD", "PhD"), Choice("Self-taught", "Self-taught")),
+        allow_free_text=True,
+        maps_to="experience.education_level",
+        agent_hint="bootcamps and certificates count too",
+    ),
+    QuestionSpec(
+        id="experience_years",
+        prompt="How many years have you worked in your field?",
+        choices=(Choice("0–2", "0–2"), Choice("3–5", "3–5"),
+                 Choice("6–10", "6–10"), Choice("10+", "10+")),
+        maps_to="experience.years_of_experience_total",
+        agent_hint="a rough band is fine",
+    ),
+    # -- Search shape --
+    QuestionSpec(
+        id="target_roles",
+        prompt="Which job titles should we search for? One per line.",
+        allow_free_text=True,
+        free_text_kind="multiline",
+        maps_to="search.queries",
+        agent_hint="narrowing titles so results stay relevant",
+    ),
+    QuestionSpec(
+        id="location",
+        prompt="What city are you based in?",
+        allow_free_text=True,
+        maps_to="search.location",
+        depends_on={"work_style": "onsite,hybrid"},  # remote-only searches need no radius
+        agent_hint="why the search needs a home base for hybrid or onsite roles",
+    ),
+    QuestionSpec(
+        id="skills_languages",
+        prompt="Which programming languages do you use?",
+        allow_free_text=True,
+        free_text_kind="multiline",
+        maps_to="skills_boundary.programming_languages",
+        agent_hint="languages only — frameworks and tools come next",
+    ),
+    QuestionSpec(
+        id="skills_frameworks",
+        prompt="Which frameworks or libraries do you use?",
+        allow_free_text=True,
+        free_text_kind="multiline",
+        maps_to="skills_boundary.frameworks",
+        agent_hint="frameworks only — languages and tools are separate questions",
+    ),
+    QuestionSpec(
+        id="skills_tools",
+        prompt="Which tools do you work with?",
+        allow_free_text=True,
+        free_text_kind="multiline",
+        maps_to="skills_boundary.tools",
+        agent_hint="tools only — languages and frameworks are separate questions",
+    ),
+    # -- Personal fields (review flags name/email/phone when empty) --
+    QuestionSpec(
+        id="full_name",
+        prompt="What's your full name?",
+        allow_free_text=True,
+        maps_to="personal.full_name",
+        agent_hint="the name as it should appear on applications",
+    ),
+    QuestionSpec(
+        id="email",
+        prompt="What email address should applications use?",
+        allow_free_text=True,
+        maps_to="personal.email",
+        agent_hint="an inbox you actually check",
+    ),
+    QuestionSpec(
+        id="phone",
+        prompt="What phone number should applications use?",
+        allow_free_text=True,
+        maps_to="personal.phone",
+        agent_hint="formatting doesn't matter",
+    ),
+    QuestionSpec(
+        id="city",
+        prompt="What city do you live in?",
+        allow_free_text=True,
+        maps_to="personal.city",
+        agent_hint="your home city, for forms that ask independently of the search",
+    ),
+    QuestionSpec(
+        id="linkedin_url",
+        prompt="Link your LinkedIn profile (optional)",
+        allow_free_text=True,
+        maps_to="personal.linkedin_url",
+        agent_hint="skipping is fine",
+    ),
+    QuestionSpec(
+        id="github_url",
+        prompt="Link your GitHub profile (optional)",
+        allow_free_text=True,
+        maps_to="personal.github_url",
+        agent_hint="skipping is fine",
+    ),
+    QuestionSpec(
+        id="website_url",
+        prompt="Link a personal website (optional)",
+        allow_free_text=True,
+        maps_to="personal.website_url",
+        agent_hint="skipping is fine",
+    ),
+    QuestionSpec(
+        id="portfolio_url",
+        prompt="Link a portfolio site (optional)",
+        allow_free_text=True,
+        maps_to="personal.portfolio_url",
+        agent_hint="skipping is fine",
+    ),
+)
+
+QUESTIONS: dict[str, QuestionSpec] = {q.id: q for q in QUESTION_SPECS}
+
+
+# ---------------------------------------------------------------------------
 # The interview prompt
 # ---------------------------------------------------------------------------
 
@@ -148,6 +399,10 @@ password is collected elsewhere by design. If the user volunteers one, \
 tell them not to share it here and move on.
 - Do not invent facts. Anything still unknown stays empty; the review \
 screen lists missing fields as "add later".
+- The portal may also show guided questions with buttons; the user's picks \
+reach you as short statements. Treat each as a confirmed answer, react \
+briefly, and let the portal drive the question order.
+- Keep your replies short.
 
 When every item above is confirmed, end your reply with the complete \
 profile in this exact fenced block, and nothing after it:
@@ -378,8 +633,89 @@ def _str(d: dict, key: str) -> str:
     return value.strip() if isinstance(value, str) else ("" if value is None else str(value))
 
 
-def normalize_profile(draft: dict) -> tuple[dict, dict]:
-    """Fit the agent's draft into the wizard-shaped profile + search meta.
+# Profile serialization for wizard answers. The two gating yes/no fields
+# accept only Yes/No: a skip, "Not sure", or any unparsed value serializes
+# to nothing at all so the review screen keeps flagging it — a fabricated
+# or guessed yes/no would be submitted to real ATS forms (PR #22 guard).
+_GATED_PATHS = (
+    "work_authorization.legally_authorized_to_work",
+    "work_authorization.require_sponsorship",
+)
+_GATED_VALUE_MAP = {"yes": "Yes", "no": "No"}
+
+# Free-text answers for list-shaped fields arrive newline- or comma-
+# separated; join them the same way _as_str_list splits agent lists.
+_LIST_TARGETS = (
+    "search.queries",
+    "skills_boundary.programming_languages",
+    "skills_boundary.frameworks",
+    "skills_boundary.tools",
+)
+
+
+def _answers_to_draft(answers: dict[str, str]) -> dict:
+    """Shape the wizard's answers map as an agent-style draft.
+
+    Field ownership: a question answered with a value is the wizard's —
+    its serialized answer clobbers the agent's draft. A skipped (empty)
+    answer owns its field only when the field is GATED (yes/no gating
+    must stay "" — the agent's extraction may never fill a yes/no the
+    user declined, PR #22 guard); a skipped non-gating field stays open
+    for the agent to fill if it extracted the value from the resume.
+    Questions never answered at all stay open the same way.
+    """
+    profile: dict[str, dict[str, str]] = {}
+    search: dict = {}
+    for spec in QUESTION_SPECS:
+        if spec.id not in answers or not spec.maps_to:
+            continue
+        value = (answers.get(spec.id) or "").strip()
+        if spec.maps_to == "search.remote":
+            # "remote" is the only style that means true; hybrid/onsite
+            # are commute-style searches, not remote ones.
+            if value:
+                search["remote"] = value == "remote"
+            continue
+        if spec.maps_to in _GATED_PATHS:
+            value = _GATED_VALUE_MAP.get(value.lower(), "")  # skip/"not sure" → ""
+        elif not value:
+            continue
+        if spec.maps_to in _LIST_TARGETS:
+            value = ", ".join(part.strip() for part in re.split(r"[,\n]", value) if part.strip())
+        section, field_name = spec.maps_to.split(".", 1)
+        if spec.maps_to.startswith("search."):
+            search[field_name] = value
+        else:
+            profile.setdefault(section, {})[field_name] = value
+    return {"_applypilot_profile": profile, "_applypilot_search": search}
+
+
+def _overlay_answers(draft: dict | None, answers: dict[str, str]) -> dict:
+    """The wizard's answers overlaid on the agent's draft — answers win.
+
+    The wizard is the source of truth; the agent's fenced-JSON extraction
+    fills only the fields the wizard doesn't own (spec: answers merge
+    first, agent JSON second).
+    """
+    if not answers:
+        return draft if isinstance(draft, dict) else {}
+    overlay = _answers_to_draft(answers)
+    base = draft if isinstance(draft, dict) else {}
+    agent_profile = base.get("_applypilot_profile") if isinstance(base.get("_applypilot_profile"), dict) else {
+        k: v for k, v in base.items() if k != "_applypilot_search"
+    }
+    agent_search = base.get("_applypilot_search") if isinstance(base.get("_applypilot_search"), dict) else {}
+    merged_profile = dict(agent_profile)
+    for section, fields in overlay["_applypilot_profile"].items():
+        merged_profile[section] = {**(agent_profile.get(section) or {}), **fields}
+    return {
+        "_applypilot_profile": merged_profile,
+        "_applypilot_search": {**agent_search, **overlay["_applypilot_search"]},
+    }
+
+
+def normalize_profile(draft: dict, answers: dict[str, str] | None = None) -> tuple[dict, dict]:
+    """Fit the merged wizard+agent draft into the wizard-shaped profile.
 
     Returns (profile, search_meta). The profile always carries all eight
     top-level keys with the wizard's field shape (the de-facto schema the
@@ -387,9 +723,15 @@ def normalize_profile(draft: dict) -> tuple[dict, dict]:
     restores an existing value at write time. search_meta carries the
     discovery-facing bits (queries, location, remote) that profile.json
     itself does not hold.
+
+    The wizard's answers (state.answers) overlay the agent's draft: the
+    wizard is the source of truth and the agent fills only what the
+    wizard doesn't own. Unanswered questions serialize to "" and surface
+    on review — no defaults (PR #22 guard).
     """
-    p = draft.get("_applypilot_profile") if isinstance(draft.get("_applypilot_profile"), dict) else draft
-    search_in = draft.get("_applypilot_search") if isinstance(draft.get("_applypilot_search"), dict) else {}
+    merged = _overlay_answers(draft, answers or {})
+    p = merged.get("_applypilot_profile") if isinstance(merged.get("_applypilot_profile"), dict) else merged
+    search_in = merged.get("_applypilot_search") if isinstance(merged.get("_applypilot_search"), dict) else {}
     personal = p.get("personal") if isinstance(p.get("personal"), dict) else {}
     auth = p.get("work_authorization") if isinstance(p.get("work_authorization"), dict) else {}
     availability = p.get("availability") if isinstance(p.get("availability"), dict) else {}
@@ -588,7 +930,8 @@ def _note(state: InterviewState, text: str) -> None:
     state.messages.append({"role": _ROLE_NOTE, "content": text})
 
 
-def _agent_turn(state: InterviewState, user_text: str, prompt_for_claude: str) -> str:
+def _agent_turn(state: InterviewState, user_text: str, prompt_for_claude: str,
+                directive: str | None = None) -> str:
     """Run one agent turn on the active backend, with the A1 fallback.
 
     The transcript already holds the user's message; the backend only
@@ -596,7 +939,9 @@ def _agent_turn(state: InterviewState, user_text: str, prompt_for_claude: str) -
     fails mid-interview and a provider is configured, the interview
     switches to it and the turn retries there — the user sees a note, not
     an error. prompt_for_claude lets callers enrich the CLI prompt
-    (resume context) without polluting the transcript.
+    (resume context) without polluting the transcript; directive is a
+    synthetic instruction (mode switches) that reaches the backend but
+    is never appended to the transcript.
     """
     if state.backend == "claude":
         try:
@@ -608,19 +953,31 @@ def _agent_turn(state: InterviewState, user_text: str, prompt_for_claude: str) -
             _note(state, "Claude Code became unavailable — continuing with the configured provider.")
             state.backend = "llm"
             state.claude_session_id = None
-            return LLMBackend().send(state, user_text)
-    return LLMBackend().send(state, user_text)
+            return _llm_turn(state, directive)
+    return _llm_turn(state, directive)
+
+
+def _llm_turn(state: InterviewState, directive: str | None = None) -> str:
+    """One LLMBackend turn: the projected transcript, plus an unrecorded
+    trailing directive when the caller supplied one (mode switches)."""
+    client = LLMBackend()._client()
+    messages = LLMBackend._send_list(state.messages)
+    if directive:
+        messages.append({"role": _ROLE_USER, "content": directive})
+    return client.chat(messages)
 
 
 def _after_reply(state: InterviewState, reply: str) -> None:
     """Post-reply bookkeeping: draft extraction and phase transition.
 
     The transcript is the service layer's job; this only reacts to the
-    reply's content.
+    reply's content. The wizard's answers overlay the agent's fenced-JSON
+    draft — the wizard is the source of truth (PR #22 guard: the agent
+    only fills what the wizard doesn't own).
     """
     draft = extract_profile_draft(reply)
     if draft is not None:
-        profile, meta = normalize_profile(draft)
+        profile, meta = normalize_profile(draft, state.answers)
         state.profile_draft = {**profile, "_applypilot_search": meta}
         state.phase = REVIEW
 
@@ -702,14 +1059,182 @@ def send_message(text: str) -> InterviewState:
         return state
 
 
+def remaining_questions(state: InterviewState) -> list[QuestionSpec]:
+    """The agenda still open: unanswered specs whose depends_on is met."""
+    open_specs = []
+    for spec in QUESTION_SPECS:
+        if spec.id in state.answers:
+            continue
+        if _depends_met(spec, state.answers):
+            open_specs.append(spec)
+    return open_specs
+
+
+def _depends_met(spec: QuestionSpec, answers: dict[str, str]) -> bool:
+    """True when every depends_on parent's answer is in its allowlist
+    ("a,b" = either value). An unanswered parent fails closed: the child
+    waits until the parent settles, so the agenda never asks about a
+    permit before it knows the user is authorized."""
+    for parent, allowed in (spec.depends_on or {}).items():
+        if answers.get(parent, "") not in allowed.split(","):
+            return False
+    return True
+
+
+def current_question(state: InterviewState) -> QuestionSpec | None:
+    """The question the wizard shows now, or None when the agenda is done.
+
+    Registry order is the agenda. Answered and skipped questions don't
+    repeat; a question whose depends_on isn't met by the answers so far
+    is skipped silently — its parent governs whether it makes sense at
+    all, and the agent-led mode can still collect it in prose.
+    """
+    open_specs = remaining_questions(state)
+    return open_specs[0] if open_specs else None
+
+
+def record_answer(question_id: str, value: str = "", free_text: str = "",
+                  skip: bool = False) -> InterviewState:
+    """Record one guided answer and advance the agenda (the portal owns order).
+
+    The chosen button appends its LABEL as the user turn (the agent reads
+    prose, exactly as in free-form chat) and stores the VALUE in
+    state.answers; free text stores what the user typed. A skip records
+    the question as intentionally empty — it never becomes a profile
+    value, so review keeps flagging it (PR #22 guard). The agent
+    acknowledgement runs after the answer is persisted: a backend failure
+    costs the acknowledgement, never the user's click.
+    """
+    with _STATE_LOCK:
+        state = load_state()
+        if state is None or state.phase != INTERVIEW:
+            raise OnboardingError("the interview is not active")
+        spec = QUESTIONS.get(question_id)
+        if spec is None:
+            raise OnboardingError("unknown question")
+
+        if skip:
+            state.answers[spec.id] = ""
+            _note(state, f"Skipped \"{spec.prompt}\" — left empty on purpose (the review screen lists it as add-later).")
+            label = ""
+        else:
+            typed = (free_text or "").strip()
+            if typed:
+                if not spec.allow_free_text:
+                    raise OnboardingError("that question takes one of the listed choices")
+                state.answers[spec.id] = typed
+                label = typed
+            else:
+                choice = next((c for c in spec.choices if c.value == (value or "").strip()), None)
+                if choice is None:
+                    raise OnboardingError("pick one of the listed choices")
+                state.answers[spec.id] = choice.value
+                label = choice.label
+            state.messages.append({"role": _ROLE_USER, "content": label})
+
+        if current_question(state) is None:
+            # Agenda complete: the wizard's answers (plus anything the agent
+            # extracted along the way) become the review draft.
+            profile, meta = normalize_profile(state.profile_draft or {}, state.answers)
+            state.profile_draft = {**profile, "_applypilot_search": meta}
+            state.phase = REVIEW
+        save_state(state)
+
+        if label:
+            prompt = label
+            if state.pending_context:
+                prompt = f"{state.pending_context}\n\nUser's message: {label}"
+                state.pending_context = ""
+            try:
+                reply = _agent_turn(state, prompt, prompt)
+            except RuntimeError as exc:
+                # The user's answer stays recorded; the chat shows the
+                # failure and the next render carries the error banner.
+                state.error = str(exc)
+                save_state(state)
+                raise
+            state.error = None
+            state.messages.append({"role": _ROLE_ASSISTANT, "content": reply})
+            _after_reply(state, reply)
+        save_state(state)
+        return state
+
+
+_AGENT_LED_DIRECTIVE = (
+    "The user switched to agent-led questions — you run the interview in "
+    "your own words again. Ask about what's still missing: {fields}"
+)
+
+_BACK_TO_CHOICES_DIRECTIVE = (
+    "The user switched back to the guided questions; the portal shows them "
+    "one at a time. Acknowledge in one short sentence."
+)
+
+
+def set_agent_led(enabled: bool) -> InterviewState:
+    """'Let the agent ask' — hand the agenda back to free-form chat.
+
+    The switch persists before the agent hears about it, so a backend
+    failure costs one acknowledgement, never the mode change. Returning
+    to buttons resumes the agenda at the first unanswered question —
+    nothing already answered is asked again.
+    """
+    with _STATE_LOCK:
+        state = load_state()
+        if state is None or state.phase != INTERVIEW:
+            raise OnboardingError("the interview is not active")
+        if (state.mode == MODE_AGENT) == enabled:
+            return state  # idempotent — double-clicks and stale tabs
+        state.mode = MODE_AGENT if enabled else MODE_CHOICES
+        state.error = None
+        save_state(state)
+        if enabled:
+            remaining = ", ".join(spec.prompt.strip("?") for spec in remaining_questions(state))
+            directive = _AGENT_LED_DIRECTIVE.format(fields=remaining or "anything the profile still needs")
+        else:
+            directive = _BACK_TO_CHOICES_DIRECTIVE
+        try:
+            reply = _agent_turn(state, directive, directive, directive=directive)
+        except RuntimeError as exc:
+            state.error = str(exc)
+            save_state(state)
+            raise
+        state.messages.append({"role": _ROLE_ASSISTANT, "content": reply})
+        _after_reply(state, reply)
+        save_state(state)
+        return state
+
+
+def extract_pdf_text(pdf_bytes: bytes) -> str:
+    """Extract the text of a PDF resume (pypdf); "" when nothing readable.
+
+    Failures (encrypted, scanned, malformed) are logged and surface to
+    the user as the "paste the text instead" note — never as a stack
+    trace, and never as invented content.
+    """
+    try:
+        from pypdf import PdfReader  # lazy: keeps portal startup light
+    except ImportError as exc:  # pragma: no cover - pypdf ships as a dep
+        log.warning("PDF resume extraction unavailable: %s", exc)
+        return ""
+    try:
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        pages = [page.extract_text() or "" for page in reader.pages]
+    except Exception as exc:  # pypdf raises several parse-error variants
+        log.warning("PDF resume unreadable: %s", exc)
+        return ""
+    return "\n".join(pages).strip()
+
+
 def add_resume(text: str | None = None, pdf_bytes: bytes | None = None,
                filename: str = "resume.txt") -> InterviewState:
     """Store an uploaded/pasted resume and queue it for the next agent turn.
 
-    Text (paste or .txt upload) becomes resume.txt; a PDF upload lands in
-    resume.pdf — its text is not extracted here (parity with the wizard,
-    which copies the PDF and asks for a txt separately), so the interview
-    reads text resumes.
+    Text (paste or .txt upload) becomes resume.txt. A PDF upload lands
+    in resume.pdf AND has its text extracted (same bytes, one read) into
+    resume.txt, so the interview and the whole downstream pipeline read
+    it like any text resume; when nothing readable comes out (scanned or
+    encrypted), the note asks for the text instead — nothing invented.
     """
     with _STATE_LOCK:
         state = load_state()
@@ -719,7 +1244,15 @@ def add_resume(text: str | None = None, pdf_bytes: bytes | None = None,
             config.RESUME_PDF_PATH.write_bytes(pdf_bytes)
             if os.name == "posix":
                 os.chmod(config.RESUME_PDF_PATH, 0o600)
-            _note(state, f"Resume uploaded: {filename} (PDF saved; the agent reads text resumes — paste or upload a .txt for it to read).")
+            extracted = extract_pdf_text(pdf_bytes)
+            if extracted:
+                config.write_secret_text(config.RESUME_PATH, extracted)
+                state.pending_context = _RESUME_CONTEXT_TMPL.format(
+                    label=filename, resume_text=extracted[:20_000],
+                )
+                _note(state, f"Resume uploaded: {filename} (PDF) — text extracted for the agent ({len(extracted):,} characters).")
+            else:
+                _note(state, f"Resume uploaded: {filename} (PDF saved, but its text couldn't be read — paste or upload a .txt and the agent will read that).")
         elif text:
             config.write_secret_text(config.RESUME_PATH, text)
             label = filename if filename else "pasted resume"
@@ -745,7 +1278,7 @@ def confirm_profile() -> dict:
         if state is None or state.phase != REVIEW or not state.profile_draft:
             raise OnboardingError("there is no profile draft to confirm")
         draft = state.profile_draft
-        profile, meta = normalize_profile(draft)
+        profile, meta = normalize_profile(draft, state.answers)
         if config.PROFILE_PATH.exists():
             try:
                 existing = json.loads(config.PROFILE_PATH.read_text(encoding="utf-8"))

@@ -94,18 +94,81 @@
   {% endif %}
 
 {% elif state.phase == "interview" %}
-  {# ---- Interview: transcript + composer ---- #}
+  {# ---- Interview: transcript + the active question (or agent-led chat) ---- #}
   <section class="panel chat-panel">
     {{ transcript(state) }}
-    <form class="chat-composer" hx-post="/onboarding/send" hx-target="#onboarding-surface"
-          hx-swap="outerHTML" hx-indicator="#chat-busy">
-      <textarea name="text" rows="2" required
-                placeholder="Type your answer — the agent asks one thing at a time"></textarea>
-      <button>Send</button>
-    </form>
+    {% if question %}
+      {# Guided mode: the portal owns the order — one question at a time.
+         A pick posts its value; free text (when allowed) posts what the
+         user typed; both land in the transcript as the user's turn. #}
+      <div class="wizard-question">
+        <h3>{{ question.prompt }}</h3>
+        {% if question.choices %}
+          <div class="gate-actions choice-actions">
+            {% for c in question.choices %}
+              <form class="inline-form" hx-post="/onboarding/answer" hx-target="#onboarding-surface"
+                    hx-swap="outerHTML" hx-indicator="#chat-busy">
+                <input type="hidden" name="question_id" value="{{ question.id }}">
+                <input type="hidden" name="value" value="{{ c.value }}">
+                <button class="secondary">{{ c.label }}</button>
+              </form>
+            {% endfor %}
+          </div>
+        {% endif %}
+        {% if question.allow_free_text %}
+          <form class="chat-composer" hx-post="/onboarding/answer" hx-target="#onboarding-surface"
+                hx-swap="outerHTML" hx-indicator="#chat-busy">
+            <input type="hidden" name="question_id" value="{{ question.id }}">
+            {% if question.free_text_kind == "multiline" %}
+              <textarea name="free_text" rows="3" placeholder="One per line"></textarea>
+            {% elif question.free_text_kind == "number" %}
+              <input type="number" name="free_text" placeholder="A number">
+            {% elif question.free_text_kind == "date" %}
+              <input type="date" name="free_text">
+            {% else %}
+              <input type="text" name="free_text" placeholder="Type your answer">
+            {% endif %}
+            <button>Send</button>
+          </form>
+        {% endif %}
+        <div class="gate-actions">
+          <form class="inline-form" hx-post="/onboarding/answer" hx-target="#onboarding-surface" hx-swap="outerHTML">
+            <input type="hidden" name="question_id" value="{{ question.id }}">
+            <input type="hidden" name="skip" value="1">
+            <button class="secondary">Skip for now</button>
+          </form>
+          <form class="inline-form" hx-post="/onboarding/agent-mode" hx-target="#onboarding-surface" hx-swap="outerHTML">
+            <input type="hidden" name="enabled" value="1">
+            <button class="secondary">Let the agent ask</button>
+          </form>
+        </div>
+        <details class="agent-assist">
+          <summary>Ask the agent — {{ question.agent_hint }}</summary>
+          <form class="chat-composer" hx-post="/onboarding/send" hx-target="#onboarding-surface"
+                hx-swap="outerHTML" hx-indicator="#chat-busy">
+            <textarea name="text" rows="2" placeholder="Ask in your own words — the agent answers here"></textarea>
+            <button>Send</button>
+          </form>
+        </details>
+      </div>
+    {% else %}
+      {# Agent-led mode: today's free-form interview, unchanged #}
+      <form class="chat-composer" hx-post="/onboarding/send" hx-target="#onboarding-surface"
+            hx-swap="outerHTML" hx-indicator="#chat-busy">
+        <textarea name="text" rows="2" required
+                  placeholder="Type your answer — the agent asks one thing at a time"></textarea>
+        <button>Send</button>
+      </form>
+      <div class="gate-actions">
+        <form class="inline-form" hx-post="/onboarding/agent-mode" hx-target="#onboarding-surface" hx-swap="outerHTML">
+          <input type="hidden" name="enabled" value="0">
+          <button class="secondary">Back to guided questions</button>
+        </form>
+      </div>
+    {% endif %}
     <span id="chat-busy" class="htmx-indicator dim">The agent is thinking…</span>
     <details class="resume-upload">
-      <summary>Attach a resume (txt/md file or paste; a PDF is stored but not read here)</summary>
+      <summary>Attach a resume (txt/md/pdf file or paste — we read PDFs for you)</summary>
       <form hx-post="/onboarding/resume" hx-target="#onboarding-surface" hx-swap="outerHTML"
             enctype="multipart/form-data" class="resume-form">
         <input type="file" name="resume_file" accept=".txt,.md,.pdf">
