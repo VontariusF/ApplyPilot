@@ -188,6 +188,45 @@ def rescore(
 
 
 @app.command()
+def regenerate(
+    url: str = typer.Argument(..., help="Job URL whose documents to regenerate."),
+    cover: bool = typer.Option(False, "--cover", help="Also clear and regenerate the cover letter."),
+) -> None:
+    """Clear a job's tailoring state and re-enqueue it for the tailor stage (D3).
+
+    Existing documents stay on disk — history keeps every version. The next
+    'applypilot run tailor' (and 'cover' with --cover) generates fresh ones.
+    """
+    _bootstrap()
+
+    from applypilot.database import get_connection, reset_job_tailoring
+
+    conn = get_connection()
+    if not reset_job_tailoring(conn, url, include_cover=cover):
+        console.print(f"[red]No job found:[/red] {url}")
+        raise typer.Exit(code=1)
+
+    cleared = ["tailored resume"] + (["cover letter"] if cover else [])
+    console.print(f"[green]Cleared:[/green] {', '.join(cleared)} for {url}")
+
+    # Re-enqueueing needs the tailor stage's queue conditions met.
+    row = conn.execute(
+        "SELECT fit_score, full_description FROM jobs WHERE url = ?", (url,)
+    ).fetchone()
+    if row and (row[0] is None or row[0] < 7 or not row[1]):
+        console.print(
+            "[yellow]Note:[/yellow] this job will not re-enqueue until it has a "
+            "full description and fit score >= 7 — run 'applypilot run score' first."
+        )
+    else:
+        console.print(
+            "Run [bold]applypilot run tailor"
+            + (" cover" if cover else "")
+            + "[/bold] to regenerate."
+        )
+
+
+@app.command()
 def apply(
     limit: Optional[int] = typer.Option(None, "--limit", "-l", help="Max applications to submit."),
     workers: int = typer.Option(1, "--workers", "-w", help="Number of parallel browser workers."),

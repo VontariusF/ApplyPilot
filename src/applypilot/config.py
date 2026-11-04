@@ -205,6 +205,19 @@ def load_blocked_sso() -> list[str]:
     return cfg.get("blocked_sso", [])
 
 
+def history_enabled() -> bool:
+    """Document history toggle (spec D1): version every generated document.
+
+    Reads HISTORY_ENABLED from the environment (loaded from ~/.applypilot/.env
+    by load_env, managed on the portal settings page). Unset defaults to
+    enabled; the off values restore the legacy overwrite-in-place behavior.
+    """
+    raw = os.environ.get("HISTORY_ENABLED", "").strip().lower()
+    if not raw:
+        return True
+    return raw not in ("0", "false", "off", "no")
+
+
 def load_base_urls() -> dict[str, str | None]:
     """Load site base URLs for URL resolution from sites.yaml."""
     cfg = load_sites_config()

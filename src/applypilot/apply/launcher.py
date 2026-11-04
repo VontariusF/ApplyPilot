@@ -22,7 +22,12 @@ from rich.console import Console
 from rich.live import Live
 
 from applypilot import config
-from applypilot.database import get_connection
+from applypilot.database import (
+    KIND_COVER_LETTER,
+    KIND_RESUME,
+    get_connection,
+    resolve_version_id,
+)
 from applypilot.apply import chrome, dashboard, prompt as prompt_mod
 from applypilot.apply.chrome import (
     launch_chrome, cleanup_worker, kill_all_chrome,
@@ -161,7 +166,15 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
         """, (f"{agent_label}-worker-{worker_id}", now, row["url"]))
         conn.commit()
 
-        return dict(row)
+        job = dict(row)
+        # Apply-time snapshot (spec D3): pin the document versions this worker
+        # will upload so mark_result can record what was actually sent. None
+        # for pre-history documents is stored honestly.
+        job["resume_version_id"] = resolve_version_id(
+            conn, job["url"], KIND_RESUME, job["tailored_resume_path"])
+        job["cover_version_id"] = resolve_version_id(
+            conn, job["url"], KIND_COVER_LETTER, job["cover_letter_path"])
+        return job
     except Exception:
         conn.rollback()
         raise
@@ -169,17 +182,26 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
 
 def mark_result(url: str, status: str, error: str | None = None,
                 permanent: bool = False, duration_ms: int | None = None,
-                task_id: str | None = None) -> None:
-    """Update a job's apply status in the database."""
+                task_id: str | None = None,
+                resume_version_id: int | None = None,
+                cover_version_id: int | None = None) -> None:
+    """Update a job's apply status in the database.
+
+    On 'applied', records the apply-time snapshot (spec D3): the version ids
+    of the documents the worker actually uploaded. None means the document
+    had no version row (pre-history or history disabled) — stored as NULL.
+    """
     conn = get_connection()
     now = datetime.now(timezone.utc).isoformat()
     if status == "applied":
         conn.execute("""
             UPDATE jobs SET apply_status = 'applied', applied_at = ?,
                            apply_error = NULL, agent_id = NULL,
-                           apply_duration_ms = ?, apply_task_id = ?
+                           apply_duration_ms = ?, apply_task_id = ?,
+                           applied_resume_version_id = ?,
+                           applied_cover_version_id = ?
             WHERE url = ?
-        """, (now, duration_ms, task_id, url))
+        """, (now, duration_ms, task_id, resume_version_id, cover_version_id, url))
     else:
         attempts = 99 if permanent else "COALESCE(apply_attempts, 0) + 1"
         conn.execute(f"""
@@ -283,11 +305,24 @@ def mark_job(url: str, status: str, reason: str | None = None) -> None:
     conn = get_connection()
     now = datetime.now(timezone.utc).isoformat()
     if status == "applied":
+        # Apply-time snapshot (spec D3): for a manual mark the best answer to
+        # "what did I send them?" is the document the job pointed at when the
+        # mark was made. NULL stays NULL for pre-history documents.
+        row = conn.execute(
+            "SELECT tailored_resume_path, cover_letter_path FROM jobs WHERE url = ?",
+            (url,),
+        ).fetchone()
+        resume_vid = cover_vid = None
+        if row is not None:
+            resume_vid = resolve_version_id(conn, url, KIND_RESUME, row["tailored_resume_path"])
+            cover_vid = resolve_version_id(conn, url, KIND_COVER_LETTER, row["cover_letter_path"])
         conn.execute("""
             UPDATE jobs SET apply_status = 'applied', applied_at = ?,
-                           apply_error = NULL, agent_id = NULL
+                           apply_error = NULL, agent_id = NULL,
+                           applied_resume_version_id = ?,
+                           applied_cover_version_id = ?
             WHERE url = ?
-        """, (now, url))
+        """, (now, resume_vid, cover_vid, url))
     else:
         conn.execute("""
             UPDATE jobs SET apply_status = 'failed', apply_error = ?,
@@ -645,7 +680,9 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
                 add_event(f"[W{worker_id}] Skipped: {_job_title(job)[:30]}")
                 continue
             elif result == "applied":
-                mark_result(job["url"], "applied", duration_ms=duration_ms)
+                mark_result(job["url"], "applied", duration_ms=duration_ms,
+                            resume_version_id=job.get("resume_version_id"),
+                            cover_version_id=job.get("cover_version_id"))
                 applied += 1
                 update_state(worker_id, jobs_applied=applied,
                              jobs_done=applied + failed)

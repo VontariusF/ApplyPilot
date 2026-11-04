@@ -11,8 +11,14 @@ import re
 import time
 from datetime import datetime, timezone
 
-from applypilot.config import COVER_LETTER_DIR, RESUME_PATH, load_profile
-from applypilot.database import get_connection, get_jobs_by_stage
+from applypilot.config import COVER_LETTER_DIR, RESUME_PATH, history_enabled, load_profile
+from applypilot.database import (
+    KIND_COVER_LETTER,
+    get_connection,
+    get_jobs_by_stage,
+    next_document_version,
+    record_document_version,
+)
 from applypilot.llm import get_client
 from applypilot.scoring import docs
 from applypilot.scoring.validator import (
@@ -231,6 +237,7 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
     completed = 0
     results: list[dict] = []
     error_count = 0
+    history_on = history_enabled()
 
     for job in jobs:
         completed += 1
@@ -242,8 +249,32 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
             # output_prefix also guards the nullable title, B12)
             prefix = docs.output_prefix(job)
 
-            cl_path = COVER_LETTER_DIR / f"{prefix}_CL.txt"
+            # History on (D1/D2): every generation is a new version at a
+            # _v{N} stem; a pre-history legacy file is backfilled as version 1
+            # by next_document_version and never touched. History off: the
+            # exact pre-history overwrite behavior at the bare prefix.
+            if history_on:
+                version = next_document_version(
+                    conn, job["url"], KIND_COVER_LETTER,
+                    legacy_path=COVER_LETTER_DIR / f"{prefix}_CL.txt")
+                cl_path = COVER_LETTER_DIR / f"{docs.versioned_stem(prefix, version)}_CL.txt"
+            else:
+                cl_path = COVER_LETTER_DIR / f"{prefix}_CL.txt"
+
             cl_path.write_text(letter, encoding="utf-8")
+
+            # Record the validation outcome of the letter actually returned —
+            # it may be the last retry, which can have failed validation.
+            final_validation = validate_cover_letter(letter, mode=validation_mode)
+            validation_status = "approved" if final_validation["passed"] else "failed_validation"
+
+            # Record the version row (spec D2): file path + validation outcome.
+            version_id = None
+            if history_on:
+                version_id = record_document_version(
+                    conn, job["url"], KIND_COVER_LETTER, version, str(cl_path),
+                    validation_status=validation_status,
+                )
 
             # Generate PDF (best-effort)
             pdf_path = None
@@ -259,6 +290,8 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
                 "pdf_path": pdf_path,
                 "title": job["title"],
                 "site": job["site"],
+                "status": validation_status,
+                "version_id": version_id,
             }
             results.append(result)
 
@@ -271,7 +304,7 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
         except Exception as e:
             result = {
                 "url": job["url"], "title": job["title"], "site": job["site"],
-                "path": None, "pdf_path": None, "error": str(e),
+                "path": None, "pdf_path": None, "error": str(e), "version_id": None,
             }
             error_count += 1
             results.append(result)
