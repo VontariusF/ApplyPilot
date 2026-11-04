@@ -41,7 +41,7 @@ FIELDS: list[dict] = [
      "label": "OpenAI API key", "help": "api.openai.com key for the OpenAI provider."},
     {"key": "FACTORY_API_KEY", "kind": SECRET,
      "label": "Factory API key",
-     "help": "Used by the Droid engine path (engine selection). Inert until that lands."},
+     "help": "Authenticates the Droid engine (AUTOAPPLY_ENGINE=droid)."},
     {"key": "CAPSOLVER_API_KEY", "kind": SECRET,
      "label": "CapSolver API key", "help": "Optional CAPTCHA solving during auto-apply."},
     {"key": "AUTOAPPLY_MODEL", "kind": TEXT,
@@ -50,7 +50,7 @@ FIELDS: list[dict] = [
     {"key": "AUTOAPPLY_ENGINE", "kind": CHOICE,
      "choices": ["", "claude", "droid"],
      "label": "Default apply engine",
-     "help": "Consumed by engine selection (PR #5). On current main the apply engine is Claude."},
+     "help": "Default engine for apply runs (claude | droid). Runs launched from the Runs page inherit this."},
 ]
 
 _SECRET_KEYS = [f["key"] for f in FIELDS if f["kind"] == SECRET]

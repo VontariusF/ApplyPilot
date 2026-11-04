@@ -27,7 +27,7 @@
 
 <section class="panel">
   <h2>Start apply run</h2>
-  <p class="hint">Engines arrive with PR #5 (engine selection); current main applies with Claude.</p>
+  <p class="hint">Runs launched here use the engine the CLI resolves: AUTOAPPLY_ENGINE from Settings, defaulting to claude.</p>
   <form method="post" action="/runs/start" class="run-form">
     <input type="hidden" name="kind" value="apply">
     <label>Limit <input type="number" name="limit" min="0" max="500" placeholder="1"></label>
