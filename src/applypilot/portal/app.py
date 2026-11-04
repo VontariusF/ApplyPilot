@@ -315,7 +315,8 @@ def create_app() -> FastAPI:
 
     @app.get("/onboarding/stream")
     async def onboarding_stream():
-        return EventSourceResponse(_stream_chat())
+        baseline = _chat_signature()  # snap at connect; pushes are change-only
+        return EventSourceResponse(_stream_chat(baseline))
 
     @app.post("/onboarding/start")
     async def onboarding_start(request: Request):
@@ -531,37 +532,42 @@ def _chat_html() -> str:
         **_onboarding_context())
 
 
-async def _stream_chat() -> AsyncIterator[dict]:
+def _chat_signature() -> tuple:
+    """Cheap fingerprint of the chat surface inputs (state, gate, provider)."""
+    state = onboarding.load_state()
+    if state is None:
+        file_sig = None
+    else:
+        try:
+            mtime = os.path.getmtime(config.ONBOARDING_STATE_PATH)
+        except OSError:
+            mtime = None
+        file_sig = (mtime, state.phase, len(state.messages))
+    return (file_sig, onboarding.provider_ready(),
+            engine_auth.claude_status().state)
+
+
+async def _stream_chat(last: tuple) -> AsyncIterator[dict]:
     """SSE generator: the onboarding chat partial, re-pushed on any change.
 
     The signature watches both the state file (new messages, phase) and
     the gate (sign-in flip, provider config) so a signed-in flip swaps the
-    gate card for the interview without a manual reload. Idle-closes a
-    few seconds after the last change; the next POST re-anchors the DOM.
+    gate card for the interview without a manual reload. The route snaps
+    the baseline at connect time and the page renders the current surface
+    server-side, so the stream only pushes on CHANGE — reconnects after
+    the idle close stay swap-free (identical content would otherwise
+    replace the DOM out from under an in-flight click). Idle-closes a few
+    seconds after the last change; the next POST re-anchors the DOM.
     """
-    def signature() -> tuple:
-        state = onboarding.load_state()
-        if state is None:
-            file_sig = None
-        else:
-            try:
-                mtime = os.path.getmtime(config.ONBOARDING_STATE_PATH)
-            except OSError:
-                mtime = None
-            file_sig = (mtime, state.phase, len(state.messages))
-        return (file_sig, onboarding.provider_ready(),
-                engine_auth.claude_status().state)
-
-    last: tuple | None = None
     idle = 0
     while idle < CHAT_IDLE_POLLS_BEFORE_CLOSE:
-        sig = signature()
+        await asyncio.sleep(CHAT_POLL_SECONDS)
+        sig = _chat_signature()
         if sig != last:
             last, idle = sig, 0
             yield {"event": "chat", "data": _chat_html()}
         else:
             idle += 1
-        await asyncio.sleep(CHAT_POLL_SECONDS)
     yield {"event": "end", "data": "closed"}
 
 

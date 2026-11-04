@@ -213,49 +213,40 @@ def test_redo_from_done(portal_client, monkeypatch, fake_claude):
 # SSE stream
 # ---------------------------------------------------------------------------
 
-def collect_stream(secs: float = 0.05):
-    """Drive _stream_chat: initial push, then a state flip, then close."""
-    async def drive():
-        events = []
-
-        async def consume(n):
-            for _ in range(n):
-                events.append(await agen.__anext__())
-
-        agen = portal_app._stream_chat()
-        await consume(1)  # initial push for the current state
-        onboarding.start_interview("claude")  # flips the signature mid-stream
-        await consume(1)  # the change push
-        await agen.aclose()
-        return events
-
-    return asyncio.run(drive())
-
-
 def test_stream_pushes_partial_on_state_change(portal_client, monkeypatch,
                                                fake_claude):
     client, _ = portal_client
     patch_gates(monkeypatch, claude=SIGNED_IN)
     monkeypatch.setattr(portal_app, "CHAT_POLL_SECONDS", 0.05)
 
-    events = collect_stream()
-    assert len(events) == 2
-    assert events[0]["event"] == "chat"
-    assert "Start the interview" in events[0]["data"]  # pre-start state
-    assert "Tell me about your background" in events[1]["data"]  # kickoff ran
+    async def drive():
+        agen = portal_app._stream_chat(portal_app._chat_signature())
+        try:
+            # The page renders the current surface server-side; the stream
+            # pushes only on change. Flip the state, expect exactly one push.
+            onboarding.start_interview("claude")
+            event = await agen.__anext__()
+        finally:
+            await agen.aclose()
+        return event
+
+    event = asyncio.run(drive())
+    assert event["event"] == "chat"
+    assert "Tell me about your background" in event["data"]  # kickoff ran
 
 
-def test_stream_closes_after_idle(portal_client, monkeypatch, fake_claude):
+def test_stream_closes_after_idle_without_pushes(portal_client, monkeypatch,
+                                                 fake_claude):
+    """No changes -> zero chat events (no swap churn on reconnect)."""
     client, _ = portal_client
     patch_gates(monkeypatch, claude=SIGNED_IN)
     monkeypatch.setattr(portal_app, "CHAT_POLL_SECONDS", 0.01)
 
     async def drive():
-        agen = portal_app._stream_chat()
+        agen = portal_app._stream_chat(portal_app._chat_signature())
         events = [e async for e in agen]  # runs to the idle close
         return events
 
-    onboarding.start_interview("claude")
+    onboarding.start_interview("claude")  # stable before the stream starts
     events = asyncio.run(drive())
-    assert events[-1]["event"] == "end"
-    assert all(e["event"] == "chat" for e in events[:-1])
+    assert events == [{"event": "end", "data": "closed"}]
