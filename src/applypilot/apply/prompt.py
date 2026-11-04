@@ -21,21 +21,25 @@ def redact_prompt_for_log(prompt: str) -> str:
     """Scrub credential values from a prompt before it is written to disk.
 
     S1: build_prompt never embeds the job-site password (it references the
-    browser profile instead), so prompts reaching ~/.applypilot/logs/ should
-    already be clean. This is the defense-in-depth boundary: any secret that
-    re-enters the prompt text through some other path is masked here, at the
-    only place prompts are persisted.
+    browser profile instead). S2/F1: the prompt *does* embed the CapSolver
+    API key verbatim (and can carry provider keys through custom-endpoint
+    diagnostics), so the configured secret values are redacted here too.
+    This is the defense-in-depth boundary: any credential in the prompt
+    text is masked here, at the only place prompts are persisted.
 
     A missing profile is a legitimate state (init not run yet) -- there is
-    simply nothing to redact. Corrupt profiles propagate: build_prompt would
-    fail on them too.
+    simply no password to redact. Env-derived secrets are redacted
+    regardless of the profile. Corrupt profiles propagate: build_prompt
+    would fail on them too.
     """
+    secrets = list(config.collect_secret_values())
     try:
         profile = config.load_profile()
     except FileNotFoundError:
-        return prompt
+        return redact_secret_values(prompt, secrets)
     personal = profile.get("personal", {})
-    return redact_secret_values(prompt, [personal.get("password", "")])
+    secrets.append(personal.get("password", ""))
+    return redact_secret_values(prompt, secrets)
 
 
 def _build_profile_summary(profile: dict) -> str:
