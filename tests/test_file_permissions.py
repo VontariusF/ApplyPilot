@@ -62,8 +62,13 @@ def test_load_env_tightens_loose_file(app_dir, monkeypatch):
     # Keep the CWD .env fallback from reading anything else / polluting env.
     monkeypatch.chdir(app_dir)
 
+    # load_env() mutates the real os.environ (untracked by monkeypatch), so
+    # snapshot and restore around it — a mid-test monkeypatch.delenv would
+    # record the polluted value and REINSTATE it at teardown.
+    env_snapshot = dict(os.environ)
     config.load_env()
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    os.environ.clear()
+    os.environ.update(env_snapshot)
 
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
 

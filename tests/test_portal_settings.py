@@ -2,12 +2,20 @@
 
 Spec D acceptance: settings write produces a 0600 file; no unmasked key
 appears in any settings response; unknown .env lines survive a save.
+Live-refresh acceptance (S2-2 / sweep F7): a save reaches the running
+process — os.environ, the LLM singleton, and spawned-run envs — with no
+restart.
 """
 
 import os
 import stat
+import sys
+import time
+from types import SimpleNamespace
 
-from applypilot import config
+from applypilot import config, llm
+from applypilot.portal import runner
+from applypilot.portal import app as portal_app_module
 from applypilot.portal import settings as settings_mod
 
 
@@ -96,3 +104,116 @@ def test_redact_for_render_strips_configured_keys(portal_env):
     )
     assert "gemini-live-key-xyz" not in text
     assert "[REDACTED]" in text
+
+
+# ---------------------------------------------------------------------------
+# Live refresh (S2-2 / sweep F7): a save reaches the running process
+# ---------------------------------------------------------------------------
+
+
+def _wait_for_status(run_id: str, timeout: float = 5.0) -> dict:
+    """Local copy of test_portal_runner.wait_for_status (self-contained modules)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        row = runner.get_run(run_id)
+        if row and row["status"] != "running":
+            return row
+        time.sleep(0.05)
+    row = runner.get_run(run_id)
+    assert row is not None and row["status"] != "running", f"run {run_id} never finished"
+    return row
+
+
+def test_settings_save_refreshes_process_env(portal_client, monkeypatch):
+    """Sweep B F7 acceptance: os.environ reflects saved keys after a save."""
+    client, _ = portal_client
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    # A var the file never held must survive a save untouched: the refresh
+    # is a selective override, not a wholesale file-to-env stomp.
+    monkeypatch.setenv("GEMINI_API_KEY", "exported-gemini-key")
+
+    r = client.post("/settings", data={"LLM_PROVIDER": "openai",
+                                       "OPENAI_API_KEY": "sk-live-1234"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert os.environ["LLM_PROVIDER"] == "openai"
+    assert os.environ["OPENAI_API_KEY"] == "sk-live-1234"
+    assert os.environ["GEMINI_API_KEY"] == "exported-gemini-key"
+
+    # Clearing a text/choice key removes it from the process env too.
+    client.post("/settings", data={"LLM_PROVIDER": ""})
+    assert "LLM_PROVIDER" not in os.environ
+
+    # The saved banner states the live behavior (F7's missing-hint gap).
+    page = client.get("/settings?saved=1").text
+    assert "applied to the running portal" in page
+
+
+def test_single_job_rescore_uses_saved_provider(portal_client, monkeypatch):
+    """Sweep A S2-2 acceptance: a save resets the LLM singleton, so the next
+    in-process rescore rebuilds from the refreshed env — no restart."""
+    client, _ = portal_client
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    # Singleton as if built at portal startup under the old config.
+    monkeypatch.setattr(llm, "_instance",
+                        SimpleNamespace(provider_name="stale", api_key="stale-key"))
+
+    r = client.post("/settings", data={"LLM_PROVIDER": "openai",
+                                       "OPENAI_API_KEY": "sk-live-1234"})
+    assert r.status_code == 200
+
+    captured: dict = {}
+
+    def fake_run_scoring(url: str):
+        fresh = llm.get_client()
+        captured["provider"] = fresh.provider_name
+        captured["api_key"] = fresh.api_key
+        captured["http"] = fresh._client
+
+    monkeypatch.setattr(portal_app_module, "run_scoring", fake_run_scoring)
+    r = client.post("/jobs/rescore", data={"url": "https://jobs.example.com/123"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert captured["provider"] == "openai"
+    assert captured["api_key"] == "sk-live-1234"
+    captured["http"].close()
+
+
+def test_settings_save_visible_to_spawned_run_env(portal_env, portal_client, monkeypatch):
+    """Sweep A S2-2 acceptance: spawned runs inherit saved values.
+
+    runner.start_run copies os.environ at spawn; a save must reach the
+    next run's environment without a portal restart.
+    """
+    client, _ = portal_client
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+
+    r = client.post("/settings", data={"LLM_PROVIDER": "openai"})
+    assert r.status_code == 200
+
+    row = runner.start_run(
+        "pipeline", {},
+        command=[sys.executable, "-c",
+                 "import os; print('PROBE:' + os.environ.get('LLM_PROVIDER', '<unset>'))"],
+        emit_jsonl=False,
+    )
+    final = _wait_for_status(row["id"])
+    assert final["status"] == "completed"
+    log_text = (portal_env / "runs" / f"{row['id']}.log").read_text(encoding="utf-8")
+    assert "PROBE:openai" in log_text
+
+
+def test_llm_reset_client_drops_singleton(monkeypatch):
+    """reset_client drops the singleton; get_client rebuilds from the env."""
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "ok-after-reset")
+    stale = SimpleNamespace(provider_name="stale")
+    monkeypatch.setattr(llm, "_instance", stale)
+
+    llm.reset_client()
+    fresh = llm.get_client()
+    assert fresh is not stale
+    assert fresh.provider_name == "openai"
+    assert fresh.api_key == "ok-after-reset"
+    fresh._client.close()

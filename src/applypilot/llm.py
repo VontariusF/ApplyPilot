@@ -542,3 +542,19 @@ def get_client() -> LLMClient:
                 log.info("LLM provider: %s (%s)  model: %s", label, base_url, model)
                 _instance = LLMClient(base_url, model, api_key, provider_name=label)
     return _instance
+
+
+def reset_client() -> None:
+    """Drop the singleton so the next get_client() re-reads the environment.
+
+    Settings saves call this after refreshing os.environ (S2-2 / sweep F7):
+    a saved provider, model, or key must reach the next scoring/rescore
+    call without a portal restart. The dropped client is deliberately not
+    close()d — an in-flight chat may still hold it, and closing under its
+    feet would turn a save into a spurious request error; the abandoned
+    connection pool is reclaimed by GC instead.
+    """
+    global _instance
+    with _instance_lock:
+        _instance = None
+

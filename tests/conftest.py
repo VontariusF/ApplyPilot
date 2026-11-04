@@ -80,6 +80,11 @@ def portal_env(app_dir, tmp_path, monkeypatch):
     """Full portal isolation: repointed paths, clean env, fresh writers."""
     from applypilot.apply import eventlog
 
+    # Settings saves live-refresh os.environ since S2-2 (that is the fix),
+    # so snapshot around each portal test — a saved key must not leak into
+    # other tests sharing the interpreter.
+    env_snapshot = dict(os.environ)
+
     db_path = app_dir / "applypilot.db"
     monkeypatch.setattr(database, "DB_PATH", db_path)
     monkeypatch.delenv("APPLYPILOT_EVENT_LOG", raising=False)
@@ -87,6 +92,8 @@ def portal_env(app_dir, tmp_path, monkeypatch):
     yield app_dir
     database.close_connection(str(db_path))
     eventlog.reset_writer_cache()
+    os.environ.clear()
+    os.environ.update(env_snapshot)
 
 
 @pytest.fixture()

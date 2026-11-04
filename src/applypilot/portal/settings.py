@@ -11,7 +11,7 @@ config.write_secret_text so the file is 0600 (S2). Field semantics:
 
 import os
 
-from applypilot import config
+from applypilot import config, llm
 from applypilot.security import REDACTED, redact_secret_values
 
 # The .env surface the portal manages, in display order. kind: "secret"
@@ -158,10 +158,18 @@ def _merge_env_text(text: str, sets: dict[str, str], drops: set[str]) -> str:
 
 
 def apply_settings(form: dict[str, str]) -> dict[str, str]:
-    """Merge a settings submission into the .env file at 0600.
+    """Merge a settings submission into the .env file at 0600, then apply
+    the delta to the running process (S2-2 / sweep F7).
 
-    Preserves comments and unrecognized lines. Returns the resulting
-    key/value map (raw, in-memory) for tests.
+    Preserves comments and unrecognized lines. The live refresh —
+    os.environ for the touched keys plus an LLM client reset — is what
+    makes a save take effect immediately: in-process consumers (rescore,
+    engine gates) read os.environ at call time and spawned runs inherit
+    it, so no restart is needed. This is the single write path for the
+    .env surface; anything that stores a key (settings page, the Droid
+    key card) goes through here and gets the refresh for free.
+
+    Returns the resulting key/value map (raw, in-memory) for tests.
     """
     values, cleared = _parse_form(form)
     sets, drops = _effective_changes(values, cleared)
@@ -170,7 +178,26 @@ def apply_settings(form: dict[str, str]) -> dict[str, str]:
     else:
         text = "# ApplyPilot configuration\n"
     config.write_secret_text(config.ENV_PATH, _merge_env_text(text, sets, drops))
+    _refresh_process_env(sets, drops)
     return read_env_file()
+
+
+def _refresh_process_env(sets: dict[str, str], drops: set[str]) -> None:
+    """Apply a settings delta to the running portal process (S2-2 / F7).
+
+    Writing .env alone leaves the portal stale until restart: in-process
+    consumers read os.environ at call time and runner.start_run copies it
+    for spawned children. Selective override — only the keys this save
+    touched — keeps startup semantics intact (an exported var the file
+    never held is not stomped) and is the ONE owner of env refresh: no
+    call site may re-implement it. The LLM singleton is dropped with the
+    same delta so the next get_client() rebuilds from the new values.
+    """
+    for key, val in sets.items():
+        os.environ[key] = val
+    for key in drops:
+        os.environ.pop(key, None)
+    llm.reset_client()
 
 
 def collect_secret_values() -> list[str]:
