@@ -92,7 +92,7 @@ Each stage is independent. Run them all or pick what you need.
 | Node.js 18+ | Auto-apply | Needed for `npx` to run Playwright MCP server |
 | Gemini API key | Scoring, tailoring, cover letters | Free tier (15 RPM / 1M tokens/day) is enough |
 | Chrome/Chromium | Auto-apply | Auto-detected on most systems |
-| Claude Code CLI | Auto-apply | Install from [claude.ai/code](https://claude.ai/code) |
+| Claude Code CLI | Auto-apply (default engine) | Install from [claude.ai/code](https://claude.ai/code) |
 
 **Gemini API key is free.** Get one at [aistudio.google.com](https://aistudio.google.com). OpenAI and local models (Ollama/llama.cpp) are also supported.
 
@@ -100,6 +100,7 @@ Each stage is independent. Run them all or pick what you need.
 
 | Component | What It Does |
 |-----------|-------------|
+| Factory Droid CLI | Alternative auto-apply engine (`applypilot apply --engine droid`). Authenticates with `FACTORY_API_KEY`. Claude Code remains the default |
 | CapSolver API key | Solves CAPTCHAs during auto-apply (hCaptcha, reCAPTCHA, Turnstile, FunCaptcha). Without it, CAPTCHA-blocked applications just fail gracefully |
 
 > **Note:** python-jobspy is installed separately with `--no-deps` because it pins an exact numpy version in its metadata that conflicts with pip's resolver. It works fine with modern numpy at runtime.
@@ -184,6 +185,26 @@ Claude Code launches a Chrome instance, navigates to each application page, dete
 
 The Playwright MCP server is configured automatically at runtime per worker. No manual MCP setup needed.
 
+#### Engines
+
+The auto-apply agent is an engine behind a small adapter interface; pick it per run:
+
+```bash
+applypilot apply --engine claude   # default: Claude Code CLI
+applypilot apply --engine droid    # Factory Droid CLI (needs FACTORY_API_KEY)
+export AUTOAPPLY_ENGINE=droid      # or set it as the default in ~/.applypilot/.env
+```
+
+`--model` is passed through **verbatim** to whichever engine is selected — Claude model ids for Claude, Droid model ids for Droid. Droid's `custom:<name>` models (defined in `~/.factory/config.json` with their own base URL and API key) are how Gemini models run without a machine-local Gemini key: Droid holds that credential, ApplyPilot only ever sees the model name.
+
+Droid specifics:
+
+- **Auth:** the child process gets `FACTORY_API_KEY` in its environment only — never in prompts or logs. `applypilot apply --engine droid` exits with a readable error if it is unset.
+- **MCP config:** Droid reads one global `~/.factory/mcp.json` (unlike Claude's per-invocation `--mcp-config`). ApplyPilot merges its `playwright` + `gmail` servers into that file (preserving any user-added servers, writing mode `0600`) and bakes the per-worker CDP port into the Playwright args. Because that port is global per machine-config, **Droid runs are serialized to one worker** — `--workers N` is honored for Claude and clamped to 1 for Droid in this release.
+- **Permissions:** Droid runs with `--auto medium` and an explicit `--enabled-tools` allowlist covering only the Playwright and Gmail MCP servers.
+
+> **Note:** the Droid adapter is written against Factory's documented CLI surface (`droid exec`, `--output-format json`, its JSON event shapes). It has not yet been exercised against a real `droid` binary in CI; if Factory's actual event format or tool naming differs, the adapter's normalization layer (`src/applypilot/apply/droid.py`) is the single place to update.
+
 ```bash
 # Utility modes (no Chrome/Claude needed)
 applypilot apply --mark-applied URL    # manually mark a job as applied
@@ -208,6 +229,8 @@ applypilot run --validation lenient     # Relax validation (recommended for Gemi
 applypilot run --validation strict      # Strictest validation (retries on any banned word)
 applypilot apply                        # Launch auto-apply
 applypilot apply --workers 3            # Parallel browser workers
+applypilot apply --engine droid         # Auto-apply with the Factory Droid engine
+applypilot apply --model custom:gemini-flash  # Model id passed verbatim to the engine
 applypilot apply --dry-run              # Fill forms without submitting
 applypilot apply --continuous           # Run forever, polling for new jobs
 applypilot apply --headless             # Headless browser mode

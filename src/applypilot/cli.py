@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 import typer
@@ -147,7 +148,17 @@ def apply(
     limit: Optional[int] = typer.Option(None, "--limit", "-l", help="Max applications to submit."),
     workers: int = typer.Option(1, "--workers", "-w", help="Number of parallel browser workers."),
     min_score: int = typer.Option(7, "--min-score", help="Minimum fit score for job selection."),
-    model: str = typer.Option("haiku", "--model", "-m", help="Claude model name."),
+    engine: Optional[str] = typer.Option(
+        None, "--engine",
+        help=("Auto-apply engine: 'claude' (Claude Code, default) or 'droid' (Factory "
+              "Droid). Falls back to the AUTOAPPLY_ENGINE env var, then 'claude'."),
+    ),
+    model: str = typer.Option(
+        "haiku", "--model", "-m",
+        help=("Model id passed verbatim to the selected engine: Claude model ids for "
+              "claude; Droid model ids (including custom:<name> entries from "
+              "~/.factory/config.json) for droid."),
+    ),
     continuous: bool = typer.Option(False, "--continuous", "-c", help="Run forever, polling for new jobs."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview actions without submitting."),
     headless: bool = typer.Option(False, "--headless", help="Run browsers in headless mode."),
@@ -159,6 +170,16 @@ def apply(
     reset_failed: bool = typer.Option(False, "--reset-failed", help="Reset all failed jobs for retry."),
 ) -> None:
     """Launch auto-apply to submit job applications."""
+    # Engine resolution first — a bad name should fail readably before any
+    # bootstrap side effects.
+    from applypilot.apply.engines import resolve_engine_name
+
+    try:
+        engine_name = resolve_engine_name(engine)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+
     _bootstrap()
 
     from applypilot.config import check_tier, PROFILE_PATH as _profile_path
@@ -186,7 +207,15 @@ def apply(
 
     # --- Full apply mode ---
 
-    # Check 1: Tier 3 required (Claude Code CLI + Chrome)
+    # Check 0: the droid engine needs its credential before anything starts
+    if engine_name == "droid" and not os.environ.get("FACTORY_API_KEY"):
+        console.print(
+            "[red]FACTORY_API_KEY is not set.[/red] The droid engine authenticates with "
+            "FACTORY_API_KEY — add it to ~/.applypilot/.env or export it."
+        )
+        raise typer.Exit(code=1)
+
+    # Check 1: Tier 3 required (an engine CLI + Chrome)
     check_tier(3, "auto-apply")
 
     # Check 2: Profile exists
@@ -211,23 +240,18 @@ def apply(
             raise typer.Exit(code=1)
 
     if gen:
-        from applypilot.apply.launcher import gen_prompt, BASE_CDP_PORT
+        from applypilot.apply.launcher import gen_prompt, manual_command
         target = url or ""
         if not target:
             console.print("[red]--gen requires --url to specify which job.[/red]")
             raise typer.Exit(code=1)
-        prompt_file = gen_prompt(target, min_score=min_score, model=model)
-        if not prompt_file:
+        generated = gen_prompt(target, min_score=min_score, model=model, engine=engine_name)
+        if not generated:
             console.print("[red]No matching job found for that URL.[/red]")
             raise typer.Exit(code=1)
-        mcp_path = _profile_path.parent / ".mcp-apply-0.json"
-        console.print(f"[green]Wrote prompt to:[/green] {prompt_file}")
+        console.print(f"[green]Wrote prompt to:[/green] {generated}")
         console.print(f"\n[bold]Run manually:[/bold]")
-        console.print(
-            f"  claude --model {model} -p "
-            f"--mcp-config {mcp_path} "
-            f"--permission-mode bypassPermissions < {prompt_file}"
-        )
+        console.print(f"  {manual_command(engine_name, generated, model)}")
         return
 
     from applypilot.apply.launcher import main as apply_main
@@ -237,6 +261,7 @@ def apply(
     console.print("\n[bold blue]Launching Auto-Apply[/bold blue]")
     console.print(f"  Limit:    {'unlimited' if continuous else effective_limit}")
     console.print(f"  Workers:  {workers}")
+    console.print(f"  Engine:   {engine_name}")
     console.print(f"  Model:    {model}")
     console.print(f"  Headless: {headless}")
     console.print(f"  Dry run:  {dry_run}")
@@ -253,6 +278,7 @@ def apply(
         dry_run=dry_run,
         continuous=continuous,
         workers=workers,
+        engine=engine_name,
     )
 
 
@@ -393,13 +419,21 @@ def doctor() -> None:
         results.append(("LLM provider", fail_mark, str(exc)))
 
     # --- Tier 3 checks ---
-    # Claude Code CLI
+    # Claude Code CLI (default engine)
     claude_bin = shutil.which("claude")
     if claude_bin:
         results.append(("Claude Code CLI", ok_mark, claude_bin))
     else:
         results.append(("Claude Code CLI", fail_mark,
                         "Install from https://claude.ai/code (needed for auto-apply)"))
+
+    # Factory Droid CLI (optional second engine)
+    droid_bin = shutil.which("droid")
+    if droid_bin:
+        results.append(("Factory Droid CLI", ok_mark, droid_bin))
+    else:
+        results.append(("Factory Droid CLI", warn_mark,
+                        "Install from https://docs.factory.ai/cli (only needed for --engine droid)"))
 
     # Chrome
     try:
@@ -425,6 +459,14 @@ def doctor() -> None:
         results.append(("CapSolver API key", "[dim]optional[/dim]",
                         "Set CAPSOLVER_API_KEY in .env for CAPTCHA solving"))
 
+    # FACTORY_API_KEY (optional, droid engine)
+    factory_key = os.environ.get("FACTORY_API_KEY")
+    if factory_key:
+        results.append(("FACTORY_API_KEY", ok_mark, "Droid engine auth available"))
+    else:
+        results.append(("FACTORY_API_KEY", "[dim]optional[/dim]",
+                        "Set FACTORY_API_KEY in .env to use --engine droid"))
+
     # --- Render results ---
     console.print()
     console.print("[bold]ApplyPilot Doctor[/bold]\n")
@@ -443,9 +485,9 @@ def doctor() -> None:
 
     if tier == 1:
         console.print("[dim]  → Tier 2 unlocks: scoring, tailoring, cover letters (needs an LLM provider — run 'applypilot init')[/dim]")
-        console.print("[dim]  → Tier 3 unlocks: auto-apply (needs Claude Code CLI + Chrome + Node.js)[/dim]")
+        console.print("[dim]  → Tier 3 unlocks: auto-apply (needs Claude Code or Droid CLI + Chrome + Node.js)[/dim]")
     elif tier == 2:
-        console.print("[dim]  → Tier 3 unlocks: auto-apply (needs Claude Code CLI + Chrome + Node.js)[/dim]")
+        console.print("[dim]  → Tier 3 unlocks: auto-apply (needs Claude Code or Droid CLI + Chrome + Node.js)[/dim]")
 
     console.print()
 
