@@ -5,6 +5,8 @@ import platform
 import shutil
 from pathlib import Path
 
+from applypilot import engine_auth
+
 # User data directory — all user-specific files live here
 APP_DIR = Path(os.environ.get("APPLYPILOT_DIR", Path.home() / ".applypilot"))
 
@@ -274,27 +276,56 @@ def _llm_configured() -> bool:
     return any(os.environ.get(k) for k in _LLM_ENV_KEYS)
 
 
+def _engine_gap_messages() -> list[str]:
+    """Human-readable reasons the auto-apply engine is not ready (tier 3).
+
+    Distinguishes the two states the old binary-presence check blurred:
+    an installed-but-unsigned-in CLI, and an installed Droid whose
+    FACTORY_API_KEY is missing. Pure so tests can pin the messages.
+    """
+    claude = engine_auth.claude_status()
+    droid = engine_auth.droid_status()
+    if claude.state == engine_auth.NOT_INSTALLED and droid.state == engine_auth.NOT_INSTALLED:
+        return [
+            "An auto-apply engine CLI — Claude Code ([bold]https://claude.ai/code[/bold], "
+            "default) or Factory Droid ([bold]https://docs.factory.ai/cli[/bold])"
+        ]
+    gaps: list[str] = []
+    if claude.state == engine_auth.SIGNED_OUT:
+        msg = "Claude Code sign-in — the CLI is installed but not signed in; run [bold]claude auth login[/bold]"
+        if claude.error:
+            msg += f" ({claude.error})"
+        gaps.append(msg)
+    if droid.state == engine_auth.SIGNED_OUT:
+        gaps.append("FACTORY_API_KEY — the Droid CLI is installed; add the key to ~/.applypilot/.env to use it")
+    return gaps
+
+
 def get_tier() -> int:
     """Detect the current tier based on available dependencies.
 
     Tier 1 (Discovery):            Python + pip
     Tier 2 (AI Scoring & Tailoring): + LLM API key
-    Tier 3 (Full Auto-Apply):       + Claude Code or Droid CLI + Chrome
+    Tier 3 (Full Auto-Apply):       + a signed-in engine (Claude Code
+                                    authenticated via `claude auth status`,
+                                    or Droid with FACTORY_API_KEY) + Chrome
     """
     load_env()
 
     if not _llm_configured():
         return 1
 
-    has_claude = shutil.which("claude") is not None
-    has_droid = shutil.which("droid") is not None
+    engine_ready = (
+        engine_auth.claude_status().state == engine_auth.SIGNED_IN
+        or engine_auth.droid_status().state == engine_auth.SIGNED_IN
+    )
     try:
         get_chrome_path()
         has_chrome = True
     except FileNotFoundError:
         has_chrome = False
 
-    if (has_claude or has_droid) and has_chrome:
+    if engine_ready and has_chrome:
         return 3
 
     return 2
@@ -318,11 +349,7 @@ def check_tier(required: int, feature: str) -> None:
     if required >= 2 and not _llm_configured():
         missing.append("LLM configuration — run [bold]applypilot init[/bold] or set LLM_PROVIDER / GEMINI_API_KEY")
     if required >= 3:
-        if not shutil.which("claude") and not shutil.which("droid"):
-            missing.append(
-                "An auto-apply engine CLI — Claude Code ([bold]https://claude.ai/code[/bold], "
-                "default) or Factory Droid ([bold]https://docs.factory.ai/cli[/bold])"
-            )
+        missing.extend(_engine_gap_messages())
         try:
             get_chrome_path()
         except FileNotFoundError:
