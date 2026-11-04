@@ -130,7 +130,10 @@ def test_dismiss_then_undo_roundtrip(
             await page.goto(f"{base}/jobs")
             board = page.locator("#jobs-board")
             await page.get_by_role("button", name="Dismiss").click()
-            await board.locator(".dismissed-section .job-card").wait_for()
+            # The dismissed section renders collapsed; the moved card exists
+            # in the DOM (attached) before the section is opened.
+            await board.locator(".dismissed-section .job-card").wait_for(
+                state="attached")
             # Undo restores the card to the MAIN grid — scope by direct child:
             # the dismissed section nests its own .card-grid.
             await board.locator(".dismissed-section summary").click()
