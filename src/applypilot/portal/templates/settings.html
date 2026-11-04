@@ -38,7 +38,7 @@
   <p class="dim">Provider, keys, and auto-apply configuration. Secrets are stored masked in <code>~/.applypilot/.env</code>.</p>
 </div>
 
-{% if saved %}<p class="alert success">Settings saved to <code>~/.applypilot/.env</code> (0600).</p>{% endif %}
+{% if saved %}<p class="alert success">Settings saved to <code>~/.applypilot/.env</code> (0600) and applied to the running portal — no restart needed.</p>{% endif %}
 
 <form method="post" action="/settings" class="settings-form">
   <section class="panel">
