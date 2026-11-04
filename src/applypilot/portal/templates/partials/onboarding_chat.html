@@ -211,14 +211,43 @@
     {{ transcript(state) }}
   </section>
   <section class="panel">
-    <h2>Here's the profile I'll save — profile.md</h2>
-    {% if missing %}
-      <p class="dim">Not provided yet (you can add these later in Settings, they don't block):
-         {{ missing | join(", ") }}</p>
+    <h2>Review your profile</h2>
+    <p class="dim">Change anything below, then confirm. Empty fields stay empty —
+       nothing is filled in for you.</p>
+    {% set needs = review_fields | selectattr("needs_answer") | list %}
+    {% if needs %}
+      <div class="needs-answer-chips">
+        {% for row in needs %}
+          <a class="chip needs-answer" href="#review-{{ row.spec.id }}">{{ row.spec.prompt }}</a>
+        {% endfor %}
+      </div>
     {% endif %}
-    <pre class="profile-preview">{{ profile_md }}</pre>
-    <p class="dim">Confirming writes <code>profile.json</code>, <code>profile.md</code> and
-       <code>searches.yaml</code>, then unlocks the jobs board.</p>
+    <form hx-post="/onboarding/review" hx-target="#onboarding-surface" hx-swap="outerHTML"
+          hx-indicator="#chat-busy" class="review-form">
+      {% for row in review_fields %}
+        {% set spec = row.spec %}
+        <div class="review-field{{ ' needs-answer' if row.needs_answer }}">
+          <label for="answer-{{ spec.id }}">{{ spec.prompt }}</label>
+          {% if spec.choices %}
+            <select id="answer-{{ spec.id }}" name="answer_{{ spec.id }}">
+              <option value="" {{ 'selected' if not row.value }}>— not answered —</option>
+              {% for c in spec.choices %}
+                <option value="{{ c.value }}" {{ 'selected' if c.value == row.value }}>{{ c.label }}</option>
+              {% endfor %}
+            </select>
+          {% elif spec.free_text_kind == "multiline" %}
+            <textarea id="answer-{{ spec.id }}" name="answer_{{ spec.id }}" rows="2">{{ row.value }}</textarea>
+          {% elif spec.free_text_kind == "number" %}
+            <input id="answer-{{ spec.id }}" type="number" name="answer_{{ spec.id }}" value="{{ row.value }}">
+          {% elif spec.free_text_kind == "date" %}
+            <input id="answer-{{ spec.id }}" type="date" name="answer_{{ spec.id }}" value="{{ row.value }}">
+          {% else %}
+            <input id="answer-{{ spec.id }}" type="text" name="answer_{{ spec.id }}" value="{{ row.value }}">
+          {% endif %}
+        </div>
+      {% endfor %}
+      <button>Save changes</button>
+    </form>
     <div class="gate-actions">
       <form hx-post="/onboarding/confirm" hx-target="#onboarding-surface" hx-swap="outerHTML" class="inline-form">
         <button>Confirm</button>

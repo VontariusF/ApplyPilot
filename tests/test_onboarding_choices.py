@@ -587,3 +587,75 @@ def test_choice_answers_stay_out_of_the_transcript_typed_chat_shows(portal_clien
     page = client.post("/onboarding/send", data={"text": "Why does this matter for the search?"}).text
     assert "Why does this matter for the search?" in page
     assert "chat-msg user" in page
+
+
+
+# ---------------------------------------------------------------------------
+# The review form: prefilled widgets, needs-answer chips, quiet edits
+
+def test_review_form_renders_prefilled_with_needs_answer_chips(portal_client, fake_llm, monkeypatch):
+    client, _ = portal_client
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    _start(client)
+    walk = {**FULL_WALK, "education": None, "linkedin_url": None}
+    _walk(client, walk)
+    page = client.get("/onboarding/chat").text
+
+    assert "Review your profile" in page
+    # Answered questions prefill their widgets; skipped ones stay empty.
+    assert '<option value="yes" selected>' in page
+    assert 'id="answer-salary_band"' in page and 'value="120000"' in page
+    assert 'id="answer-education"' in page and 'selected>— not answered —' in page
+    assert 'id="answer-linkedin_url"' in page and 'value=""' in page
+
+    # Needs-answer chips link to the flagged fields (education feeds a
+    # flagged path; the optional LinkedIn does not).
+    assert 'href="#review-education"' in page
+    assert 'href="#review-linkedin_url"' not in page
+    # The answered required fields raise no chips.
+    assert 'href="#review-work_authorized"' not in page
+
+
+def test_review_update_route_validates_and_saves_quietly(portal_client, fake_llm, monkeypatch):
+    client, _ = portal_client
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    _start(client)
+    _walk(client, FULL_WALK)
+
+    # A value outside the choice list is rejected — nothing stored.
+    page = client.post("/onboarding/review", data={"answer_work_authorized": "hacked"}).text
+    assert "alert error" in page
+    assert onboarding.load_state().answers["work_authorized"] == "yes"
+
+    # A valid edit saves and stays in review (no agent turn ran).
+    page = client.post("/onboarding/review", data={"answer_education": "Master's"}).text
+    assert onboarding.load_state().phase == onboarding.REVIEW
+    assert onboarding.load_state().answers["education"] == "Master's"
+    assert '<option value="Master&#39;s" selected>' in page
+    assert 'href="#review-education"' not in page  # the chip cleared
+
+
+def test_review_cleared_answer_stays_empty_through_confirm(portal_client, fake_llm, monkeypatch):
+    client, _ = portal_client
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    _start(client)
+    # Skip the GATED question: the fabrication guard holds it at "" through
+    # confirm — the agent's extraction may never fill a yes/no the user
+    # declined (PR #22 guard, confirm behavior unchanged).
+    walk = {**FULL_WALK, "work_authorized": None}
+    _walk(client, walk)
+    assert onboarding.load_state().answers["work_authorized"] == ""
+
+    # The review form renders the gated widget empty — never prefilled —
+    # and flags it with a needs-answer chip.
+    page = client.get("/onboarding/chat").text
+    assert 'href="#review-work_authorized"' in page
+    select = re.search(r'<select id="answer-work_authorized"[^>]*>.*?</select>', page, re.S)
+    assert select
+    # Exactly one selected option, and it is the empty "not answered" one.
+    assert select.group(0).count(" selected") == 1
+    assert '<option value="" selected>— not answered —</option>' in select.group(0)
+
+    client.post("/onboarding/confirm")
+    profile = json.loads(config.PROFILE_PATH.read_text())
+    assert profile["work_authorization"]["legally_authorized_to_work"] == ""

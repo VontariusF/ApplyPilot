@@ -667,16 +667,28 @@ pre.logview {
 .htmx-request .htmx-indicator, .htmx-request.htmx-indicator { display: inline; }
 .resume-upload summary { cursor: pointer; color: var(--ink-2); font-size: var(--text-sm); }
 .resume-form { display: flex; flex-direction: column; gap: var(--space-2); margin-top: var(--space-2); }
-.profile-preview {
-  background: var(--code-bg);
-  border: 1px solid var(--line);
+.review-form { display: flex; flex-direction: column; gap: var(--space-3); margin: var(--space-3) 0; }
+.review-field { display: flex; flex-direction: column; gap: var(--space-1); max-width: 460px; }
+.review-field label { font-size: var(--text-sm); color: var(--ink-2); }
+.review-field select, .review-field input, .review-field textarea {
+  width: 100%;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
   border-radius: var(--radius);
-  padding: var(--space-3) var(--space-4);
-  white-space: pre-wrap;
-  font-size: var(--text-sm);
-  max-height: 420px;
-  overflow: auto;
+  padding: 8px var(--space-3);
 }
+.review-field.needs-answer > :first-child { color: var(--warn); }
+.needs-answer-chips { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-3); }
+.chip {
+  display: inline-block;
+  padding: 3px 12px;
+  border-radius: 999px;
+  font-size: var(--text-xs);
+  border: 1px solid transparent;
+}
+a.chip.needs-answer { background: var(--warn-bg); color: var(--warn); text-decoration: none; }
+a.chip.needs-answer:hover { filter: brightness(1.1); }
 .button-link.secondary { background: var(--surface); color: var(--ink); border-color: var(--line-strong); }
 .button-link.secondary:hover { background: var(--surface-2); }
 

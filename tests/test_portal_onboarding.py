@@ -131,7 +131,7 @@ def test_full_flow_start_send_confirm_writes_files(portal_client, monkeypatch,
     r = client.post("/onboarding/send",
                     data={"text": "Data engineer, Austin TX, $140k, authorized, no sponsorship"})
     assert r.status_code == 200
-    assert "profile.md" in r.text  # review card
+    assert "Review your profile" in r.text  # editable review form
     assert "Confirm" in r.text
 
     r = client.post("/onboarding/confirm")

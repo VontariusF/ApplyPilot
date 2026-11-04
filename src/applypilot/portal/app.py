@@ -824,6 +824,20 @@ def create_app() -> FastAPI:
         return _render(request, "partials/onboarding_surface.html",
                        **_onboarding_context(error=error))
 
+    @app.post("/onboarding/review")
+    async def onboarding_review(request: Request):
+        """Save review-form edits: quiet corrections, no agent turn."""
+        form = await request.form()
+        updates = {key.removeprefix("answer_"): str(value)
+                   for key, value in form.items() if key.startswith("answer_")}
+        error = ""
+        try:
+            await asyncio.to_thread(onboarding.update_answers, updates)
+        except onboarding.OnboardingError as exc:
+            error = str(exc)
+        return _render(request, "partials/onboarding_surface.html",
+                       **_onboarding_context(error=error))
+
     @app.post("/onboarding/confirm")
     async def onboarding_confirm(request: Request):
         error = ""
@@ -1290,10 +1304,6 @@ def _onboarding_context(error: str = "", login_error: str = "", login: int = 0,
     state = onboarding.load_state()
     ready = onboarding.readiness()
     in_review = state is not None and state.phase == onboarding.REVIEW
-    profile_md = ""
-    if in_review and state.profile_draft:
-        profile_md = onboarding.render_profile_md(
-            state.profile_draft, state.profile_draft.get("_applypilot_search", {}))
     login_process = engine_auth.active_login()
     in_interview = state is not None and state.phase == onboarding.INTERVIEW
     agent_led = in_interview and state.mode == onboarding.MODE_AGENT
@@ -1303,7 +1313,7 @@ def _onboarding_context(error: str = "", login_error: str = "", login: int = 0,
         "ready": ready,
         "provider_ready": onboarding.provider_ready(),
         "missing": onboarding.missing_review_fields(state.profile_draft) if in_review else [],
-        "profile_md": profile_md,
+        "review_fields": onboarding.review_fields(state) if in_review else [],
         "question": question,
         "agent_led": agent_led,
         "error": error,
