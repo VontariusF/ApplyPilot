@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Runs · ApplyPilot Portal{% endblock %}
+{% block content %}
+<h1>Runs</h1>
+
+{% if error %}<p class="alert error">{{ error }}</p>{% endif %}
+
+<section class="panel">
+  <h2>Start pipeline run</h2>
+  <form method="post" action="/runs/start" class="run-form">
+    <input type="hidden" name="kind" value="pipeline">
+    <label>Stages <input name="stages" placeholder="all (or: discover,enrich,score,tailor,cover,pdf)"></label>
+    <label>Min score <input type="number" name="min_score" min="0" max="10" value="7"></label>
+    <label>Workers <input type="number" name="workers" min="1" max="8" value="1"></label>
+    <label>Validation
+      <select name="validation">
+        <option value="normal">normal</option>
+        <option value="strict">strict</option>
+        <option value="lenient">lenient</option>
+      </select>
+    </label>
+    <label class="check"><input type="checkbox" name="stream" value="1"> stream stages</label>
+    <label class="check"><input type="checkbox" name="dry_run" value="1"> dry run</label>
+    <button type="submit">Start pipeline</button>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>Start apply run</h2>
+  <p class="hint">Engines arrive with PR #5 (engine selection); current main applies with Claude.</p>
+  <form method="post" action="/runs/start" class="run-form">
+    <input type="hidden" name="kind" value="apply">
+    <label>Limit <input type="number" name="limit" min="0" max="500" placeholder="1"></label>
+    <label>Workers <input type="number" name="workers" min="1" max="4" value="1"></label>
+    <label>Min score <input type="number" name="min_score" min="0" max="10" value="7"></label>
+    <label>Model <input name="model" placeholder="haiku" value="haiku"></label>
+    <label class="check"><input type="checkbox" name="dry_run" value="1"> dry run</label>
+    <label class="check"><input type="checkbox" name="headless" value="1"> headless</label>
+    <label class="check"><input type="checkbox" name="continuous" value="1"> continuous</label>
+    <button type="submit">Start apply</button>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>Run history</h2>
+  {% include "partials/runs_table.html" %}
+</section>
+{% endblock %}

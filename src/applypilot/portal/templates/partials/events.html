@@ -1,0 +1,9 @@
+{% if events %}
+<ul class="event-list">
+  {% for msg in events %}
+  <li>{{ msg }}</li>
+  {% endfor %}
+</ul>
+{% else %}
+<p class="empty">No events yet.</p>
+{% endif %}

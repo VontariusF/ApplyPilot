@@ -1,0 +1,22 @@
+{% if workers %}
+<div class="worker-grid">
+  {% for w in workers %}
+  <div class="worker-card {{ w.status | lower }}">
+    <div class="worker-head">
+      <span class="worker-id">W{{ w.worker_id }}</span>
+      <span class="badge {{ w.status | lower }}">{{ w.status }}</span>
+    </div>
+    <p class="worker-job">{{ (w.job_title or "—") | truncate(40) }} @ {{ (w.company or "—") | truncate(20) }}</p>
+    <p class="worker-meta">
+      score {{ w.score or 0 }} · {{ w.actions or 0 }} actions ·
+      <span class="ok">{{ w.jobs_applied or 0 }} ok</span> /
+      <span class="fail">{{ w.jobs_failed or 0 }} fail</span> ·
+      ${{ '%.3f' | format(w.total_cost or 0) }}
+    </p>
+    {% if w.last_action %}<p class="worker-last dim">{{ w.last_action | truncate(60) }}</p>{% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<p class="empty">Workers will appear here once the run starts.</p>
+{% endif %}

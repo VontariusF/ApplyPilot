@@ -67,3 +67,39 @@ def barrier():
     def make(n: int) -> threading.Barrier:
         return threading.Barrier(n)
     return make
+
+
+# ---------------------------------------------------------------------------
+# Portal fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def portal_env(app_dir, tmp_path, monkeypatch):
+    """Full portal isolation: repointed paths, clean env, fresh writers."""
+    from applypilot.apply import eventlog
+
+    db_path = app_dir / "applypilot.db"
+    monkeypatch.setattr(database, "DB_PATH", db_path)
+    monkeypatch.delenv("APPLYPILOT_EVENT_LOG", raising=False)
+    eventlog.reset_writer_cache()
+    yield app_dir
+    database.close_connection(str(db_path))
+    eventlog.reset_writer_cache()
+
+
+@pytest.fixture()
+def portal_client(portal_env, monkeypatch):
+    """Authenticated portal test client against the isolated store."""
+    from fastapi.testclient import TestClient
+
+    from applypilot.portal.app import create_app
+
+    # Speed up SSE idle-close in tests (generators read these at runtime).
+    from applypilot.portal import app as portal_app_module
+    monkeypatch.setattr(portal_app_module, "POLL_SECONDS", 0.01)
+
+    app = create_app()
+    client = TestClient(app, base_url="http://127.0.0.1")
+    client.headers["x-portal-token"] = app.state.token
+    yield client, app
+

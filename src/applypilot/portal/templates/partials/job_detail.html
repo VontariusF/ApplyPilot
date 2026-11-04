@@ -1,0 +1,50 @@
+<section class="panel job-detail">
+  <h2>{{ job.title or "(untitled)" }}
+    {% if job.fit_score is not none %}<span class="score-pill {{ 'hot' if job.fit_score >= 8 else 'warm' if job.fit_score >= 6 else 'cool' }}">{{ job.fit_score }}/10</span>{% endif %}
+  </h2>
+  <p class="dim">
+    {{ job.site or "unknown site" }} · {{ job.location or "location unknown" }}
+    {% if job.salary %} · {{ job.salary }}{% endif %}
+  </p>
+  <p><a href="{{ job.url }}" rel="noreferrer noopener" target="_blank">{{ job.url }}</a></p>
+  {% if job.application_url and job.application_url != job.url %}
+  <p class="dim">Application URL: {{ job.application_url }}</p>
+  {% endif %}
+
+  <h3>Score reasoning</h3>
+  <pre class="reasoning">{{ job.score_reasoning or "Not scored yet." }}</pre>
+
+  <h3>Documents</h3>
+  <ul>
+    <li>Tailored resume: {% if job.tailored_resume_path %}<code>{{ job.tailored_resume_path }}</code>{% else %}—{% endif %}</li>
+    <li>Cover letter: {% if job.cover_letter_path %}<code>{{ job.cover_letter_path }}</code>{% else %}—{% endif %}</li>
+  </ul>
+
+  <h3>Apply state</h3>
+  <ul class="kv">
+    <li><span>Status</span> <span>{% if job.apply_status %}<span class="badge {{ job.apply_status | lower }}">{{ job.apply_status }}</span>{% else %}—{% endif %}</span></li>
+    <li><span>Applied at</span> <span>{{ job.applied_at or "—" }}</span></li>
+    <li><span>Attempts</span> <span>{{ job.apply_attempts or 0 }}</span></li>
+    <li><span>Last attempted</span> <span>{{ job.last_attempted_at or "—" }}</span></li>
+    {% if job.apply_error %}<li><span>Error</span> <span class="error-text">{{ job.apply_error }}</span></li>{% endif %}
+    {% if job.agent_id %}<li><span>Agent</span> <span>{{ job.agent_id }}</span></li>{% endif %}
+  </ul>
+
+  <h3>Description</h3>
+  <pre class="description">{{ (job.full_description or job.description or "No description captured.") }}</pre>
+
+  <h3>Manual override</h3>
+  <div class="mark-actions">
+    <form method="post" action="/jobs/mark" class="inline-form">
+      <input type="hidden" name="url" value="{{ job.url }}">
+      <input type="hidden" name="status" value="applied">
+      <button type="submit" class="success">Mark applied</button>
+    </form>
+    <form method="post" action="/jobs/mark" class="inline-form mark-failed">
+      <input type="hidden" name="url" value="{{ job.url }}">
+      <input type="hidden" name="status" value="failed">
+      <input type="text" name="reason" placeholder="failure reason (optional)">
+      <button type="submit" class="danger">Mark failed</button>
+    </form>
+  </div>
+</section>
