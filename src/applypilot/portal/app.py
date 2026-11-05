@@ -1615,10 +1615,10 @@ async def _stream_chat(last: tuple) -> AsyncIterator[dict]:
     re-syncs a reconnecting page (see _stream_cards): a reconnect's fresh
     baseline already contains whatever changed while no stream listened
     (the ~8s idle close), so change-only pushes would swallow it. The
-    identical-content swap this costs on a no-change connect is the
-    accepted trade — the page's data-chat-seq version guard renders it a
-    no-op. Idle-closes a few seconds after the last change; the next
-    POST re-anchors the DOM.
+    identical-content push this costs on a no-change connect is dropped
+    by the page's data-chat-seq guard (same-seq pushes render identical
+    state, and dropping them protects in-flight user input). Idle-closes
+    a few seconds after the last change; the next POST re-anchors the DOM.
     """
     yield {"event": "chat", "data": await _chat_html()}  # initial sync (P2-2)
     idle = 0
