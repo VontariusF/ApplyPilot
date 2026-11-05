@@ -505,6 +505,30 @@ def test_claude_backend_session_opening_carries_the_system_prompt(
     assert onboarding.SYSTEM_PROMPT not in turns[1]["prompt"]
 
 
+def test_ack_turn_never_spends_the_pending_resume(app_dir, fake_llm):
+    """H3: pending_context is consumed exactly once, on the
+    question-asking turn that first follows the upload — an answer
+    acknowledgement neither delivers it nor spends it."""
+    onboarding.start_interview("llm")
+    onboarding.add_resume(text="MARKER-RESUME-7788")
+    # First turn after the upload: the resume rides the request...
+    onboarding.send_message("I also like hiking")  # draftless: retained
+    assert "MARKER-RESUME-7788" in onboarding.load_state().pending_context
+    assert any("MARKER-RESUME-7788" in m["content"] for m in fake_llm.calls[-1])
+    # ...an answer ack is not such a turn: no delivery, no spend.
+    onboarding.record_answer("work_authorized", value="yes")
+    state = onboarding.load_state()
+    assert "MARKER-RESUME-7788" in state.pending_context
+    assert not any("MARKER-RESUME-7788" in m["content"] for m in fake_llm.calls[-1])
+    # ...and the next question-asking turn delivers it exactly once: this
+    # one extracts a draft, so the spend sticks.
+    fake_llm.replies = ["Hello from the provider.", "Hello from the provider.",
+                        _draft_reply()]
+    onboarding.send_message("that's everything")
+    assert onboarding.load_state().pending_context == ""
+    assert any("MARKER-RESUME-7788" in m["content"] for m in fake_llm.calls[-1])
+
+
 # ---------------------------------------------------------------------------
 # Review phase transitions
 # ---------------------------------------------------------------------------

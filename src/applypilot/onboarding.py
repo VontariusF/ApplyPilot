@@ -1458,8 +1458,12 @@ def record_answer(question_id: str, value: str = "", free_text: str = "",
 
     The chosen button appends its LABEL as the user turn (the agent reads
     prose, exactly as in free-form chat) and stores the VALUE in
-    state.answers; free text stores what the user typed. A skip records
-    the question as intentionally empty — it never becomes a profile
+    state.answers; free text stores what the user typed. The agent
+    acknowledgement is grounded on the exact exchange (answer_ack_prompt:
+    question id, text, options, submitted value — both backends, spec
+    art_ti3XJuNr) and never carries the pending resume context: that
+    attaches to the next question-asking turn. A skip records the
+    question as intentionally empty — it never becomes a profile
     value, so review keeps flagging it (PR #22 guard). The agent
     acknowledgement runs after the answer is persisted: a backend failure
     costs the acknowledgement, never the user's click.
@@ -1506,33 +1510,22 @@ def record_answer(question_id: str, value: str = "", free_text: str = "",
             # Grounded ack (spec art_ti3XJuNr): both backends hear the
             # question's id, text, options, and the submitted value — the
             # Claude CLI as its turn prompt, the provider as an unrecorded
-            # directive after the transcript.
-            grounded = answer_ack_prompt(spec, label)
-            prompt = grounded
-            context = state.pending_context
-            if context:
-                prompt = f"{context}\n\n{grounded}"
-                state.pending_context = ""
+            # directive after the transcript. A pure answer-acknowledgement
+            # turn never touches the pending resume context: it attaches to
+            # the next question-asking turn instead, so an answer click can
+            # neither hijack it into an unrelated ack nor spend it.
+            prompt = answer_ack_prompt(spec, label)
             try:
-                reply = _agent_turn(state, prompt, prompt, directive=grounded,
-                                    context_for_provider=context)
+                reply = _agent_turn(state, prompt, prompt, directive=prompt)
             except RuntimeError as exc:
                 # The user's answer stays recorded; the chat shows the
                 # failure and the next render carries the error banner.
-                # The context goes back in play too: a failed ack turn
-                # extracted nothing, so persisting the spent state here
-                # would drop the only copy of the resume.
-                if context:
-                    state.pending_context = context
                 state.error = str(exc)
                 save_state(state)
                 raise
             state.error = None
             state.messages.append({"role": _ROLE_ASSISTANT, "content": reply})
-            if not _after_reply(state, reply, allow_review=False) and context:
-                # Same retention rule as send_message: a draftless turn
-                # keeps the pending resume in play for the next one.
-                state.pending_context = context
+            _after_reply(state, reply, allow_review=False)
         save_state(state)
         return state
 
