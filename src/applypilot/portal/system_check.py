@@ -162,13 +162,21 @@ def _ai_checks() -> list[Check]:
         # endpoint passes readiness while every apply run fails. The
         # probe sends one minimal request through the same client real
         # runs use (bounded by a short timeout), so green here means the
-        # endpoint actually answered.
-        reachable, detail = llm.probe_provider()
-        if reachable:
+        # endpoint actually answered and parsed.
+        probe_state, detail = llm.probe_provider()
+        if probe_state == "reachable":
             provider = Check(
                 "provider", "AI provider", PASS,
                 "Your AI provider is set up and answered a test request — "
                 "summarizing, tailoring, and the interview agent run on it.",
+            )
+        elif probe_state == "degraded":
+            # The endpoint is alive but its responses are unusable — a
+            # green check here would hide every later parse failure.
+            provider = Check(
+                "provider", "AI provider", WARN,
+                f"{detail}",
+                Fix("Open provider settings", "/settings"),
             )
         else:
             provider = Check(

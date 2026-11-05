@@ -36,9 +36,10 @@ def capable_machine(monkeypatch):
 
 @pytest.fixture
 def provider_reachable(monkeypatch):
-    """The provider probe answers (no network in tests)."""
+    """The provider probe answers and parses (no network in tests)."""
     monkeypatch.setattr(llm, "probe_provider",
-                        lambda: (True, "The provider answered a test request."))
+                        lambda: ("reachable",
+                                 "The provider answered a test request."))
 
 
 @pytest.fixture
@@ -141,7 +142,7 @@ def test_provider_check_fails_when_probe_cannot_reach(
     _write_setup(app_dir)
     reason = ("The provider did not answer within 5 seconds — the endpoint "
               "may be down or the URL mistyped.")
-    monkeypatch.setattr(llm, "probe_provider", lambda: (False, reason))
+    monkeypatch.setattr(llm, "probe_provider", lambda: ("unreachable", reason))
     checks = {c.id: c for c in sc.run_checks()}
     assert checks["provider"].state == sc.FAIL
     assert reason in checks["provider"].meaning
@@ -154,6 +155,21 @@ def test_provider_check_pass_copies_the_probe(
     checks = {c.id: c for c in sc.run_checks()}
     assert checks["provider"].state == sc.PASS
     assert "answered a test request" in checks["provider"].meaning
+
+
+def test_provider_check_warns_when_responses_are_unusable(
+        app_dir, capable_machine, signed_in_everywhere, monkeypatch):
+    """Alive but unusable (incompatible response schema): a green check
+    would hide every later parse failure — warn with the probe detail."""
+    _write_setup(app_dir)
+    detail = ("The provider answered the test request, but the response was "
+              "not usable — real runs may still fail. Check the model name "
+              "in provider settings.")
+    monkeypatch.setattr(llm, "probe_provider", lambda: ("degraded", detail))
+    checks = {c.id: c for c in sc.run_checks()}
+    assert checks["provider"].state == sc.WARN
+    assert detail in checks["provider"].meaning
+    assert checks["provider"].fix == sc.Fix("Open provider settings", "/settings")
 
 
 # ---------------------------------------------------------------------------
