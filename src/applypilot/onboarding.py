@@ -84,6 +84,7 @@ _PROFILE_KEYS = (
 # context for the agent, never agent output.
 _ROLE_USER = "user"
 _ROLE_ASSISTANT = "assistant"
+_ROLE_SYSTEM = "system"
 _ROLE_NOTE = "note"
 
 _STATE_LOCK = threading.Lock()  # one agent turn at a time (single-user portal)
@@ -1151,13 +1152,20 @@ def _agent_turn(state: InterviewState, user_text: str, prompt_for_claude: str,
 def _llm_turn(state: InterviewState, directive: str | None = None,
               context: str | None = None) -> str:
     """One LLMBackend turn: the projected transcript, plus unrecorded
-    extras — a leading context block (the pending resume; the transcript
-    itself only carries the upload's filename/size note) and a trailing
+    extras — a context block riding after the system message (the pending
+    resume; the transcript itself only carries the upload's
+    filename/size note) and a trailing
     directive when the caller supplied one (mode switches)."""
     client = LLMBackend()._client()
     messages = LLMBackend._send_list(state.messages)
     if context:
-        messages.insert(0, {"role": _ROLE_USER, "content": context})
+        # Unrecorded user-side input rides AFTER the system message,
+        # never before it: strict OpenAI-compatible custom/local
+        # endpoints reject (or fail to apply) a mid-conversation system
+        # role, so reordering would break the onboarding instructions
+        # for every resume-backed turn (Codex P2 on 24969c0).
+        at = 1 if messages and messages[0].get("role") == _ROLE_SYSTEM else 0
+        messages.insert(at, {"role": _ROLE_USER, "content": context})
     if directive:
         messages.append({"role": _ROLE_USER, "content": directive})
     return client.chat(messages)

@@ -296,6 +296,29 @@ def test_resume_backed_chat_extraction_never_records_gated_claims(portal_client,
     assert "work_authorized" not in state.answers
 
 
+def test_resume_context_rides_after_the_system_message(portal_client, fake_llm, monkeypatch):
+    """The pending resume context rides AFTER the system message in the
+    provider request, never at index 0 — strict OpenAI-compatible
+    custom/local endpoints reject (or fail to apply) a
+    mid-conversation system role, which would break every
+    resume-backed guided turn (Codex P2 on 24969c0)."""
+    client, _ = portal_client
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    fake_llm.respond("Hello! Tell me about your background.")  # draftless kickoff
+
+    onboarding.start_intake()
+    client.post("/onboarding/resume", data={"resume_text": "MARKER-RESUME-7788"})
+    client.post("/onboarding/start", data={"mode": "llm"})
+    assert onboarding.load_state().pending_context
+
+    fake_llm.respond("Noted — tell me more about your experience.")
+    onboarding.record_answer("full_name", free_text="Jane Doe")
+    sent = fake_llm.calls[-1]
+    assert sent[0]["role"] == "system"  # stays first
+    assert sent[1]["role"] == "user"  # context right after it, never before
+    assert "MARKER-RESUME-7788" in sent[1]["content"]
+
+
 # ---------------------------------------------------------------------------
 # The intake phase: upload before any question, gaps-only after start
 
