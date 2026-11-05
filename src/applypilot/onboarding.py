@@ -835,6 +835,61 @@ def normalize_profile(draft: dict, answers: dict[str, str] | None = None) -> tup
     return profile, search_meta
 
 
+# Questions the prefill bridge never fills even though the registry is
+# not gated. currency rides normalize_profile's "USD" default: a stored
+# "USD" is indistinguishable from an extracted one, so bridging it would
+# record a currency preference the user never gave — the wizard keeps
+# asking it (spec: currency must stay asked).
+_NO_BRIDGE_IDS = frozenset({"currency"})
+
+
+def draft_to_answers(profile_draft: dict | None, answers: dict[str, str]) -> dict[str, str]:
+    """Map extracted draft values onto question answers — the prefill bridge.
+
+    The reverse of normalize_profile's field walk: for every question the
+    user has not answered whose maps_to path the extraction evidences, the
+    draft value becomes the answer, so remaining_questions asks only the
+    residual gaps. A preference question is bridged only on extraction
+    evidence: work_style bridges solely on remote=True (False is the bool
+    default, not an answer), and currency never bridges (_NO_BRIDGE_IDS).
+
+    The fabrication guard is absolute here: gated fields (work
+    authorization, sponsorship) are never prefilled from extraction — a
+    resume claiming eligibility is a claim to confirm, not an answer to
+    record. Extraction also never overwrites a recorded answer: questions
+    already in `answers` are skipped, so the user's click always wins.
+    """
+    if not isinstance(profile_draft, dict) or not profile_draft:
+        return {}
+    wrapped = profile_draft.get("_applypilot_profile")
+    sections = wrapped if isinstance(wrapped, dict) else profile_draft
+    meta = profile_draft.get("_applypilot_search")
+    meta = meta if isinstance(meta, dict) else {}
+    filled: dict[str, str] = {}
+    for spec in QUESTION_SPECS:
+        if spec.id in answers or not spec.maps_to:
+            continue
+        if spec.maps_to in _GATED_PATHS or spec.id in _NO_BRIDGE_IDS:
+            continue
+        if spec.maps_to == "search.remote":
+            if meta.get("remote") is True:
+                filled[spec.id] = "remote"
+            continue
+        if spec.maps_to.startswith("search."):
+            value = meta.get(spec.maps_to.split(".", 1)[1])
+        else:
+            section, field_name = spec.maps_to.split(".", 1)
+            section_data = sections.get(section)
+            value = section_data.get(field_name) if isinstance(section_data, dict) else None
+        if isinstance(value, list):
+            text = ", ".join(str(v).strip() for v in value if str(v).strip())
+        else:
+            text = str(value).strip() if value is not None else ""
+        if text:
+            filled[spec.id] = text
+    return filled
+
+
 def missing_review_fields(profile: dict) -> list[str]:
     """Human names for fields the review screen shows as "add later"."""
     missing = []
@@ -1203,12 +1258,21 @@ def start_intake() -> InterviewState:
 
 
 def remaining_questions(state: InterviewState) -> list[QuestionSpec]:
-    """The agenda still open: unanswered specs whose depends_on is met."""
+    """The agenda still open: unanswered specs whose depends_on is met.
+
+    Gaps-only asking (resume-first): questions the extraction draft can
+    already answer are not asked — draft_to_answers maps state.profile_draft
+    onto the open ids, and a recorded answer always beats extraction.
+    Dependency gating evaluates against the effective answer set, so an
+    extracted country opens the work-auth pair like a clicked one would.
+    """
+    prefilled = draft_to_answers(state.profile_draft, state.answers)
+    effective = {**prefilled, **state.answers}
     open_specs = []
     for spec in QUESTION_SPECS:
-        if spec.id in state.answers:
+        if spec.id in state.answers or spec.id in prefilled:
             continue
-        if _depends_met(spec, state.answers):
+        if _depends_met(spec, effective):
             open_specs.append(spec)
     return open_specs
 
@@ -1227,8 +1291,9 @@ def _depends_met(spec: QuestionSpec, answers: dict[str, str]) -> bool:
 def current_question(state: InterviewState) -> QuestionSpec | None:
     """The question the wizard shows now, or None when the agenda is done.
 
-    Registry order is the agenda. Answered and skipped questions don't
-    repeat; a question whose depends_on isn't met by the answers so far
+    Registry order is the agenda. Answered, skipped, and prefilled-from-
+    extraction questions don't repeat; a question whose depends_on isn't
+    met by the effective answers so far
     is skipped silently — its parent governs whether it makes sense at
     all, and the agent-led mode can still collect it in prose.
     """
@@ -1301,7 +1366,7 @@ def record_answer(question_id: str, value: str = "", free_text: str = "",
                 raise
             state.error = None
             state.messages.append({"role": _ROLE_ASSISTANT, "content": reply})
-            _after_reply(state, reply)
+            _after_reply(state, reply, allow_review=False)
         save_state(state)
         return state
 
