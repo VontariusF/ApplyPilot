@@ -194,6 +194,13 @@ class QuestionSpec:
     agent_hint: str = ""
 
 
+# The work-auth pair opens for any decided country: "*" matches any
+# nonempty answer and "!Not sure yet" keeps the explicit undecided
+# choice deferring the pair to the review step (the old six-value
+# allowlist locked out typed countries like "Australia" and extracted
+# ones alike, silently deferring the pair instead of asking it).
+GATED_COUNTRY_GATE = "*,!Not sure yet"
+
 QUESTION_SPECS: tuple[QuestionSpec, ...] = (
     # -- Identity first: who the applications are for (the resume usually
     #    already knows most of this, and nothing below makes sense without it) --
@@ -251,7 +258,7 @@ QUESTION_SPECS: tuple[QuestionSpec, ...] = (
         prompt="Are you legally authorized to work in the country you're applying in?",
         choices=(Choice("yes", "Yes"), Choice("no", "No")),
         maps_to="work_authorization.legally_authorized_to_work",
-        depends_on={"country": "United States,United Kingdom,Canada,European Union,India,Other"},
+        depends_on={"country": GATED_COUNTRY_GATE},
         agent_hint="what counts as work authorization and how it's usually proved",
     ),
     QuestionSpec(
@@ -259,7 +266,7 @@ QUESTION_SPECS: tuple[QuestionSpec, ...] = (
         prompt="Will you now or in the future need visa sponsorship?",
         choices=(Choice("yes", "Yes"), Choice("no", "No"), Choice("not_sure", "Not sure")),
         maps_to="work_authorization.require_sponsorship",
-        depends_on={"country": "United States,United Kingdom,Canada,European Union,India,Other"},
+        depends_on={"country": GATED_COUNTRY_GATE},
         agent_hint="what sponsorship means and when employers offer it",
     ),
     QuestionSpec(
@@ -1124,26 +1131,52 @@ def _llm_turn(state: InterviewState, directive: str | None = None) -> str:
     return client.chat(messages)
 
 
-def _after_reply(state: InterviewState, reply: str, allow_review: bool = True) -> None:
+def _strip_gated_claims(draft: dict) -> dict:
+    """A wizard-path extraction has no authority over the gated pair.
+
+    The resume-first kickoff (and any extraction while the wizard walks
+    its agenda) reads a document, not the user — _GATED_PATHS stays
+    absolute (spec art_ti3XJuNr): work authorization and sponsorship are
+    set by a wizard answer or, in agent-led chat, the user's own prose —
+    never by an extraction the wizard didn't ask about. Returns a copy;
+    the caller's draft is untouched.
+    """
+    stripped = json.loads(json.dumps(draft))  # deep copy: callers reuse the dict
+    profile = stripped.get("_applypilot_profile")
+    auth = profile.get("work_authorization") if isinstance(profile, dict) else None
+    if isinstance(auth, dict):
+        auth.pop("legally_authorized_to_work", None)
+        auth.pop("require_sponsorship", None)
+    return stripped
+
+
+def _after_reply(state: InterviewState, reply: str, allow_review: bool = True) -> bool:
     """Post-reply bookkeeping: draft extraction and phase transition.
 
     The transcript is the service layer's job; this only reacts to the
     reply's content. The wizard's answers overlay the agent's fenced-JSON
     draft — the wizard is the source of truth (PR #22 guard: the agent
-    only fills what the wizard doesn't own).
+    only fills what the wizard doesn't own). Returns True when the reply
+    carried a draft — the caller decides what that retires (the pending
+    resume context) and what it must not end (the wizard's agenda).
 
     allow_review=False for the kickoff and guided-answer turns: there the
     agenda is not the agent's to finish — an extraction mid-walk feeds the
     prefill bridge (remaining_questions then asks only the gaps) instead
-    of yanking the wizard to review. Free-form chat finishes on the draft
-    as before.
+    of yanking the wizard to review, and its gated claims are stripped
+    (_strip_gated_claims). Free-form chat finishes on the draft as before,
+    claims included — there the extraction paraphrases the user's own words.
     """
     draft = extract_profile_draft(reply)
     if draft is not None:
+        if not allow_review:
+            draft = _strip_gated_claims(draft)
         profile, meta = normalize_profile(draft, state.answers)
         state.profile_draft = {**profile, "_applypilot_search": meta}
         if allow_review:
             state.phase = REVIEW
+        return True
+    return False
 
 
 def start_interview(mode: str) -> InterviewState:
@@ -1278,12 +1311,21 @@ def remaining_questions(state: InterviewState) -> list[QuestionSpec]:
 
 
 def _depends_met(spec: QuestionSpec, answers: dict[str, str]) -> bool:
-    """True when every depends_on parent's answer is in its allowlist
-    ("a,b" = either value). An unanswered parent fails closed: the child
-    waits until the parent settles, so the agenda never asks about a
-    permit before it knows the user is authorized."""
+    """True when every depends_on parent's answer satisfies its gate
+    ("a,b" = either exact value; "*" = any nonempty answer; "!x" = an
+    excluded value — combinable, e.g. "*,!Not sure yet"). An unanswered
+    parent fails closed: the child waits until the parent settles, so
+    the agenda never asks about a permit before it knows the user is
+    authorized."""
     for parent, allowed in (spec.depends_on or {}).items():
-        if answers.get(parent, "") not in allowed.split(","):
+        value = answers.get(parent, "")
+        if not value:
+            return False
+        tokens = allowed.split(",")
+        # Exclusions win before any wildcard or exact match.
+        if any(token.startswith("!") and value == token[1:] for token in tokens):
+            return False
+        if not any(token == "*" or value == token for token in tokens):
             return False
     return True
 

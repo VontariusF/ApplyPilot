@@ -188,16 +188,17 @@ def test_registry_covers_the_spec_table():
     assert permit.free_text_kind is None
     assert permit.depends_on == {"work_authorized": "yes"}
 
-    # The country question precedes the work-auth pair and gates it
-    # (exact-choice, fail-closed): "Not sure yet" is deliberately absent
-    # from the allowlist, deferring those questions to the review step.
+    # The country question precedes the work-auth pair and gates it:
+    # any decided country opens the pair (typed values like "Australia"
+    # and extracted ones alike), while the explicit "Not sure yet"
+    # choice defers those questions to the review step.
     country = onboarding.QUESTIONS["country"]
     assert country.choices and country.allow_free_text
     assert country.free_text_kind is None
     assert country.maps_to == "personal.country"
-    allowed_countries = ",".join(c.value for c in country.choices if c.value != "Not sure yet")
     for gated in ("work_authorized", "sponsorship"):
-        assert onboarding.QUESTIONS[gated].depends_on == {"country": allowed_countries}
+        assert onboarding.QUESTIONS[gated].depends_on == {"country": onboarding.GATED_COUNTRY_GATE}
+        assert "Not sure yet" in onboarding.GATED_COUNTRY_GATE  # undecided still defers
 
 
 # ---------------------------------------------------------------------------
