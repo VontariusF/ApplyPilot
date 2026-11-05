@@ -296,6 +296,33 @@ def test_resume_backed_chat_extraction_never_records_gated_claims(portal_client,
     assert "work_authorized" not in state.answers
 
 
+def test_agent_led_switch_never_records_gated_claims(portal_client, fake_llm, monkeypatch):
+    """A mode-switch turn is directive-driven; with pending resume
+    context still in play (a draftless kickoff left the resume with the
+    resumed session), its draft is also document-informed — so it may
+    not jump to review and its gated claims are stripped, same guard as
+    the kickoff and resume-backed chat turns (Codex P1 on 31060ea)."""
+    client, _ = portal_client
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    fake_llm.respond("Hello! Tell me about your background.")  # draftless kickoff
+
+    onboarding.start_intake()
+    client.post("/onboarding/resume", data={"resume_text": "MARKER-RESUME-7788"})
+    client.post("/onboarding/start", data={"mode": "llm"})
+    assert onboarding.load_state().pending_context  # resume in play
+
+    fake_llm.respond(DRAFT_REPLY)  # the switch turn echoes the resume
+    onboarding.set_agent_led(True)
+    state = onboarding.load_state()
+    assert state.mode == onboarding.MODE_AGENT
+    assert state.phase == onboarding.INTERVIEW  # the agenda is not the agent's to finish
+    auth = state.profile_draft["work_authorization"]
+    assert auth["legally_authorized_to_work"] == ""  # claim stripped
+    assert auth["require_sponsorship"] == ""  # claim stripped
+    assert auth["work_permit_type"] == "Citizen"  # not gated: survives
+    assert state.pending_context == ""  # spent: the extraction landed
+
+
 def test_resume_context_rides_after_the_system_message(portal_client, fake_llm, monkeypatch):
     """The pending resume context rides AFTER the system message in the
     provider request, never at index 0 — strict OpenAI-compatible

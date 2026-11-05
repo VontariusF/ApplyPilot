@@ -1521,7 +1521,17 @@ def set_agent_led(enabled: bool) -> InterviewState:
             save_state(state)
             raise
         state.messages.append({"role": _ROLE_ASSISTANT, "content": reply})
-        _after_reply(state, reply)
+        # The switch turn is directive-driven — any draft it emits
+        # paraphrases the agenda, never the user's own words, so it
+        # finishes like the kickoff (allow_review=False). With pending
+        # resume context still in play (a draftless kickoff left the
+        # resume with the resumed session), the draft is also
+        # document-informed: its gated claims are stripped
+        # (_strip_gated_claims) and the agenda is kept for the bridge
+        # instead of jumping to review (Codex P1 on 31060ea). The
+        # context is spent only when a draft consumed it.
+        if _after_reply(state, reply, allow_review=False) and state.pending_context:
+            state.pending_context = ""
         save_state(state)
         return state
 
