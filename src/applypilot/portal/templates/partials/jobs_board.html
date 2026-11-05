@@ -1,5 +1,7 @@
-<div id="jobs-board" hx-get="/jobs/table{% if board_qs %}?{{ board_qs }}{% endif %}"
-     hx-trigger="sse:board-changed" hx-target="#jobs-board" hx-swap="outerHTML">
+<div id="jobs-board">
+  {# SSE-triggered refetches live on a dedicated refresher in jobs.html —
+     keeping them off this element prevents swapped-in boards from
+     stacking duplicate listeners and lets hx-sync serialize them. #}
   {% if toast_message %}
   <div class="toast {{ toast_kind or 'info' }}" role="status">{{ toast_message }}</div>
   {% endif %}

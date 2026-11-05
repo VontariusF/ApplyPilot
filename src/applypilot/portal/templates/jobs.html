@@ -65,7 +65,14 @@
 <div hx-ext="sse" sse-connect="/events/board">
   {# The board partial is the swap target for verb POSTs and the SSE
      board-changed feed; the wrapper owns the connection so it survives
-     swaps. #}
+     swaps. The refresher is a dedicated sibling (never swapped) so each
+     page load registers exactly one SSE listener; hx-sync="this:replace"
+     aborts an in-flight refetch when a newer event arrives, so rapid
+     run changes (start -> finish between polls) can never leave a stale
+     mid-run render as the last swap. #}
+  <div hx-get="/jobs/table{% if board_qs %}?{{ board_qs }}{% endif %}"
+       hx-trigger="sse:board-changed" hx-target="#jobs-board"
+       hx-swap="outerHTML" hx-sync="this:replace" hidden></div>
   {% include "partials/jobs_board.html" %}
 </div>
 {% endblock %}
