@@ -74,12 +74,29 @@ DEFAULTS: dict = {
         "last_schedule_run": None,
         # While the daily cap is hit: {"on": "YYYY-MM-DD", "reason": str}.
         "auto_apply_paused": None,
+        # While the provider probe fails: the plain-language reason shown on
+        # the Runs page (P1-1). Cleared by the next tick that sees a
+        # reachable provider.
+        "scheduler_skip": None,
     },
 }
 
 # Seconds between scheduler passes. Deliberately coarse: the scheduler only
 # decides WHEN to start a tracked run, never does the work itself.
 TICK_SECONDS = 30
+
+# P2-2: plain-language refusal for the guarded manual starts — start_guarded
+# returns None instead of a run row when another run is already active.
+_RUN_ALREADY_ACTIVE = (
+    "A run is already active — wait for it to finish or cancel it first."
+)
+
+# P2-4: shared refusal for every route that would rewrite a job's documents
+# while an apply run owns it (apply-now, regenerate, tailor-now): one
+# predicate (database.job_apply_in_progress), one plain-language message.
+APPLY_IN_PROGRESS_MESSAGE = (
+    "A run is applying to this job right now — the card updates when it finishes."
+)
 
 
 def config_path() -> Path:
@@ -224,7 +241,14 @@ def start_preset(name: str) -> dict:
     """Start a preset as a tracked run (the Automation-page button path).
 
     Apply runs get limit = today's remaining cap, so a manual start cannot
-    blow past the cap the user set.
+    blow past the cap the user set. Manual starts go through start_guarded
+    (P2-2): without it, a second click while an automation run was active
+    spawned a concurrent run whose limit was computed from the same cap
+    snapshot — together the two runs could apply up to twice the cap.
+
+    Raises:
+        runner.ParamError: for an unknown preset, an exhausted daily cap,
+            or when another run is already active.
     """
     if name not in PRESETS:
         raise runner.ParamError(f"unknown preset {name!r}")
@@ -235,8 +259,17 @@ def start_preset(name: str) -> dict:
             raise runner.ParamError(cap_pause_reason(cfg, status))
         params = preset_params(cfg, name)
         params["limit"] = str(status["remaining"])
-        return runner.start_run("apply", params)
-    return runner.start_run(PRESETS[name]["kind"], preset_params(cfg, name))
+        # The worker re-checks the live count before every job, so the cap
+        # also holds against applications recorded mid-run by any path.
+        params["daily_cap"] = str(status["cap"])
+        kind = "apply"
+    else:
+        kind = PRESETS[name]["kind"]
+        params = preset_params(cfg, name)
+    row = start_guarded(kind, params)
+    if row is None:
+        raise runner.ParamError(_RUN_ALREADY_ACTIVE)
+    return row
 
 
 def stop_preset(name: str) -> bool:
@@ -301,6 +334,9 @@ def start_guarded(kind: str, params: dict) -> dict | None:
     runner.start_run, so two ticks can never both pass the check.
     """
     with _start_lock:
+        # Idempotent, same as start_run: the liveness check reads the
+        # registry, and a guarded start must work without prior setup.
+        runner.init_registry()
         if runner.running_runs():
             return None
         return runner.start_run(kind, params)
@@ -311,7 +347,9 @@ def start_single_job_tailor(url: str, include_cover: bool = False) -> dict:
     scoped to exactly this job, tracked in the runs registry.
 
     Raises:
-        runner.ParamError: when the job URL is not in the store.
+        runner.ParamError: when the job URL is not in the store, or when an
+            apply run currently holds the job (P2-4 — resetting would unlink
+            the very PDF that run is about to upload).
     """
     # The portal app factory inits the store; the trigger may also fire
     # straight after process start (and in tests) without it.
@@ -320,9 +358,53 @@ def start_single_job_tailor(url: str, include_cover: bool = False) -> dict:
         "SELECT 1 FROM jobs WHERE url = ?", (url,)
     ).fetchone() is None:
         raise runner.ParamError(f"job not found: {url}")
+    if database.job_apply_in_progress(url):
+        raise runner.ParamError(APPLY_IN_PROGRESS_MESSAGE)
     database.reset_job_tailoring(database.get_connection(), url,
                                  include_cover=include_cover)
     return runner.start_run("tailor", {"url": url, "min_score": "0"})
+
+
+# ---------------------------------------------------------------------------
+# Provider probe gate (P1-1)
+# ---------------------------------------------------------------------------
+
+# The scheduler's probe verdict is cached: run_tick fires every ~30s and a
+# dead endpoint must not absorb a full probe per tick. The System Check
+# page always probes fresh — it never reads this cache.
+_PROBE_CACHE_TTL = 300.0  # seconds
+_probe_cache: tuple[float, tuple[str, str]] | None = None
+_probe_cache_guard = threading.Lock()
+
+
+def _provider_probe() -> tuple[str, str]:
+    """Provider reachability for scheduled starts, cached for a few minutes.
+
+    Returns (state, detail) from llm.probe_provider. Only an "unreachable"
+    verdict gates a scheduled start: "slow" and "degraded" providers can
+    still serve real runs (runs allow far longer than the probe), and
+    gating on them would silently disable automation instead of surfacing
+    the check where the user can act on it.
+    """
+    global _probe_cache
+    with _probe_cache_guard:
+        if _probe_cache is not None:
+            age = time.monotonic() - _probe_cache[0]
+            if age < _PROBE_CACHE_TTL:
+                return _probe_cache[1]
+    from applypilot.llm import probe_provider
+
+    result = probe_provider()
+    with _probe_cache_guard:
+        _probe_cache = (time.monotonic(), result)
+    return result
+
+
+def reset_probe_cache() -> None:
+    """Drop the cached probe verdict (call after provider settings change)."""
+    global _probe_cache
+    with _probe_cache_guard:
+        _probe_cache = None
 
 
 # ---------------------------------------------------------------------------
@@ -334,8 +416,11 @@ def run_tick(cfg: dict | None = None, now: datetime | None = None) -> dict:
 
     Fires the daily schedule (one Find jobs run per UTC day) and auto-apply
     (apply runs until the daily cap), only for enabled toggles, only when
-    no run is active. The cap pause is recorded as soon as the day's
-    applications reach the cap — even mid-run — so the UI always sees why.
+    no run is active, and only while the provider probe says the provider
+    is reachable (P1-1 — a dead provider used to burn every queued job's
+    attempt budget through silent per-job errors). The cap pause is
+    recorded as soon as the day's applications reach the cap — even
+    mid-run — so the UI always sees why.
     """
     cfg = cfg or load()
     today = _today(now)
@@ -348,6 +433,23 @@ def run_tick(cfg: dict | None = None, now: datetime | None = None) -> dict:
 
     if not (cfg["schedule_enabled"] or cfg["auto_apply_enabled"]):
         return outcome
+
+    # P1-1(b): a scheduled start against a dead provider used to convert the
+    # whole queue's documents into per-job errors. Skip loudly instead — the
+    # Runs page surfaces the reason, and the next healthy probe re-enables
+    # starts automatically.
+    probe_state, probe_detail = _provider_probe()
+    if probe_state == "unreachable":
+        reason = f"Provider unreachable — scheduled runs paused ({probe_detail})"
+        if state.get("scheduler_skip") != reason:
+            state["scheduler_skip"] = reason
+            save(cfg)
+        outcome["skipped"].append(reason)
+        return outcome
+    if state.get("scheduler_skip"):
+        # The provider is back: clear the pause notice.
+        state["scheduler_skip"] = None
+        save(cfg)
 
     # A cap pause ends with the calendar day that filled it.
     paused = state.get("auto_apply_paused")

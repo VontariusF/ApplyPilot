@@ -24,7 +24,7 @@ from applypilot.database import (
     next_document_version,
     record_document_version,
 )
-from applypilot.llm import get_client
+from applypilot.llm import get_client, is_infra_error
 from applypilot.scoring import docs
 from applypilot.scoring.validator import (
     BANNED_WORDS,
@@ -571,6 +571,10 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
                 "url": job["url"], "title": job["title"], "site": job["site"],
                 "status": "error", "attempts": 0, "path": None, "pdf_path": None,
                 "version_id": None,
+                # P1-1: infra failures (provider down/timeout/5xx) must not
+                # burn the job's attempt budget — classified here, exempted
+                # in the persist loop below.
+                "error_class": "infra" if is_infra_error(e) else "content",
             }
             log.error("%d/%d [ERROR] %s -- %s", completed, len(jobs), (job.get("title") or "untitled")[:40], e)
 
@@ -588,17 +592,22 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
             (result.get("title") or "untitled")[:40],
         )
 
-    # Persist to DB: increment attempt counter for ALL, save path only for approved
+    # Persist to DB: increment attempt counter for content-level failures,
+    # save path only for approved. P1-1: infra-classified errors (provider
+    # down, timed out, 5xx) do not burn the attempt budget — the job stays
+    # fully retryable when the provider recovers, instead of one outage
+    # exhausting every queued job's 5 attempts.
     now = datetime.now(timezone.utc).isoformat()
     _success_statuses = {"approved", "approved_with_judge_warning"}
     for r in results:
+        is_infra = r.get("error_class") == "infra"
         if r["status"] in _success_statuses:
             conn.execute(
                 "UPDATE jobs SET tailored_resume_path=?, tailored_at=?, "
                 "tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
                 (r["path"], now, r["url"]),
             )
-        else:
+        elif not is_infra:
             conn.execute(
                 "UPDATE jobs SET tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
                 (r["url"],),

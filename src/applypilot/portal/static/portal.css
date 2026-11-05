@@ -555,6 +555,7 @@ pre.logview {
   border: 1px solid transparent;
 }
 .alert.error { background: var(--fail-bg); color: var(--fail); border-color: var(--fail); }
+.alert.warn { background: var(--warn-bg); color: var(--warn); border-color: var(--warn); }
 .alert.success { background: var(--ok-bg); color: var(--ok); border-color: var(--ok); }
 
 .dim { color: var(--ink-2); }

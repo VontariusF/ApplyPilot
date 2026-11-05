@@ -11,6 +11,13 @@ from applypilot.config import TAILORED_DIR
 
 log = logging.getLogger(__name__)
 
+# The shared PDF attempt budget: how many conversion failures a job's row
+# tolerates before it leaves the pending count for good. Every cap site —
+# the pipeline's pending SQL and this module's reconciliation and
+# conversion queries — reads this one constant; drift between them used to
+# be possible because the cap lived as literal `5`s in four places.
+PDF_MAX_ATTEMPTS = 5
+
 
 # ── Resume Parser ────────────────────────────────────────────────────────
 
@@ -445,7 +452,7 @@ def _settle_job_pdf_states(convert_budget: int | None = None) -> int:
         # Cap parity with pipeline._PENDING_SQL: an exhausted row is not
         # pending, so reconciliation must not re-render it either (it
         # would re-invoke Chromium for a known poison input forever).
-        "AND COALESCE(pdf_attempts, 0) < 5"
+        f"AND COALESCE(pdf_attempts, 0) < {PDF_MAX_ATTEMPTS}"
     ).fetchall()
 
     # Pass 1 — classify rows and do all filesystem work BEFORE any DB
@@ -504,7 +511,7 @@ def _settle_job_pdf_states(convert_budget: int | None = None) -> int:
     return settled
 
 
-def batch_convert(limit: int = 50) -> int:
+def batch_convert(limit: int = 50, url: str | None = None) -> int:
     """Convert .txt files in TAILORED_DIR that don't have corresponding PDFs.
 
     Scans for .txt files (excluding _JOB.txt and _REPORT.json), checks if a
@@ -517,10 +524,19 @@ def batch_convert(limit: int = 50) -> int:
 
     Args:
         limit: Maximum number of files to convert.
+        url: When set, convert only that job's tailored document (P3-3): a
+            single-job run must not spend its pass rendering up to `limit`
+            unrelated pending jobs through Chromium. Reconciliation stays
+            global — it is cheap filesystem/DB bookkeeping and settles
+            stale accounting that would otherwise keep rows pending.
 
     Returns:
         Number of PDFs generated.
     """
+    from applypilot.database import get_connection
+
+    conn = get_connection()
+
     if not TAILORED_DIR.exists():
         # No directory does not mean no pending rows — sources may have
         # been deleted since the last run. Settle the jobs table anyway.
@@ -528,29 +544,38 @@ def batch_convert(limit: int = 50) -> int:
         _settle_job_pdf_states()
         return 0
 
-    txt_files = sorted(TAILORED_DIR.glob("*.txt"))
-    # Exclude _JOB.txt and _CL.txt files from resume conversion
-    # (they get their own conversion calls)
-    candidates = [
-        f for f in txt_files
-        if not f.name.endswith("_JOB.txt")
-    ]
-
     # Skip files whose job row has exhausted its pdf attempts (cap parity
     # with pipeline._PENDING_SQL): the pipeline no longer counts them as
     # pending, so re-invoking Chromium for a known poison input on every
     # call would defeat the bounded-retry semantics.
-    from applypilot.database import get_connection
-
-    conn = get_connection()
     exhausted = {
         row["tailored_resume_path"]
         for row in conn.execute(
             "SELECT tailored_resume_path FROM jobs "
-            "WHERE COALESCE(pdf_attempts, 0) >= 5 "
+            f"WHERE COALESCE(pdf_attempts, 0) >= {PDF_MAX_ATTEMPTS} "
             "AND tailored_resume_path IS NOT NULL"
         ).fetchall()
     }
+
+    if url is not None:
+        # Scoped conversion: only this job's tailored document.
+        row = conn.execute(
+            "SELECT tailored_resume_path FROM jobs WHERE url = ?", (url,)
+        ).fetchone()
+        path = Path(row["tailored_resume_path"]) if row else None
+        candidates = (
+            [path]
+            if path is not None and path.suffix == ".txt"
+            and path.parent == TAILORED_DIR else []
+        )
+    else:
+        txt_files = sorted(TAILORED_DIR.glob("*.txt"))
+        # Exclude _JOB.txt and _CL.txt files from resume conversion
+        # (they get their own conversion calls)
+        candidates = [
+            f for f in txt_files
+            if not f.name.endswith("_JOB.txt")
+        ]
 
     # Filter to those without a corresponding PDF
     to_convert: list[Path] = []

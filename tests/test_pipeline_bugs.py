@@ -227,6 +227,91 @@ def test_b7_healthy_stage_still_reports_ok(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# P1-1 — zero-progress passes (a dead provider's swallowed errors) stop the
+# tailor/cover stages loudly instead of burning the queue's attempt budget
+# ---------------------------------------------------------------------------
+
+
+def test_p1_zero_progress_passes_stop_tailor_stage_after_bounded_passes(monkeypatch):
+    """A runner that returns normally while settling nothing (every per-job
+    LLM call failed and the runner swallowed it) must count toward the same
+    consecutive-error cap as a raising runner — the stage stops with a
+    recorded error instead of looping at ~1 pass/sec while the queue's
+    attempt budget burns."""
+    tracker = pipeline._StageTracker()
+    calls = {"n": 0}
+
+    def _swallowed_failure(**kwargs):
+        calls["n"] += 1
+        return {"status": "ok", "approved": 0}  # returns normally, settles nothing
+
+    monkeypatch.setitem(pipeline._STAGE_RUNNERS, "tailor", _swallowed_failure)
+    monkeypatch.setattr(pipeline, "_count_pending",
+                        lambda stage, min_score=7: 3)  # never shrinks
+    monkeypatch.setattr(pipeline, "_STREAM_POLL_INTERVAL", 0.01)
+    monkeypatch.setattr(pipeline, "_STREAM_BUSY_INTERVAL", 0.01)
+    tracker.mark_done("score")  # tailor's upstream
+
+    pipeline._run_stage_streaming("tailor", tracker, threading.Event())
+
+    assert calls["n"] == pipeline._MAX_ERROR_PASSES, (
+        "zero-progress passes must be bounded by the same cap as raising passes"
+    )
+    result = tracker.get_results()["tailor"]
+    assert result["status"].startswith("error")
+    assert "pending" in result["status"]
+
+
+def test_p1_partial_progress_resets_the_zero_progress_error_count(monkeypatch):
+    """A pass that settles at least one job resets the consecutive-error
+    count — only entirely unproductive passes accrue toward the cap, so a
+    slow-but-working provider is never killed by this guard."""
+    tracker = pipeline._StageTracker()
+    pending = {"n": 3}
+
+    def _halting_progress(**kwargs):
+        pending["n"] = max(pending["n"] - 1, 0)
+
+    monkeypatch.setitem(pipeline._STAGE_RUNNERS, "tailor", _halting_progress)
+    monkeypatch.setattr(pipeline, "_count_pending",
+                        lambda stage, min_score=7: pending["n"])
+    monkeypatch.setattr(pipeline, "_STREAM_POLL_INTERVAL", 0.01)
+    monkeypatch.setattr(pipeline, "_STREAM_BUSY_INTERVAL", 0.01)
+    tracker.mark_done("score")
+
+    pipeline._run_stage_streaming("tailor", tracker, threading.Event())
+    assert tracker.get_results()["tailor"]["status"] == "ok"
+
+
+def test_p1_pdf_stage_still_tolerates_zero_progress_passes(monkeypatch):
+    """The pdf stage legitimately leaves rows pending between budgeted
+    passes while its reconciliation catches up — the zero-progress guard
+    must stay scoped to tailor/cover."""
+    tracker = pipeline._StageTracker()
+    calls = {"n": 0}
+    pending = {"n": 2}
+
+    def _budgeted(**kwargs):
+        calls["n"] += 1
+        # Reconciliation settles the rows a few passes in (the real stage's
+        # parity checks do this against the on-disk state).
+        if calls["n"] >= 4:
+            pending["n"] = 0
+        return {"status": "ok", "converted": 0}  # settles nothing this pass
+
+    monkeypatch.setitem(pipeline._STAGE_RUNNERS, "pdf", _budgeted)
+    monkeypatch.setattr(pipeline, "_count_pending",
+                        lambda stage, min_score=7: pending["n"])
+    monkeypatch.setattr(pipeline, "_STREAM_POLL_INTERVAL", 0.01)
+    monkeypatch.setattr(pipeline, "_STREAM_BUSY_INTERVAL", 0.01)
+    tracker.mark_done("cover")  # pdf's upstream
+
+    pipeline._run_stage_streaming("pdf", tracker, threading.Event())
+    assert calls["n"] > pipeline._MAX_ERROR_PASSES  # not killed by the guard
+    assert tracker.get_results()["pdf"]["status"] == "ok"
+
+
+# ---------------------------------------------------------------------------
 # B8 — LLM response parsing guards (Gemini native + OpenAI compat)
 # ---------------------------------------------------------------------------
 

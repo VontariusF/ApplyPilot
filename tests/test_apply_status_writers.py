@@ -11,15 +11,22 @@ mismatch is surfaced (apply_conflict note, conflict badge) instead of
 clobbered.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from applypilot import database
+from applypilot import config, database
 from applypilot.apply import launcher
 from applypilot.database import get_connection, init_db
 
 HX = {"HX-Request": "true"}
+
+
+@pytest.fixture()
+def queue(app_dir):
+    """Isolated store handle (the reclaim/mark tests seed rows directly)."""
+    database.init_db()
+    return get_connection()
 
 
 @pytest.fixture()
@@ -203,6 +210,112 @@ def test_worker_result_without_manual_mark_writes_normally(app_dir):
     assert row["apply_status"] == "failed"
     assert row["apply_attempts"] == 1
     assert row["apply_error"] == "timeout"
+
+
+# ---------------------------------------------------------------------------
+# P2-1 — stale-lock reclaim then a late worker report is a lost race, not a
+# human mark: the reclaim marker separates the two
+# ---------------------------------------------------------------------------
+
+
+def test_stale_reclaim_writes_the_marker(queue):
+    """B4's reclaim path marks the row, so later writers can tell a lost
+    race from a human mark (P2-1). A fresh claim on an unmarked row does
+    not stamp the marker."""
+    _seed_stale_locked_job(queue, "https://x.com/jobs/stale")
+
+    job = launcher.acquire_job(min_score=1)
+    assert job is not None
+    assert job_row("https://x.com/jobs/stale")["apply_task_id"] == "reclaimed"
+
+    # A fresh claim on an unmarked row leaves the marker absent.
+    seed_job(url="https://x.com/jobs/fresh",
+             tailored_resume_path="/tmp/fake/resume.pdf")
+    fresh = launcher.acquire_job(min_score=1)
+    assert fresh is not None
+    assert job_row("https://x.com/jobs/fresh")["apply_task_id"] is None
+
+
+def _seed_stale_locked_job(conn, url, **extra):
+    cols = {
+        "url": url, "title": "Engineer", "site": "acme", "fit_score": 9,
+        "tailored_resume_path": "/tmp/fake/resume.pdf",
+        "apply_status": "in_progress",
+        "last_attempted_at": (datetime.now(timezone.utc) - timedelta(
+            minutes=2 * config.DEFAULTS["apply_stale_lock_minutes"])).isoformat(),
+        "apply_attempts": 1,
+    }
+    cols.update(extra)
+    keys = ", ".join(cols)
+    marks = ", ".join("?" for _ in cols)
+    conn.execute(f"INSERT INTO jobs ({keys}) VALUES ({marks})",
+                 tuple(cols.values()))
+    conn.commit()
+
+
+def test_reclaimed_race_late_applied_wins_without_blaming_the_user(queue):
+    """The sweep's reproduced P2-1 case: worker A's lock goes stale, worker
+    B reclaims and records 'failed', then A finally reports 'applied'. The
+    old status-based fallback read 'failed with no marker' as a human mark
+    and recorded a user-blaming conflict that discarded the real outcome."""
+    _seed_stale_locked_job(queue, "https://x.com/jobs/stale")
+
+    reclaiming = launcher.acquire_job(min_score=1)
+    assert reclaiming is not None
+    # The reclaimer's genuine failure (worker calls carry no task id).
+    outcome_b = launcher.mark_result("https://x.com/jobs/stale", "failed",
+                                     error="engine died")
+    assert outcome_b == "recorded"
+
+    # The original worker finally reports — a lost race, not a conflict.
+    outcome_a = launcher.mark_result("https://x.com/jobs/stale", "applied",
+                                     duration_ms=100, task_id="task-a",
+                                     resume_version_id=3)
+    assert outcome_a == "recorded"
+    row = job_row("https://x.com/jobs/stale")
+    assert row["apply_status"] == "applied"
+    assert row["applied_at"] is not None
+    assert row["applied_resume_version_id"] == 3
+    # The note is neutral — no "you marked it failed" accusation.
+    assert "concurrent run" in (row["apply_conflict"] or "")
+    assert "you marked" not in (row["apply_conflict"] or "")
+
+
+def test_reclaimed_race_late_failed_wins_with_neutral_note(queue):
+    """Mirror case: the reclaimer recorded 'applied', the stalled original
+    worker finally reports 'failed' — the later report wins and the note
+    stays neutral."""
+    _seed_stale_locked_job(queue, "https://x.com/jobs/stale")
+
+    assert launcher.acquire_job(min_score=1) is not None
+    outcome_b = launcher.mark_result("https://x.com/jobs/stale", "applied",
+                                     duration_ms=100)
+    assert outcome_b == "recorded"
+
+    outcome_a = launcher.mark_result("https://x.com/jobs/stale", "failed",
+                                     error="engine died")
+    assert outcome_a == "recorded"
+    row = job_row("https://x.com/jobs/stale")
+    assert row["apply_status"] == "failed"
+    assert row["apply_error"] == "engine died"
+    assert "concurrent run" in (row["apply_conflict"] or "")
+    assert "you marked" not in (row["apply_conflict"] or "")
+
+
+def test_unmarked_failed_row_is_still_treated_as_a_manual_mark(queue):
+    """A pre-marker row (apply_task_id NULL, no reclaim) keeps the
+    status-based fallback: a failed row with no marker and no reclaim
+    history is a human mark, and a contradicting worker report conflicts."""
+    seed_job(url="https://x.com/jobs/manual",
+             apply_status="failed", apply_error="manual",
+             apply_task_id=None)
+
+    outcome = launcher.mark_result("https://x.com/jobs/manual", "applied",
+                                   duration_ms=10)
+    assert outcome == "conflict"
+    row = job_row("https://x.com/jobs/manual")
+    assert row["apply_status"] == "failed"  # the manual record stands
+    assert "you marked it failed" in (row["apply_conflict"] or "")
 
 
 def test_manual_mark_on_in_progress_job_raises(app_dir):

@@ -66,10 +66,44 @@ _stop_event = threading.Event()
 _engine_procs: dict[int, subprocess.Popen] = {}
 _engine_lock = threading.Lock()
 
+# Jobs this process currently holds an apply lock on. The SIGTERM path
+# (cancel_run SIGTERMs this whole process group) must release them:
+# SystemExit is a BaseException, so worker_loop's `except Exception` /
+# `except KeyboardInterrupt` cleanup never runs, and without explicit
+# release a cancelled run's in-flight job stays locked until the stale
+# window lapses (reliability sweep P2-3). The engine is being killed
+# either way — there is no submission left to lose.
+_in_flight_locks: set[str] = set()
+_in_flight_guard = threading.Lock()
+
+
+def _register_in_flight(url: str) -> None:
+    with _in_flight_guard:
+        _in_flight_locks.add(url)
+
+
+def _unregister_in_flight(url: str) -> None:
+    with _in_flight_guard:
+        _in_flight_locks.discard(url)
+
+
+def _sigterm_handler(signum, frame):
+    """Exit on SIGTERM, releasing this process's in-flight apply locks."""
+    with _in_flight_guard:
+        in_flight = set(_in_flight_locks)
+        _in_flight_locks.clear()
+    for url in in_flight:
+        try:
+            release_lock(url)
+        except Exception:
+            logger.exception("SIGTERM cleanup: could not release lock for %s", url)
+    sys.exit(0)
+
+
 # Register cleanup on exit
 atexit.register(cleanup_on_exit)
 if platform.system() != "Windows":
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    signal.signal(signal.SIGTERM, _sigterm_handler)
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +215,8 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                 params.extend(blocked_patterns)
             row = conn.execute(f"""
                 SELECT url, title, site, application_url, tailored_resume_path,
-                       fit_score, location, full_description, cover_letter_path
+                       fit_score, location, full_description, cover_letter_path,
+                       apply_status
                 FROM jobs
                 WHERE tailored_resume_path IS NOT NULL
                   AND (apply_status IS NULL OR apply_status = 'failed'
@@ -212,10 +247,18 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
             return None
 
         now = datetime.now(timezone.utc).isoformat()
+        # P2-1: reclaiming a stale lock marks the row, so the reclaiming
+        # worker's result is distinguishable from a human mark when the
+        # original worker finally reports (a lost race, not a conflict).
+        # SQLite reads apply_status pre-UPDATE here, so the CASE fires only
+        # on a genuine stale-lock reclaim.
         conn.execute("""
             UPDATE jobs SET apply_status = 'in_progress',
                            agent_id = ?,
-                           last_attempted_at = ?
+                           last_attempted_at = ?,
+                           apply_task_id = CASE WHEN apply_status = 'in_progress'
+                                                THEN 'reclaimed'
+                                                ELSE apply_task_id END
             WHERE url = ?
         """, (f"{agent_label}-worker-{worker_id}", now, row["url"]))
         conn.commit()
@@ -268,6 +311,12 @@ def mark_result(url: str, status: str, error: str | None = None,
         conn.rollback()
         return "recorded"  # job vanished (e.g. removed mid-run) — nothing to write
 
+    # P2-1: a 'reclaimed' marker means a B4 stale-lock reclaim happened while
+    # the reporting worker believed it still held the job. Its report is a
+    # lost race against the reclaimer's own outcome — never evidence of a
+    # human mark.
+    reclaimed = row["apply_task_id"] == "reclaimed"
+
     marker = row["apply_task_id"]
     if marker is None:
         # Pre-marker row (this fork ran before coordination existed): fall
@@ -279,7 +328,7 @@ def mark_result(url: str, status: str, error: str | None = None,
         elif row["apply_status"] == "failed":
             marker = "manual-failed"
     elif not str(marker).startswith("manual-"):
-        marker = None  # a real engine task id from a previous result — not a mark
+        marker = None  # a real engine task id (or reclaim marker) — not a mark
 
     if marker in ("manual-applied", "manual-failed"):
         # A human recorded an outcome while this worker held the lock.
@@ -310,25 +359,37 @@ def mark_result(url: str, status: str, error: str | None = None,
         conn.commit()
         return "conflict"
 
+    # Worker writes preserve a reclaim marker (a third writer must still
+    # recognize the lost-race history) and, when the reclaim races a settled
+    # outcome, record a neutral supersede note — not a user-blaming conflict.
+    marker_to_keep = task_id if task_id is not None else ("reclaimed" if reclaimed else None)
+    superseded_note = None
+    if reclaimed and row["apply_status"] in ("applied", "failed") and row["apply_status"] != status:
+        superseded_note = (
+            f"A concurrent run reported '{row['apply_status']}' after this job's "
+            f"stale lock was reclaimed; the latest report ('{status}') won."
+        )
+
     if status == "applied":
         conn.execute("""
             UPDATE jobs SET apply_status = 'applied', applied_at = ?,
-                           apply_error = NULL, apply_conflict = NULL,
+                           apply_error = NULL, apply_conflict = ?,
                            agent_id = NULL,
                            apply_duration_ms = ?, apply_task_id = ?,
                            applied_resume_version_id = ?,
                            applied_cover_version_id = ?
             WHERE url = ?
-        """, (now, duration_ms, task_id, resume_version_id, cover_version_id, url))
+        """, (now, superseded_note, duration_ms, marker_to_keep,
+              resume_version_id, cover_version_id, url))
     else:
         attempts = 99 if permanent else "COALESCE(apply_attempts, 0) + 1"
         conn.execute(f"""
             UPDATE jobs SET apply_status = ?, apply_error = ?,
                            apply_attempts = {attempts}, agent_id = NULL,
-                           apply_task_id = NULL, apply_conflict = NULL,
+                           apply_conflict = ?,
                            apply_duration_ms = ?, apply_task_id = ?
             WHERE url = ?
-        """, (status, error or "unknown", duration_ms, task_id, url))
+        """, (status, error or "unknown", superseded_note, duration_ms, marker_to_keep, url))
     conn.commit()
     return "recorded"
 
@@ -352,6 +413,19 @@ def _stale_lock_cutoff() -> str:
     stale_minutes = config.DEFAULTS["apply_stale_lock_minutes"]
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=stale_minutes)
     return cutoff.isoformat()
+
+
+def _daily_cap_reached(cap: int) -> bool:
+    """True when today's application count has reached `cap` (P2-2).
+
+    Read live at the moment of the check — not from the snapshot a run
+    started with — so applications recorded by any path (a concurrent
+    run, a manual mark) count toward the daily cap.
+    """
+    from applypilot.database import count_applications_on
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return count_applications_on(today) >= cap
 
 
 # ---------------------------------------------------------------------------
@@ -764,7 +838,8 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
                 min_score: int = 7, headless: bool = False,
                 model: str = "sonnet", dry_run: bool = False,
                 continuous: bool = False,
-                engine: str = "claude") -> tuple[int, int]:
+                engine: str = "claude",
+                daily_cap: int | None = None) -> tuple[int, int]:
     """Run jobs sequentially until limit is reached or queue is empty.
 
     Args:
@@ -779,6 +854,10 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
             ``limit == 0`` — a zero slice in non-continuous mode exits
             cleanly instead of running forever).
         engine: Engine name ("claude" | "droid").
+        daily_cap: Max applications per UTC day this run must respect
+            (P2-2). None disables the check (manual CLI runs without a
+            cap). Re-read live before every job so applications made by
+            any path since the run started count.
 
     Returns:
         Tuple of (applied_count, failed_count).
@@ -792,6 +871,14 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
 
     while not _stop_event.is_set():
         if not continuous and jobs_done >= limit:
+            break
+        if daily_cap is not None and not target_url and _daily_cap_reached(daily_cap):
+            # P2-2: the cap is re-read live before every job — applications
+            # made by any path since this run started count toward it. A job
+            # already mid-flight when the cap trips still completes (at most
+            # `workers` over), since a submitted application cannot be
+            # un-submitted.
+            add_event(f"[W{worker_id}] Daily cap reached ({daily_cap} applications today) — stopping")
             break
 
         update_state(worker_id, status="idle", job_title="", company="",
@@ -815,6 +902,11 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
             continue
 
         empty_polls = 0
+
+        # P2-3: register the lock so the SIGTERM handler (cancel_run kills
+        # this whole process group) can release it — SystemExit skips the
+        # except/finally cleanup below otherwise.
+        _register_in_flight(job["url"])
 
         chrome_proc = None
         try:
@@ -862,6 +954,7 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
             failed += 1
             update_state(worker_id, jobs_failed=failed)
         finally:
+            _unregister_in_flight(job["url"])
             if chrome_proc:
                 cleanup_worker(worker_id, chrome_proc)
 
@@ -881,7 +974,7 @@ def main(limit: int = 1, target_url: str | None = None,
          min_score: int = 7, headless: bool = False, model: str = "sonnet",
          dry_run: bool = False, continuous: bool = False,
          poll_interval: int = 60, workers: int = 1,
-         engine: str = "claude") -> None:
+         engine: str = "claude", daily_cap: int | None = None) -> None:
     """Launch the apply pipeline.
 
     Args:
@@ -896,6 +989,9 @@ def main(limit: int = 1, target_url: str | None = None,
         poll_interval: Seconds between DB polls when queue is empty.
         workers: Number of parallel workers (default 1).
         engine: Engine name ("claude" | "droid").
+        daily_cap: Max applications per UTC day this run must respect
+            (P2-2); None disables the check. Portal preset starts pass
+            the configured cap so mid-run drift cannot exceed it.
     """
     global POLL_INTERVAL
     POLL_INTERVAL = poll_interval
@@ -981,6 +1077,7 @@ def main(limit: int = 1, target_url: str | None = None,
                     dry_run=dry_run,
                     continuous=continuous,
                     engine=engine_obj.name,
+                    daily_cap=daily_cap,
                 )
             else:
                 # Multi-worker — distribute limit across workers (B1: a
@@ -1002,6 +1099,7 @@ def main(limit: int = 1, target_url: str | None = None,
                             dry_run=dry_run,
                             continuous=continuous,
                             engine=engine_obj.name,
+                            daily_cap=daily_cap,
                         ): i
                         for i in range(workers)
                     }

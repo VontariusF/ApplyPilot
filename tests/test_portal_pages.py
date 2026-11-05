@@ -160,6 +160,25 @@ def test_jobs_redirect_encodes_url_location(portal_client, monkeypatch):
     assert r.headers["location"] == encoded
 
 
+def test_regenerate_refuses_while_apply_in_progress(portal_client):
+    """P2-4: resetting tailoring mid-run would unlink the PDF that the
+    active apply run is about to upload — the same plain-language refusal
+    as /jobs/apply-now, not a silent document wipe."""
+    client, _ = portal_client
+    url = seed_job(apply_status="in_progress",
+                   tailored_resume_path="/x/resume.txt")
+
+    r = client.post("/jobs/regenerate", data={"url": url},
+                    headers={"HX-Request": "true"})
+
+    assert r.status_code == 409
+    assert "applying to this job right now" in r.text
+    row = get_connection().execute(
+        "SELECT tailored_resume_path FROM jobs WHERE url = ?", (url,)
+    ).fetchone()
+    assert row["tailored_resume_path"] == "/x/resume.txt"  # untouched
+
+
 def test_reset_failed_action(portal_client):
     client, _ = portal_client
     url = seed_job()
