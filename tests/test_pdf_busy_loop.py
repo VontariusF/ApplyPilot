@@ -242,5 +242,122 @@ def test_reconciliation_respects_remaining_limit(isolated_db, tmp_path, monkeypa
     assert pipeline._count_pending("pdf") == 0
 
 
+def test_reset_deletes_stale_pdf_when_history_off(isolated_db, tmp_path, monkeypatch):
+    """With history off, resetting must invalidate the same-stem stale PDF.
+
+    History off overwrites the .txt in place, so the old .pdf at that
+    stem still renders the previous resume; leaving it lets reconciliation
+    mark the regenerated document as done from the stale file.
+    """
+    monkeypatch.setenv("HISTORY_ENABLED", "off")
+    txt = _make_tailored_pair(tmp_path)  # .txt + stale .pdf both exist
+    _seed_tailored_job("https://example.com/job-1", str(txt))
+    conn = database.get_connection()
+
+    assert database.reset_job_tailoring(conn, "https://example.com/job-1")
+
+    assert not txt.with_suffix(".pdf").exists(), (
+        "the stale PDF must be invalidated so the regenerated text re-renders"
+    )
+    row = conn.execute(
+        "SELECT pdf_generated_at, pdf_attempts FROM jobs WHERE url = ?",
+        ("https://example.com/job-1",),
+    ).fetchone()
+    assert row["pdf_generated_at"] is None
+    assert row["pdf_attempts"] == 0
+
+
+def test_reset_keeps_pdf_pair_when_history_on(isolated_db, tmp_path, monkeypatch):
+    """With history on, the old .txt/.pdf pair stays intact as history."""
+    monkeypatch.setenv("HISTORY_ENABLED", "on")
+    txt = _make_tailored_pair(tmp_path)
+    _seed_tailored_job("https://example.com/job-1", str(txt))
+    conn = database.get_connection()
+
+    assert database.reset_job_tailoring(conn, "https://example.com/job-1")
+
+    assert txt.with_suffix(".pdf").exists(), (
+        "history mode never deletes the old document pair"
+    )
+
+
+def test_stale_render_result_does_not_settle_replacement(isolated_db, tmp_path, monkeypatch):
+    """An obsolete render must not settle a row re-pointed mid-flight.
+
+    Simulates reset + re-tailor between the reconcile's render and its
+    DB write: the row is swapped to a new path while the old render
+    completes. The url-only update pre-fix would mark the replacement
+    resume generated — hiding it from the pdf pending query.
+    """
+    tailored = tmp_path / "tailored"
+    tailored.mkdir()
+    old_txt = tailored / "resume_old.txt"
+    old_txt.write_text("Jane Doe\nTITLE\nEngineer\nSUMMARY\nold", encoding="utf-8")
+    _seed_tailored_job("https://example.com/job-1", str(old_txt))
+
+    new_txt = tailored / "resume_new.txt"
+
+    def _swap_path_mid_render(txt_path):
+        # The render "succeeds" for the old path, but the row has been
+        # reset and re-tailored to a brand-new path in the meantime.
+        Path(txt_path).with_suffix(".pdf").write_bytes(b"%PDF-1.4 old")
+        new_txt.write_text("Jane Doe\nTITLE\nEngineer\nSUMMARY\nnew", encoding="utf-8")
+        conn = database.get_connection()
+        conn.execute(
+            "UPDATE jobs SET tailored_resume_path = ? WHERE url = ?",
+            (str(new_txt), "https://example.com/job-1"),
+        )
+        conn.commit()
+
+    monkeypatch.setattr(pdf_mod, "convert_to_pdf", _swap_path_mid_render)
+
+    settled = pdf_mod._settle_job_pdf_states()
+
+    assert settled == 0, "the render result belongs to a path the row no longer has"
+    conn = database.get_connection()
+    row = conn.execute(
+        "SELECT pdf_generated_at, tailored_resume_path FROM jobs WHERE url = ?",
+        ("https://example.com/job-1",),
+    ).fetchone()
+    assert row["pdf_generated_at"] is None, (
+        "the replacement resume must stay pending for its own conversion"
+    )
+    assert row["tailored_resume_path"] == str(new_txt)
+    assert pipeline._count_pending("pdf") == 1
+
+
+def test_exhausted_rows_not_rerendered(isolated_db, tmp_path, monkeypatch):
+    """Reconciliation must not re-render rows the pending cap excludes.
+
+    A DB-backed source that already burned its five attempts is not
+    pending; re-invoking Chromium for it on every later batch_convert
+    call would defeat the bounded-retry semantics.
+    """
+    tailored = tmp_path / "tailored"
+    tailored.mkdir()
+    txt = tailored / "resume_poison.txt"
+    txt.write_text("Jane Doe\nTITLE\nEngineer\nSUMMARY\npoison", encoding="utf-8")
+    _seed_tailored_job("https://example.com/job-1", str(txt))
+    conn = database.get_connection()
+    conn.execute(
+        "UPDATE jobs SET pdf_attempts = 5 WHERE url = ?",
+        ("https://example.com/job-1",),
+    )
+    conn.commit()
+
+    rendered: list[Path] = []
+
+    def _must_not_render(txt_path):
+        rendered.append(Path(txt_path))
+        Path(txt_path).with_suffix(".pdf").write_bytes(b"%PDF-1.4 fake")
+
+    monkeypatch.setattr(pdf_mod, "TAILORED_DIR", tailored)
+    monkeypatch.setattr(pdf_mod, "convert_to_pdf", _must_not_render)
+
+    assert pdf_mod.batch_convert() == 0
+    assert rendered == [], "an exhausted row must not be re-rendered"
+    assert pipeline._count_pending("pdf") == 0
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

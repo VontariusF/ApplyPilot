@@ -441,51 +441,67 @@ def _settle_job_pdf_states(convert_budget: int | None = None) -> int:
         "SELECT url, tailored_resume_path FROM jobs "
         "WHERE tailored_resume_path IS NOT NULL "
         "AND tailored_resume_path LIKE '%.txt' "
-        "AND pdf_generated_at IS NULL"
+        "AND pdf_generated_at IS NULL "
+        # Cap parity with pipeline._PENDING_SQL: an exhausted row is not
+        # pending, so reconciliation must not re-render it either (it
+        # would re-invoke Chromium for a known poison input forever).
+        "AND COALESCE(pdf_attempts, 0) < 5"
     ).fetchall()
 
     # Pass 1 — classify rows and do all filesystem work BEFORE any DB
     # write: an open SQLite write transaction held across a Chromium
     # render would block other stages' writes for the render's duration.
-    generated: list[str] = []
-    failed: list[str] = []
+    generated: list[tuple[str, Path]] = []
+    failed: list[tuple[str, Path]] = []
     conversions: list[tuple[str, Path]] = []
     for row in rows:
         txt = Path(row["tailored_resume_path"])
         pdf = txt.with_suffix(".pdf")
         if pdf.exists():
-            generated.append(row["url"])
+            generated.append((row["url"], txt))
         elif txt.exists():
             if convert_budget is not None and len(conversions) >= convert_budget:
                 continue  # over quota — stays pending for the next pass
             conversions.append((row["url"], txt))
         else:
-            failed.append(row["url"])  # source vanished — burn an attempt
+            failed.append((row["url"], txt))  # source vanished — burn an attempt
 
     for url, txt in conversions:
         try:
             convert_to_pdf(txt)
         except Exception as e:
             log.error("PDF conversion failed for %s: %s", txt.name, e)
-            failed.append(url)
+            failed.append((url, txt))
         else:
-            generated.append(url)
+            generated.append((url, txt))
 
     # Pass 2 — one short write transaction with no renders inside it.
+    # Both updates are predicated on the row still pointing at the exact
+    # path this pass inspected: a concurrent reset + re-tailor that swaps
+    # the row to a new path must not be settled (or attempt-burned) by an
+    # obsolete render result for the old path.
     now = _utc_now()
-    for url in generated:
-        conn.execute(
-            "UPDATE jobs SET pdf_generated_at = ? WHERE url = ?",
-            (now, url),
+    settled = 0
+    for url, txt in generated:
+        # Re-verify at write time: with history off a concurrent
+        # reset_job_tailoring deletes the stale .pdf — invalidating this
+        # mark keeps the row pending so the regenerated text converts.
+        if not txt.with_suffix(".pdf").exists():
+            continue
+        cur = conn.execute(
+            "UPDATE jobs SET pdf_generated_at = ? "
+            "WHERE url = ? AND tailored_resume_path = ?",
+            (now, url, str(txt)),
         )
-    for url in failed:
+        settled += cur.rowcount
+    for url, txt in failed:
         conn.execute(
             "UPDATE jobs SET pdf_attempts = COALESCE(pdf_attempts, 0) + 1 "
-            "WHERE url = ?",
-            (url,),
+            "WHERE url = ? AND tailored_resume_path = ?",
+            (url, str(txt)),
         )
     conn.commit()
-    return len(generated)
+    return settled
 
 
 def batch_convert(limit: int = 50) -> int:
@@ -520,9 +536,27 @@ def batch_convert(limit: int = 50) -> int:
         if not f.name.endswith("_JOB.txt")
     ]
 
+    # Skip files whose job row has exhausted its pdf attempts (cap parity
+    # with pipeline._PENDING_SQL): the pipeline no longer counts them as
+    # pending, so re-invoking Chromium for a known poison input on every
+    # call would defeat the bounded-retry semantics.
+    from applypilot.database import get_connection
+
+    conn = get_connection()
+    exhausted = {
+        row["tailored_resume_path"]
+        for row in conn.execute(
+            "SELECT tailored_resume_path FROM jobs "
+            "WHERE COALESCE(pdf_attempts, 0) >= 5 "
+            "AND tailored_resume_path IS NOT NULL"
+        ).fetchall()
+    }
+
     # Filter to those without a corresponding PDF
     to_convert: list[Path] = []
     for f in candidates:
+        if str(f) in exhausted:
+            continue
         pdf_path = f.with_suffix(".pdf")
         if not pdf_path.exists():
             to_convert.append(f)

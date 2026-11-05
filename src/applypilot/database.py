@@ -5,17 +5,20 @@ pipeline stage are created up front so any stage can run independently
 without migration ordering issues.
 """
 
+import logging
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from applypilot import config
-from applypilot.config import DB_PATH
+from applypilot.config import DB_PATH, history_enabled
 
 # Thread-local connection storage — each thread gets its own connection
 # (required for SQLite thread safety with parallel workers)
 _local = threading.local()
+
+log = logging.getLogger(__name__)
 
 # Document kinds tracked in document_versions (spec D2)
 KIND_RESUME = "resume"
@@ -735,10 +738,32 @@ def reset_job_tailoring(conn: sqlite3.Connection, url: str,
     resets the attempt counters so a previously-exhausted job can try again.
     Also clears the PDF bookkeeping: the new resume is a different document,
     so the stale pdf_generated_at/pdf_attempts of the previous one must not
-    keep it out of the pdf stage's pending count. Existing files and version
-    rows stay on disk — history is never deleted.
+    keep it out of the pdf stage's pending count. With history off the
+    regenerated resume overwrites the same .txt stem, so the previous .pdf
+    at that stem is deleted — it renders the OLD resume and PDF
+    reconciliation would otherwise mark the regenerated document as done
+    from the stale file. With history on the replacement lands at a fresh
+    _v{N} stem; the old .txt/.pdf pair stays on disk — history is never
+    deleted. Version rows also stay on disk in both modes.
     Returns True when the job exists.
     """
+    row = conn.execute(
+        "SELECT tailored_resume_path FROM jobs WHERE url = ?", (url,)
+    ).fetchone()
+    if row is None:
+        return False
+
+    old_path = row["tailored_resume_path"]
+    if old_path and old_path.lower().endswith(".txt") and not history_enabled():
+        stale_pdf = Path(old_path).with_suffix(".pdf")
+        try:
+            stale_pdf.unlink()
+        except FileNotFoundError:
+            pass  # nothing to invalidate
+        except OSError as e:
+            log.warning("Could not remove stale PDF %s during re-tailor "
+                        "reset: %s", stale_pdf, e)
+
     sets = ["tailored_resume_path = NULL", "tailored_at = NULL", "tailor_attempts = 0",
             "pdf_generated_at = NULL", "pdf_attempts = 0"]
     params: list = []
