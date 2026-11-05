@@ -464,6 +464,31 @@ _RESUME_CONTEXT_TMPL = (
     "the interview.)"
 )
 
+_ANSWER_ACK_TMPL = (
+    'The user just answered the wizard question "{question}" '
+    '(question id: {qid}) with "{answer}".{options_clause} '
+    "Acknowledge that specific answer in at most two sentences. Correct "
+    "course only when it contradicts what you already know; do not pivot "
+    "to unrelated profile topics."
+)
+
+
+def answer_ack_prompt(spec: QuestionSpec, label: str) -> str:
+    """The grounded acknowledgement prompt for one guided answer
+    (spec art_ti3XJuNr, grounded agent replies): the agent reads the
+    question's id, text, offered options, and the submitted value — never
+    a bare answer label, and never a topic the question didn't ask
+    about. Both backends receive it: the Claude CLI as its turn prompt,
+    the provider as an unrecorded directive after the transcript."""
+    options_clause = ""
+    if spec.choices:
+        options = ", ".join(f'"{c.label}"' for c in spec.choices)
+        options_clause = f" The offered options were: {options}."
+    return _ANSWER_ACK_TMPL.format(
+        question=spec.prompt, qid=spec.id, answer=label,
+        options_clause=options_clause,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Backends
@@ -532,11 +557,24 @@ class ClaudePrintBackend:
 
     name = "claude"
 
+    @staticmethod
+    def _with_system_prompt(text: str, resume: bool) -> str:
+        """Shared prompt entry point for both backends (spec art_ti3XJuNr):
+        a session-opening `claude -p` turn carries the same SYSTEM_PROMPT
+        the provider backend sends as its system role — print mode has no
+        system-role channel, so it rides the first prompt; a resumed
+        session already carries it from turn 1."""
+        if resume:
+            return text
+        return f"{SYSTEM_PROMPT}\n\n---\n\n{text}"
+
     def kickoff(self, state: InterviewState, prompt: str | None = None) -> str:
-        return self._run(state, prompt or KICKOFF_PROMPT, resume=False)
+        return self._run(state, self._with_system_prompt(prompt or KICKOFF_PROMPT, resume=False),
+                         resume=False)
 
     def send(self, state: InterviewState, user_text: str) -> str:
-        return self._run(state, user_text, resume=state.claude_session_id is not None)
+        resume = state.claude_session_id is not None
+        return self._run(state, self._with_system_prompt(user_text, resume), resume=resume)
 
     def _run(self, state: InterviewState, prompt: str, resume: bool) -> str:
         binary = _claude_binary()
@@ -1420,8 +1458,12 @@ def record_answer(question_id: str, value: str = "", free_text: str = "",
 
     The chosen button appends its LABEL as the user turn (the agent reads
     prose, exactly as in free-form chat) and stores the VALUE in
-    state.answers; free text stores what the user typed. A skip records
-    the question as intentionally empty — it never becomes a profile
+    state.answers; free text stores what the user typed. The agent
+    acknowledgement is grounded on the exact exchange (answer_ack_prompt:
+    question id, text, options, submitted value — both backends, spec
+    art_ti3XJuNr) and never carries the pending resume context: that
+    attaches to the next question-asking turn. A skip records the
+    question as intentionally empty — it never becomes a profile
     value, so review keeps flagging it (PR #22 guard). The agent
     acknowledgement runs after the answer is persisted: a backend failure
     costs the acknowledgement, never the user's click.
@@ -1465,30 +1507,25 @@ def record_answer(question_id: str, value: str = "", free_text: str = "",
         save_state(state)
 
         if label:
-            prompt = label
-            context = state.pending_context
-            if context:
-                prompt = f"{context}\n\nUser's message: {label}"
-                state.pending_context = ""
+            # Grounded ack (spec art_ti3XJuNr): both backends hear the
+            # question's id, text, options, and the submitted value — the
+            # Claude CLI as its turn prompt, the provider as an unrecorded
+            # directive after the transcript. A pure answer-acknowledgement
+            # turn never touches the pending resume context: it attaches to
+            # the next question-asking turn instead, so an answer click can
+            # neither hijack it into an unrelated ack nor spend it.
+            prompt = answer_ack_prompt(spec, label)
             try:
-                reply = _agent_turn(state, prompt, prompt, context_for_provider=context)
+                reply = _agent_turn(state, prompt, prompt, directive=prompt)
             except RuntimeError as exc:
                 # The user's answer stays recorded; the chat shows the
                 # failure and the next render carries the error banner.
-                # The context goes back in play too: a failed ack turn
-                # extracted nothing, so persisting the spent state here
-                # would drop the only copy of the resume.
-                if context:
-                    state.pending_context = context
                 state.error = str(exc)
                 save_state(state)
                 raise
             state.error = None
             state.messages.append({"role": _ROLE_ASSISTANT, "content": reply})
-            if not _after_reply(state, reply, allow_review=False) and context:
-                # Same retention rule as send_message: a draftless turn
-                # keeps the pending resume in play for the next one.
-                state.pending_context = context
+            _after_reply(state, reply, allow_review=False)
         save_state(state)
         return state
 

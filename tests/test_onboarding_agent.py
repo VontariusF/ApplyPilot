@@ -439,6 +439,97 @@ def test_resume_rejected_outside_interview(app_dir, fake_llm):
 
 
 # ---------------------------------------------------------------------------
+# Grounded agent replies (spec art_ti3XJuNr): question-anchored acks on
+# every backend, pending context scoped to the upload turn
+# ---------------------------------------------------------------------------
+
+def test_ack_prompt_carries_question_options_and_answer():
+    """The grounded prompt names the question's text and id, its offered
+    options, and the submitted value — the agent can never mistake which
+    exchange it is acknowledging."""
+    spec = onboarding.QUESTIONS["work_authorized"]
+    prompt = onboarding.answer_ack_prompt(spec, "No")
+    assert spec.prompt in prompt
+    assert spec.id in prompt
+    assert '"No"' in prompt
+    for option in spec.choices:
+        assert f'"{option.label}"' in prompt
+    # Free-text questions carry no option set to enumerate.
+    bare = onboarding.answer_ack_prompt(onboarding.QUESTIONS["full_name"], "Jane Q. Public")
+    assert "options were" not in bare
+    assert "Jane Q. Public" in bare
+
+
+def test_guided_ack_reaches_both_backends(app_dir, fake_llm):
+    """H1: the provider hears the grounded directive (unrecorded, after the
+    transcript) — the bare choice label in the transcript is not what the
+    agent answers from."""
+    onboarding.start_interview("llm")
+    onboarding.record_answer("work_authorized", value="yes")
+    request = fake_llm.calls[-1]
+    directive = request[-1]
+    assert directive["role"] == "user"
+    assert directive["content"] == onboarding.answer_ack_prompt(
+        onboarding.QUESTIONS["work_authorized"], "Yes")
+    assert "What's your highest" not in directive["content"]  # no other question
+    # The transcript still records only what the user sees.
+    assert any(m["role"] == "user" and m["content"] == "Yes" for m in request)
+
+
+def test_claude_backend_ack_carries_the_question(
+        app_dir, fake_claude, signed_in, monkeypatch, tmp_path):
+    """H1 parity: the CLI backend's turn prompt is the same grounded
+    acknowledgement, not a bare label."""
+    prompt_log = tmp_path / "prompts.log"
+    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(prompt_log))
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "wizard")
+    onboarding.start_interview("claude")
+    onboarding.record_answer("work_authorized", value="yes")
+    turns = [json.loads(line) for line in prompt_log.read_text().splitlines()]
+    assert onboarding.answer_ack_prompt(
+        onboarding.QUESTIONS["work_authorized"], "Yes") in turns[1]["prompt"]
+    assert turns[1]["resume"] == "fake-session-1"  # session continuity held
+
+
+def test_claude_backend_session_opening_carries_the_system_prompt(
+        app_dir, fake_claude, signed_in, monkeypatch, tmp_path):
+    """H2: print mode has no system-role channel — the shared SYSTEM_PROMPT
+    rides the session-opening prompt and does not repeat on resumed turns."""
+    prompt_log = tmp_path / "prompts.log"
+    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(prompt_log))
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "wizard")
+    onboarding.start_interview("claude")
+    onboarding.record_answer("work_authorized", value="yes")
+    turns = [json.loads(line) for line in prompt_log.read_text().splitlines()]
+    assert onboarding.SYSTEM_PROMPT in turns[0]["prompt"]
+    assert onboarding.SYSTEM_PROMPT not in turns[1]["prompt"]
+
+
+def test_ack_turn_never_spends_the_pending_resume(app_dir, fake_llm):
+    """H3: pending_context is consumed exactly once, on the
+    question-asking turn that first follows the upload — an answer
+    acknowledgement neither delivers it nor spends it."""
+    onboarding.start_interview("llm")
+    onboarding.add_resume(text="MARKER-RESUME-7788")
+    # First turn after the upload: the resume rides the request...
+    onboarding.send_message("I also like hiking")  # draftless: retained
+    assert "MARKER-RESUME-7788" in onboarding.load_state().pending_context
+    assert any("MARKER-RESUME-7788" in m["content"] for m in fake_llm.calls[-1])
+    # ...an answer ack is not such a turn: no delivery, no spend.
+    onboarding.record_answer("work_authorized", value="yes")
+    state = onboarding.load_state()
+    assert "MARKER-RESUME-7788" in state.pending_context
+    assert not any("MARKER-RESUME-7788" in m["content"] for m in fake_llm.calls[-1])
+    # ...and the next question-asking turn delivers it exactly once: this
+    # one extracts a draft, so the spend sticks.
+    fake_llm.replies = ["Hello from the provider.", "Hello from the provider.",
+                        _draft_reply()]
+    onboarding.send_message("that's everything")
+    assert onboarding.load_state().pending_context == ""
+    assert any("MARKER-RESUME-7788" in m["content"] for m in fake_llm.calls[-1])
+
+
+# ---------------------------------------------------------------------------
 # Review phase transitions
 # ---------------------------------------------------------------------------
 

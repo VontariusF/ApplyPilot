@@ -210,11 +210,12 @@ def test_spent_context_echo_still_strips_gated_claims(portal_client, fake_llm, m
 
 
 def test_guided_answer_keeps_the_resume_in_play(portal_client, fake_llm, monkeypatch):
-    """The guided-answer path (record_answer) carries the same resume
-    context the chat path does: the provider's request includes the
-    uploaded text on the wizard's ack turn, and a draftless ack keeps
-    the context for later — one button click must not drop the only
-    copy of the resume (Codex P2 on 80f92a0)."""
+    """A guided-answer ack is a pure answer-acknowledgement turn (spec
+    art_ti3XJuNr H3): the pending resume context is never prepended to it
+    — it attaches to the next question-asking turn instead, so one button
+    click can neither hijack the ack onto an unrelated topic nor spend
+    the only copy of the resume. The ack still grounds the agent on the
+    exact question and answer (H1), via an unrecorded directive."""
     client, _ = portal_client
     monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
     fake_llm.respond("Hello! Tell me about your background.")  # kickoff: no draft
@@ -230,14 +231,18 @@ def test_guided_answer_keeps_the_resume_in_play(portal_client, fake_llm, monkeyp
                 data={"question_id": "full_name", "free_text": "Jane Q. Public"})
     state = onboarding.load_state()
     assert state.answers["full_name"] == "Jane Q. Public"
-    assert "MARKER-RESUME-7788" in state.pending_context  # draftless ack: retained
-    # The provider got the resume on the guided turn too.
-    assert any("MARKER-RESUME-7788" in m["content"] for m in fake_llm.calls[-1])
+    assert "MARKER-RESUME-7788" in state.pending_context  # ack turn: untouched
+    # The provider never saw the resume on the ack turn — and it did get
+    # the grounded directive naming the question and the submitted value.
+    ack_request = fake_llm.calls[-1]
+    assert not any("MARKER-RESUME-7788" in m["content"] for m in ack_request)
+    assert "What's your full name?" in ack_request[-1]["content"]
+    assert "Jane Q. Public" in ack_request[-1]["content"]
 
-    fake_llm.respond(DRAFT_REPLY)  # extraction lands on a later turn
+    fake_llm.respond(DRAFT_REPLY)  # extraction lands on a question-asking turn
     client.post("/onboarding/send", data={"text": "that's everything"})
     state = onboarding.load_state()
-    assert state.pending_context == ""  # spent
+    assert state.pending_context == ""  # spent: exactly once, on the upload turn
 
 
 def test_failed_turn_keeps_the_resume_in_play(portal_client, fake_llm, monkeypatch):
@@ -382,7 +387,7 @@ def test_resume_context_rides_after_the_system_message(portal_client, fake_llm, 
     provider request, never at index 0 — strict OpenAI-compatible
     custom/local endpoints reject (or fail to apply) a
     mid-conversation system role, which would break every
-    resume-backed guided turn (Codex P2 on 24969c0)."""
+    resume-backed chat turn (Codex P2 on 24969c0)."""
     client, _ = portal_client
     monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
     fake_llm.respond("Hello! Tell me about your background.")  # draftless kickoff
@@ -393,7 +398,7 @@ def test_resume_context_rides_after_the_system_message(portal_client, fake_llm, 
     assert onboarding.load_state().pending_context
 
     fake_llm.respond("Noted — tell me more about your experience.")
-    onboarding.record_answer("full_name", free_text="Jane Doe")
+    onboarding.send_message("I also like hiking")
     sent = fake_llm.calls[-1]
     assert sent[0]["role"] == "system"  # stays first
     assert sent[1]["role"] == "user"  # context right after it, never before
