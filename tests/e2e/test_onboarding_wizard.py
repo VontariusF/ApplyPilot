@@ -18,21 +18,22 @@ pytestmark = pytest.mark.e2e
 # submits; "free:" entries are typed into the per-kind widget; None
 # entries are skipped (their review chips are the point).
 WALK = {
+    "full_name": "free:Test Person",
+    "education": "Bachelor's",
+    "experience_years": "3–5",
+    "work_style": "remote",
+    "country": "United States",
     "work_authorized": None,  # skipped: gated field, gets the review chip
     "sponsorship": "no",
     "permit_type": "Citizen",
-    "work_style": "remote",
     "currency": "USD",
     "salary_band": "120000",
     "start_date": "Immediately",
-    "education": "Bachelor's",
-    "experience_years": "3–5",
     "target_roles": "free:Data Engineer\nAnalytics Engineer",
     "location": "free:Austin, TX",
     "skills_languages": "free:Python\nSQL",
     "skills_frameworks": "free:FastAPI",
     "skills_tools": "free:Docker",
-    "full_name": "free:Test Person",
     "email": "free:test@example.com",
     "phone": "free:+1 555 0100",
     "city": "free:Austin, TX",
@@ -53,7 +54,7 @@ async def _start_interview(page, base, theme, token):
     assert await page.locator("html").get_attribute("data-theme") == theme
     await page.wait_for_selector("button:has-text('Use the configured provider instead')")
     await page.click("button:has-text('Use the configured provider instead')")
-    await page.wait_for_selector("[data-question-id='work_authorized']")
+    await page.wait_for_selector("[data-question-id]")  # identity first
 
 
 async def _answer_current(page, plan):
@@ -168,6 +169,6 @@ def test_agent_toggle_round_trip(run_journey, chromium, portal_server, monkeypat
 
             # …and come back to the same question's buttons.
             await page.click("button:has-text('Back to guided questions')")
-            await page.wait_for_selector("[data-question-id='work_authorized']")
+            await page.wait_for_selector("[data-question-id='full_name']")
 
     run_journey(journey())
