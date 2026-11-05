@@ -193,6 +193,40 @@ def test_guided_answer_keeps_the_resume_in_play(portal_client, fake_llm, monkeyp
     assert state.pending_context == ""  # spent
 
 
+def test_failed_turn_keeps_the_resume_in_play(portal_client, fake_llm, monkeypatch):
+    """A provider failure on a resume-backed turn must not persist the
+    spent state: both the chat path and the guided-answer path restore
+    pending_context before saving the error, so the resume survives a
+    timeout to be extracted on a later turn (Codex P2 on 6576bef)."""
+    client, _ = portal_client
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    fake_llm.respond("Hello! Tell me about your background.")  # kickoff: no draft
+
+    onboarding.start_intake()
+    client.post("/onboarding/resume", data={"resume_text": "MARKER-RESUME-7788"})
+    client.post("/onboarding/start", data={"mode": "llm"})
+
+    def boom(state, *args, **kwargs):
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(onboarding, "_agent_turn", boom)
+    try:
+        onboarding.send_message("I also like hiking")
+    except RuntimeError:
+        pass
+    state = onboarding.load_state()
+    assert "provider down" in state.error  # the failure is surfaced, not swallowed
+    assert "MARKER-RESUME-7788" in state.pending_context  # retained through the failure
+
+    try:
+        onboarding.record_answer("full_name", free_text="Jane Q. Public")
+    except RuntimeError:
+        pass
+    state = onboarding.load_state()
+    assert state.answers["full_name"] == "Jane Q. Public"  # answer persisted
+    assert "MARKER-RESUME-7788" in state.pending_context  # retained here too
+
+
 def test_kickoff_extraction_never_records_gated_claims(portal_client, fake_llm, monkeypatch):
     """The intake kickoff reads a document, not the user: its draft may
     prefill identity and preferences, but gated work-auth claims are

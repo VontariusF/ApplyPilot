@@ -1280,7 +1280,12 @@ def send_message(text: str) -> InterviewState:
             reply = _agent_turn(state, text, prompt, context_for_provider=context)
         except RuntimeError as exc:
             # The user's message stays in the transcript; the chat shows the
-            # failure and the composer stays live for a retry.
+            # failure and the composer stays live for a retry. The context
+            # goes back in play too: a failed turn extracted nothing, so
+            # persisting the spent state here would drop the only copy of
+            # the resume.
+            if context:
+                state.pending_context = context
             state.error = str(exc)
             save_state(state)
             raise
@@ -1428,6 +1433,11 @@ def record_answer(question_id: str, value: str = "", free_text: str = "",
             except RuntimeError as exc:
                 # The user's answer stays recorded; the chat shows the
                 # failure and the next render carries the error banner.
+                # The context goes back in play too: a failed ack turn
+                # extracted nothing, so persisting the spent state here
+                # would drop the only copy of the resume.
+                if context:
+                    state.pending_context = context
                 state.error = str(exc)
                 save_state(state)
                 raise
