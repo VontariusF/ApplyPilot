@@ -7,9 +7,10 @@ without migration ordering issues.
 
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from applypilot import config
 from applypilot.config import DB_PATH
 
 # Thread-local connection storage — each thread gets its own connection
@@ -653,6 +654,44 @@ def count_applications_on(day: str) -> int:
         "WHERE applied_at IS NOT NULL AND date(applied_at) = ?",
         (day,),
     ).fetchone()[0]
+
+
+def count_apply_eligible(min_score: int = 7) -> int:
+    """Jobs the apply worker could pick up right now (scheduler guard).
+
+    Mirrors the queue predicate of apply/launcher.acquire_job's non-target
+    branch — tailored, not locked (or a stale lock), under the apply
+    attempt limit, scored at or above min_score, and not on a blocked
+    site/URL pattern. Keep the two in sync; the launcher's query owns the
+    semantics, this count only answers "is there anything to apply to".
+    """
+    stale_minutes = config.DEFAULTS["apply_stale_lock_minutes"]
+    cutoff = (datetime.now(timezone.utc)
+              - timedelta(minutes=stale_minutes)).isoformat()
+    conn = get_connection()
+    params: list = [cutoff, config.DEFAULTS["max_apply_attempts"], min_score]
+    site_clause = ""
+    blocked_sites, blocked_patterns = config.load_blocked_sites()
+    if blocked_sites:
+        placeholders = ",".join("?" * len(blocked_sites))
+        site_clause = f"AND site NOT IN ({placeholders})"
+        params.extend(blocked_sites)
+    url_clauses = ""
+    if blocked_patterns:
+        url_clauses = " ".join("AND url NOT LIKE ?" for _ in blocked_patterns)
+        params.extend(blocked_patterns)
+    row = conn.execute(f"""
+        SELECT COUNT(*) FROM jobs
+        WHERE tailored_resume_path IS NOT NULL
+          AND (apply_status IS NULL OR apply_status = 'failed'
+               OR (apply_status = 'in_progress' AND last_attempted_at IS NOT NULL
+                   AND last_attempted_at <= ?))
+          AND (apply_attempts IS NULL OR apply_attempts < ?)
+          AND fit_score >= ?
+          {site_clause}
+          {url_clauses}
+    """, params).fetchone()
+    return row[0]
 
 
 def set_job_dismissed(conn: sqlite3.Connection | None = None, url: str = "",
