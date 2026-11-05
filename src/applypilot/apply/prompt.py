@@ -88,9 +88,12 @@ def _build_profile_summary(profile: dict) -> str:
     if work_auth.get("work_permit_type"):
         lines.append(f"Work Permit: {work_auth['work_permit_type']}")
 
-    # Compensation
-    currency = comp.get("salary_currency", "USD")
-    lines.append(f"Salary Expectation: ${comp['salary_expectation']} {currency}")
+    # Compensation — recorded answers only, no invented currency or figure
+    # (spec art_ti3XJuNr, currency-real salary).
+    expectation = str(comp.get("salary_expectation") or "").strip()
+    if expectation:
+        currency = str(comp.get("salary_currency") or "").strip()
+        lines.append(f"Salary Expectation: {expectation} {currency}".strip())
 
     # Experience
     if exp.get("years_of_experience_total"):
@@ -148,45 +151,47 @@ Do NOT fill out forms for jobs that are clearly onsite in a non-acceptable locat
 
 
 def _build_salary_section(profile: dict) -> str:
-    """Build the salary negotiation instructions.
+    """Build the salary negotiation instructions from recorded answers only.
 
-    Adapts floor, range, and currency from the profile's compensation section.
+    The candidate's recorded expectation and currency are the only figures
+    here — no invented floors, no wrong symbols (spec art_ti3XJuNr,
+    currency-real salary). With nothing recorded, the section says so and
+    instructs the model to state no expected salary at all.
     """
     comp = profile["compensation"]
-    currency = comp.get("salary_currency", "USD")
-    floor = comp["salary_expectation"]
-    range_min = comp.get("salary_range_min", floor)
-    range_max = comp.get("salary_range_max", str(int(floor) + 20000) if floor.isdigit() else floor)
-    conversion_note = comp.get("currency_conversion_note", "")
+    expectation = str(comp.get("salary_expectation") or "").strip()
+    currency = str(comp.get("salary_currency") or "").strip()
+    range_min = str(comp.get("salary_range_min") or "").strip()
+    range_max = str(comp.get("salary_range_max") or "").strip()
+    conversion_note = str(comp.get("currency_conversion_note") or "").strip()
 
-    # Compute example hourly rates at 3 salary levels
-    try:
-        floor_int = int(floor)
-        examples = [
-            (f"${floor_int // 1000}K", floor_int // 2080),
-            (f"${(floor_int + 25000) // 1000}K", (floor_int + 25000) // 2080),
-            (f"${(floor_int + 55000) // 1000}K", (floor_int + 55000) // 2080),
-        ]
-        hourly_line = ", ".join(f"{sal} = ${hr}/hr" for sal, hr in examples)
-    except (ValueError, TypeError):
-        hourly_line = "Divide annual salary by 2080"
+    if not expectation:
+        return """== SALARY ==
+The candidate recorded no expected salary. Do not state an expected
+salary unless the application leaves no way to skip the question; then
+say expectations are negotiable or leave the field blank where the form
+allows — never invent a figure."""
 
-    # Currency conversion guidance
-    if conversion_note:
-        convert_line = f"Posting is in a different currency? -> {conversion_note}"
+    target = f"{expectation} {currency}".strip()
+    lines = [
+        "== SALARY (think, don't just copy) ==",
+        f"{target} is the candidate's recorded minimum. Never go below it.",
+        "",
+        "Decision tree:",
+        f"1. Posting shows a range? -> Answer with the midpoint if it is at or above {target}.",
+        f"2. Posting shows no range? -> State the recorded minimum ({target}). Do not adjust it up or down.",
+        "3. Hourly rate field? -> Divide the annual answer by 2080.",
+    ]
+    if range_min and range_max:
+        range_line = f" {currency}" if currency else ""
+        lines.append(f"4. Asked for a range? -> Give the recorded range: {range_min}-{range_max}{range_line}.")
     else:
-        convert_line = "Posting is in a different currency? -> Target midpoint of their range. Convert if needed."
-
-    return f"""== SALARY (think, don't just copy) ==
-${floor} {currency} is the FLOOR. Never go below it. But don't always use it either.
-
-Decision tree:
-1. Job posting shows a range (e.g. "$120K-$160K")? -> Answer with the MIDPOINT ($140K).
-2. Title says Senior, Staff, Lead, Principal, Architect, or level II/III/IV? -> Minimum $110K {currency}. Use midpoint of posted range if higher.
-3. {convert_line}
-4. No salary info anywhere? -> Use ${floor} {currency}.
-5. Asked for a range? -> Give posted midpoint minus 10% to midpoint plus 10%. No posted range? -> "${range_min}-${range_max} {currency}".
-6. Hourly rate? -> Divide your annual answer by 2080. ({hourly_line})"""
+        lines.append("4. Asked for a range? -> The profile records a single minimum, not a range; give the minimum and note it is negotiable upward.")
+    if conversion_note:
+        lines.append(f"5. Posting is in a different currency? -> {conversion_note}")
+    else:
+        lines.append("5. Posting is in a different currency? -> Convert the recorded minimum before comparing; do not silently switch currencies.")
+    return "\n".join(lines)
 
 
 def _build_screening_section(profile: dict) -> str:

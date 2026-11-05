@@ -1392,7 +1392,10 @@ def _onboarding_context(error: str = "", login_error: str = "", login: int = 0,
     login_process = engine_auth.active_login()
     in_interview = state is not None and state.phase == onboarding.INTERVIEW
     agent_led = in_interview and state.mode == onboarding.MODE_AGENT
-    question = onboarding.current_question(state) if in_interview and not agent_led else None
+    # wizard_question: the rendered question carries its present-tense
+    # choices (salary_band's bands derive from the captured currency and
+    # level); flow logic below keeps using current_question.
+    question = onboarding.wizard_question(state) if in_interview and not agent_led else None
     return {
         "state": state,
         # Render version for the SSE staleness guard (see onboarding_surface).

@@ -54,7 +54,7 @@ FULL_WALK = {
     "sponsorship": "no",
     "permit_type": "Citizen",
     "currency": "USD",
-    "salary_band": "120000",
+    "salary_band": "90000",
     "start_date": "Immediately",
     "target_roles": "free:Data Engineer\nAnalytics Engineer",
     "skills_languages": "free:Python\nSQL",
@@ -137,7 +137,8 @@ def _expected_ack_prompts():
         raw = STORED[spec.id]
         if not raw:
             continue  # skipped — recorded empty, no acknowledgement turn
-        acks.append((spec, next((c.label for c in spec.choices if c.value == raw), raw)))
+        acks.append((spec, next((c.label for c in onboarding.resolved_choices(spec, STORED)
+                                 if c.value == raw), raw)))
     return acks
 
 
@@ -220,13 +221,13 @@ def test_walk_renders_records_and_advances_every_question(portal_client, fake_ll
 
     # The agent read the LABELS as user turns (prose, same as free-form chat).
     turns = [m["content"] for m in state.messages if m["role"] == "user"]
-    assert "Yes" in turns and "Citizen" in turns and "120k – 140k" in turns and "3–5" in turns
+    assert "Yes" in turns and "Citizen" in turns and "$90k – $110k" in turns and "3–5" in turns
 
     draft = state.profile_draft
     assert draft["work_authorization"]["legally_authorized_to_work"] == "Yes"
     assert draft["work_authorization"]["require_sponsorship"] == "No"
     assert draft["work_authorization"]["work_permit_type"] == "Citizen"
-    assert draft["compensation"]["salary_expectation"] == "120000"
+    assert draft["compensation"]["salary_expectation"] == "90000"
     assert draft["compensation"]["salary_currency"] == "USD"
     assert draft["experience"]["education_level"] == "Bachelor's"
     assert draft["experience"]["years_of_experience_total"] == "3–5"
@@ -564,7 +565,7 @@ def test_claude_backend_walk_sends_labels_as_prompts(app_dir, fake_claude, monke
         raw = STORED[spec.id]
         if not raw:
             onboarding.record_answer(spec.id, skip=True)
-        elif any(c.value == raw for c in spec.choices):
+        elif any(c.value == raw for c in onboarding.resolved_choices(spec, STORED)):
             onboarding.record_answer(spec.id, value=raw)
         else:
             onboarding.record_answer(spec.id, free_text=raw)
@@ -581,7 +582,8 @@ def test_claude_backend_walk_sends_labels_as_prompts(app_dir, fake_claude, monke
     for (spec, label), prompt in zip(_expected_ack_prompts(), prompts[1:], strict=True):
         assert spec.prompt in prompt
         assert label in prompt
-        assert onboarding.answer_ack_prompt(spec, label) in prompt
+        assert onboarding.answer_ack_prompt(spec, label,
+                                            onboarding.resolved_choices(spec, STORED)) in prompt
     resumes = [json.loads(line)["resume"] for line in fake_claude.read_text().splitlines()]
     assert all(r == "fake-session-1" for r in resumes[1:])  # session continuity
 
@@ -777,7 +779,7 @@ def test_review_form_renders_prefilled_with_needs_answer_chips(portal_client, fa
     assert "Review your profile" in page
     # Answered questions prefill their widgets; skipped ones stay empty.
     assert '<option value="yes" selected>' in page
-    assert 'id="answer-salary_band"' in page and 'value="120000"' in page
+    assert 'id="answer-salary_band"' in page and 'value="90000"' in page
     assert 'id="answer-education"' in page and "selected>— not answered —" in page
     assert 'id="answer-linkedin_url"' in page and 'value=""' in page
 

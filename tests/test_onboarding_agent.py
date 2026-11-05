@@ -303,7 +303,7 @@ def test_normalize_fills_eight_keys_and_coerces():
     assert profile["personal"]["password"] == ""  # boundary: never from chat
     assert profile["work_authorization"]["legally_authorized_to_work"] == "Yes"
     assert profile["work_authorization"]["require_sponsorship"] == "No"
-    assert profile["compensation"]["salary_currency"] == "USD"
+    assert profile["compensation"]["salary_currency"] == ""  # no silent USD default
     assert set(profile["eeo_voluntary"].values()) == {"Decline to self-identify"}
     assert meta["queries"] == ["Data Engineer", "Analytics Engineer"]  # string split
     assert meta["remote"] is True

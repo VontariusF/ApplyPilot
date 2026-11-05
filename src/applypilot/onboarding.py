@@ -45,7 +45,7 @@ import re
 import shutil
 import subprocess
 import threading
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 
 import yaml
@@ -286,18 +286,22 @@ QUESTION_SPECS: tuple[QuestionSpec, ...] = (
         id="currency",
         prompt="Which currency should salary conversations use?",
         choices=(Choice("USD", "USD"), Choice("EUR", "EUR"),
-                 Choice("GBP", "GBP"), Choice("CAD", "CAD")),
+                 Choice("GBP", "GBP"), Choice("CAD", "CAD"), Choice("INR", "INR")),
         allow_free_text=True,
         maps_to="compensation.salary_currency",
         agent_hint="any ISO currency code works",
     ),
+    # Salary bands are not hardcoded: the buttons derive from the captured
+    # currency and experience level (salary_band_choices below). The
+    # question waits for a currency — recorded, or implied by the recorded
+    # country — and shows no bands at all when neither is known, so a
+    # non-USD candidate is never shown USD-style ranges.
     QuestionSpec(
         id="salary_band",
         prompt="What's the minimum annual salary you'd accept?",
-        choices=(Choice("120000", "120k – 140k"), Choice("140000", "140k – 170k"),
-                 Choice("170000", "170k – 200k"), Choice("200000", "200k+")),
         allow_free_text=True,
         free_text_kind="number",
+        depends_on={"currency": "*"},
         maps_to="compensation.salary_expectation",
         agent_hint="picking a floor you won't want to renegotiate later",
     ),
@@ -408,6 +412,129 @@ QUESTIONS: dict[str, QuestionSpec] = {q.id: q for q in QUESTION_SPECS}
 
 
 # ---------------------------------------------------------------------------
+# Derived salary bands (spec art_ti3XJuNr, currency-real salary)
+# ---------------------------------------------------------------------------
+
+# Annual band sets per currency and experience level: floor–ceiling pairs,
+# the last one open-ended. Each choice's value is the floor — the "minimum
+# acceptable salary" the profile records. Figures are internally consistent
+# defaults, not market data; the free-text widget covers everything else.
+_SALARY_BANDS: dict[str, dict[str, tuple[tuple[int, int | None], ...]]] = {
+    "USD": {
+        "entry": ((60000, 80000), (80000, 100000), (100000, 120000), (120000, None)),
+        "mid": ((90000, 110000), (110000, 140000), (140000, 170000), (170000, None)),
+        "senior": ((120000, 150000), (150000, 180000), (180000, 220000), (220000, None)),
+    },
+    "GBP": {
+        "entry": ((24000, 30000), (30000, 38000), (38000, 45000), (45000, None)),
+        "mid": ((40000, 55000), (55000, 70000), (70000, 85000), (85000, None)),
+        "senior": ((70000, 90000), (90000, 110000), (110000, 140000), (140000, None)),
+    },
+    "EUR": {
+        "entry": ((35000, 45000), (45000, 55000), (55000, 65000), (65000, None)),
+        "mid": ((50000, 65000), (65000, 80000), (80000, 100000), (100000, None)),
+        "senior": ((75000, 95000), (95000, 120000), (120000, 150000), (150000, None)),
+    },
+    "CAD": {
+        "entry": ((50000, 65000), (65000, 80000), (80000, 95000), (95000, None)),
+        "mid": ((75000, 95000), (95000, 115000), (115000, 135000), (135000, None)),
+        "senior": ((110000, 140000), (140000, 170000), (170000, 200000), (200000, None)),
+    },
+    "INR": {
+        "entry": ((400000, 600000), (600000, 800000), (800000, 1000000), (1000000, None)),
+        "mid": ((1200000, 1800000), (1800000, 2400000), (2400000, 3000000), (3000000, None)),
+        "senior": ((2500000, 3500000), (3500000, 4500000), (4500000, 6000000), (6000000, None)),
+    },
+}
+
+# A currency code outside the table above (a typed "AUD", "CHF", …) falls
+# back to a currency-neutral set labeled with the code itself.
+_GENERIC_BANDS: dict[str, tuple[tuple[int, int | None], ...]] = {
+    "entry": ((30000, 50000), (50000, 70000), (70000, 90000), (90000, None)),
+    "mid": ((50000, 80000), (80000, 110000), (110000, 140000), (140000, None)),
+    "senior": ((90000, 120000), (120000, 160000), (160000, 200000), (200000, None)),
+}
+
+# Symbols for band labels; anything unmapped labels itself with the ISO code.
+_SALARY_SYMBOLS = {"USD": "$", "GBP": "£", "EUR": "€", "CAD": "C$", "INR": "₹"}
+
+# The wizard's country choices and the currency each implies — the fallback
+# when the currency question was skipped but the country was decided.
+_COUNTRY_CURRENCY = {
+    "United States": "USD",
+    "United Kingdom": "GBP",
+    "Canada": "CAD",
+    "European Union": "EUR",
+    "India": "INR",
+}
+
+# The experience-band answer that signals each salary level.
+_EXPERIENCE_LEVELS = {"0–2": "entry", "3–5": "mid", "6–10": "senior", "10+": "senior"}
+
+
+def salary_level_key(level: str | None) -> str:
+    """Map a level name to a band-set key; unknown levels stay mid."""
+    return {"entry": "entry", "mid": "mid", "senior": "senior", "lead": "senior"}.get(
+        (level or "").strip().lower(), "mid"
+    )
+
+
+def experience_level(answers: dict[str, str]) -> str:
+    """The salary level signaled by the recorded experience-band answer."""
+    return _EXPERIENCE_LEVELS.get((answers.get("experience_years") or "").strip(), "mid")
+
+
+def captured_currency(answers: dict[str, str]) -> str:
+    """The salary currency in play: the recorded answer wins; otherwise the
+    recorded country implies one (a US candidate is never shown rupee
+    bands). Empty when neither is known — the wizard asks, never assumes."""
+    currency = (answers.get("currency") or "").strip().upper()
+    if currency:
+        return currency
+    return _COUNTRY_CURRENCY.get((answers.get("country") or "").strip(), "")
+
+
+def _fmt_band(currency: str, lo: int, hi: int | None) -> str:
+    """One band's button label in the band's own currency (INR in lakhs)."""
+    symbol = _SALARY_SYMBOLS.get(currency, f"{currency} ")
+    if currency == "INR":
+        lo_text = f"{symbol}{lo // 100000}L"
+        hi_text = f"{symbol}{hi // 100000}L" if hi else ""
+    else:
+        lo_text = f"{symbol}{lo // 1000}k"
+        hi_text = f"{symbol}{hi // 1000}k" if hi else ""
+    return f"{lo_text} – {hi_text}" if hi_text else f"{lo_text}+"
+
+
+def salary_band_choices(currency: str | None, level: str | None) -> tuple[Choice, ...]:
+    """Wizard bands for one currency and experience level.
+
+    No currency — no invented bands: the empty tuple leaves the free-text
+    widget as the only input, and the question itself stays deferred until
+    a currency is captured (salary_band depends_on currency).
+    """
+    if not currency:
+        return ()
+    bands = _SALARY_BANDS.get(currency.upper(), _GENERIC_BANDS)
+    return tuple(
+        Choice(str(lo), _fmt_band(currency, lo, hi))
+        for lo, hi in bands[salary_level_key(level)]
+    )
+
+
+def resolved_choices(spec: QuestionSpec, answers: dict[str, str]) -> tuple[Choice, ...]:
+    """The choices a question offers right now: the static registry
+    choices, except salary_band, whose bands derive from the captured
+    currency and experience level."""
+    if spec.id == "salary_band":
+        return salary_band_choices(captured_currency(answers), experience_level(answers))
+    return spec.choices
+
+
+QUESTIONS: dict[str, QuestionSpec] = {q.id: q for q in QUESTION_SPECS}
+
+
+# ---------------------------------------------------------------------------
 # The interview prompt
 # ---------------------------------------------------------------------------
 
@@ -473,16 +600,20 @@ _ANSWER_ACK_TMPL = (
 )
 
 
-def answer_ack_prompt(spec: QuestionSpec, label: str) -> str:
+def answer_ack_prompt(spec: QuestionSpec, label: str,
+                      choices: tuple[Choice, ...] | None = None) -> str:
     """The grounded acknowledgement prompt for one guided answer
     (spec art_ti3XJuNr, grounded agent replies): the agent reads the
     question's id, text, offered options, and the submitted value — never
     a bare answer label, and never a topic the question didn't ask
     about. Both backends receive it: the Claude CLI as its turn prompt,
-    the provider as an unrecorded directive after the transcript."""
+    the provider as an unrecorded directive after the transcript.
+    `choices` overrides the registry choices — salary_band's derive from
+    the captured currency and level, so callers pass resolved_choices."""
     options_clause = ""
-    if spec.choices:
-        options = ", ".join(f'"{c.label}"' for c in spec.choices)
+    effective = spec.choices if choices is None else choices
+    if effective:
+        options = ", ".join(f'"{c.label}"' for c in effective)
         options_clause = f" The offered options were: {options}."
     return _ANSWER_ACK_TMPL.format(
         question=spec.prompt, qid=spec.id, answer=label,
@@ -841,7 +972,11 @@ def normalize_profile(draft: dict, answers: dict[str, str] | None = None) -> tup
         },
         "compensation": {
             "salary_expectation": _str(comp, "salary_expectation"),
-            "salary_currency": _str(comp, "salary_currency") or "USD",
+            # No currency default: an unset currency leaves the salary
+            # fields unset, and the apply prompt states no expected salary
+            # (spec art_ti3XJuNr — the USD silent default invented a
+            # currency the candidate never gave).
+            "salary_currency": _str(comp, "salary_currency"),
             "salary_range_min": _str(comp, "salary_range_min"),
             "salary_range_max": _str(comp, "salary_range_max"),
         },
@@ -882,10 +1017,10 @@ def normalize_profile(draft: dict, answers: dict[str, str] | None = None) -> tup
 
 
 # Questions the prefill bridge never fills even though the registry is
-# not gated. currency rides normalize_profile's "USD" default: a stored
-# "USD" is indistinguishable from an extracted one, so bridging it would
-# record a currency preference the user never gave — the wizard keeps
-# asking it (spec: currency must stay asked).
+# not gated. currency stays asked: the salary bands derive from it, so a
+# bridged extraction would silently re-scale the wizard's choices around
+# a preference the user never gave — the wizard keeps asking it (spec:
+# currency must stay asked).
 _NO_BRIDGE_IDS = frozenset({"currency"})
 
 
@@ -1007,7 +1142,7 @@ def review_fields(state: InterviewState) -> list[dict]:
         if spec.maps_to is None:
             continue
         rows.append({
-            "spec": spec,
+            "spec": _with_resolved_choices(spec, state),
             "value": effective.get(spec.id, ""),
             # The effective value is a bridged extraction, not a recorded
             # answer — the review row earns its "from your resume" badge.
@@ -1076,7 +1211,8 @@ def render_profile_md(profile: dict, search_meta: dict) -> str:
         f"- Targets: {', '.join(search_meta.get('queries') or [exp['target_role']]) or '_(not given)_'}",
         f"- Base: {search_meta.get('location') or personal['city'] or '_(not given)_'}",
         f"- Remote: {'open to remote' if search_meta.get('remote') else 'onsite/hybrid only'}",
-        f"- Salary: {comp['salary_expectation'] or '_(not given)_'} {comp['salary_currency']}".strip(),
+        f"- Salary: {comp['salary_expectation'] or '_(not given)_'}"
+        f"{' ' + comp['salary_currency'] if comp['salary_currency'] else ''}",
         f"- Work authorization: {auth['legally_authorized_to_work'] or '_(needs answer)_'}, "
         f"sponsorship needed: {auth['require_sponsorship'] or '_(needs answer)_'}",
         f"- Education: {exp['education_level'] or '_(add later)_'}",
@@ -1402,6 +1538,20 @@ def start_intake() -> InterviewState:
         return state
 
 
+def effective_answers(state: InterviewState) -> dict[str, str]:
+    """Recorded answers over draft prefill, plus the country-implied
+    currency when none is recorded. The derived currency only opens the
+    salary question (its depends_on) and colors the derived bands — it
+    never becomes a recorded answer, and the currency question stays asked."""
+    prefilled = draft_to_answers(state.profile_draft, state.answers)
+    effective = {**prefilled, **state.answers}
+    if not effective.get("currency"):
+        derived = captured_currency(effective)
+        if derived:
+            effective["currency"] = derived
+    return effective
+
+
 def remaining_questions(state: InterviewState) -> list[QuestionSpec]:
     """The agenda still open: unanswered specs whose depends_on is met.
 
@@ -1409,10 +1559,12 @@ def remaining_questions(state: InterviewState) -> list[QuestionSpec]:
     already answer are not asked — draft_to_answers maps state.profile_draft
     onto the open ids, and a recorded answer always beats extraction.
     Dependency gating evaluates against the effective answer set, so an
-    extracted country opens the work-auth pair like a clicked one would.
-    """
+    extracted country opens the work-auth pair like a clicked one would,
+    and a decided country opens the salary question even when the
+    currency question was skipped (the bands then follow the country's
+    currency)."""
+    effective = effective_answers(state)
     prefilled = draft_to_answers(state.profile_draft, state.answers)
-    effective = {**prefilled, **state.answers}
     open_specs = []
     for spec in QUESTION_SPECS:
         if spec.id in state.answers or spec.id in prefilled:
@@ -1428,8 +1580,14 @@ def prefilled_answers(state: InterviewState) -> list[dict]:
     draft_to_answers already excludes recorded answers, so a chip survives
     exactly until the user edits it into a recorded answer or clears it."""
     prefilled = draft_to_answers(state.profile_draft, state.answers)
-    return [{"spec": spec, "value": prefilled[spec.id]}
+    return [{"spec": _with_resolved_choices(spec, state), "value": prefilled[spec.id]}
             for spec in QUESTION_SPECS if spec.id in prefilled]
+
+
+def _with_resolved_choices(spec: QuestionSpec, state: InterviewState) -> QuestionSpec:
+    """The spec with its present-tense choices — salary_band's bands derive
+    from the captured currency and level — for surfaces that render them."""
+    return replace(spec, choices=resolved_choices(spec, effective_answers(state)))
 
 
 def _depends_met(spec: QuestionSpec, answers: dict[str, str]) -> bool:
@@ -1463,6 +1621,14 @@ def current_question(state: InterviewState) -> QuestionSpec | None:
     """
     open_specs = remaining_questions(state)
     return open_specs[0] if open_specs else None
+
+
+def wizard_question(state: InterviewState) -> QuestionSpec | None:
+    """The question to render, with its choices resolved against the
+    answers so far (salary_band's bands derive from currency + level).
+    Rendering uses this; flow logic uses current_question."""
+    spec = current_question(state)
+    return None if spec is None else _with_resolved_choices(spec, state)
 
 
 def record_answer(question_id: str, value: str = "", free_text: str = "",
@@ -1501,7 +1667,8 @@ def record_answer(question_id: str, value: str = "", free_text: str = "",
                 state.answers[spec.id] = typed
                 label = typed
             else:
-                choice = next((c for c in spec.choices if c.value == (value or "").strip()), None)
+                choice = next((c for c in resolved_choices(spec, state.answers)
+                               if c.value == (value or "").strip()), None)
                 if choice is None:
                     raise OnboardingError("pick one of the listed choices")
                 state.answers[spec.id] = choice.value
@@ -1527,7 +1694,7 @@ def record_answer(question_id: str, value: str = "", free_text: str = "",
             # turn never touches the pending resume context: it attaches to
             # the next question-asking turn instead, so an answer click can
             # neither hijack it into an unrelated ack nor spend it.
-            prompt = answer_ack_prompt(spec, label)
+            prompt = answer_ack_prompt(spec, label, resolved_choices(spec, state.answers))
             try:
                 reply = _agent_turn(state, prompt, prompt, directive=prompt)
             except RuntimeError as exc:
