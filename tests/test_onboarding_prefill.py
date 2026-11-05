@@ -114,6 +114,50 @@ def test_bridge_prefills_only_on_extraction_evidence():
 
 
 # ---------------------------------------------------------------------------
+# The fabrication guard under resume-first extraction (Codex review of #41)
+
+def test_offlist_extracted_country_still_asks_the_gated_pair():
+    """An extracted country outside the choice list ("Australia") must
+    not lock the work-auth pair out of the agenda: the pair opens for
+    any decided country, so its values are confirmed, never assumed."""
+    draft = {**RAW_DRAFT, "_applypilot_profile": {
+        **RAW_DRAFT["_applypilot_profile"],
+        "personal": {**RAW_DRAFT["_applypilot_profile"]["personal"], "country": "Australia"}}}
+    profile, meta = onboarding.normalize_profile(draft, {})
+    state = onboarding.InterviewState(profile_draft={**profile, "_applypilot_search": meta})
+    open_ids = [q.id for q in onboarding.remaining_questions(state)]
+    assert "work_authorized" in open_ids and "sponsorship" in open_ids
+    # The wizard's own typed country hits the same gate:
+    state.answers["country"] = "Australia"
+    open_ids = [q.id for q in onboarding.remaining_questions(state)]
+    assert "work_authorized" in open_ids and "sponsorship" in open_ids
+
+
+def test_kickoff_extraction_never_records_gated_claims(portal_client, fake_llm, monkeypatch):
+    """The intake kickoff reads a document, not the user: its draft may
+    prefill identity and preferences, but gated work-auth claims are
+    stripped — the wizard asks and the user's answer wins."""
+    client, _ = portal_client
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    fake_llm.respond(DRAFT_REPLY)  # claims Yes / No / Citizen from the resume
+
+    onboarding.start_intake()
+    client.post("/onboarding/resume", data={"resume_text": "Jane Doe — resume text"})
+    client.post("/onboarding/start", data={"mode": "llm"})
+    state = onboarding.load_state()
+    auth = state.profile_draft["work_authorization"]
+    assert auth["legally_authorized_to_work"] == ""  # claim stripped
+    assert auth["require_sponsorship"] == ""  # claim stripped
+    assert auth["work_permit_type"] == "Citizen"  # not gated: survives
+
+    # The user confirms at the wizard — the recorded answer lands.
+    onboarding.record_answer("work_authorized", "yes")
+    state = onboarding.load_state()
+    assert state.answers["work_authorized"] == "yes"
+    assert "sponsorship" in [q.id for q in onboarding.remaining_questions(state)]
+
+
+# ---------------------------------------------------------------------------
 # The intake phase: upload before any question, gaps-only after start
 
 def test_intake_resume_then_start_walks_gaps_only(portal_client, fake_llm, monkeypatch):

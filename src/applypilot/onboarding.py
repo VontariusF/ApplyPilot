@@ -1218,7 +1218,6 @@ def start_interview(mode: str) -> InterviewState:
         kickoff_prompt = KICKOFF_PROMPT
         if state.pending_context:
             kickoff_prompt = f"{state.pending_context}\n\n{KICKOFF_PROMPT}"
-            state.pending_context = ""
         if backend_name == "claude":
             try:
                 reply = ClaudePrintBackend().kickoff(state, kickoff_prompt)
@@ -1236,8 +1235,13 @@ def start_interview(mode: str) -> InterviewState:
         state.messages.append({"role": _ROLE_ASSISTANT, "content": reply})
         # The kickoff never finishes the interview on its own: an extracted
         # draft prefills the agenda (gaps-only), it does not end it — the
-        # wizard still asks the gated and preference questions.
-        _after_reply(state, reply, allow_review=False)
+        # wizard still asks the gated and preference questions. The pending
+        # resume context is spent only when the reply actually extracted a
+        # draft; otherwise it stays for the next turn (the persisted upload
+        # note holds just the filename and size — this is the only copy of
+        # the resume text in the agent's reach).
+        if _after_reply(state, reply, allow_review=False):
+            state.pending_context = ""
         save_state(state)
         return state
 
@@ -1253,8 +1257,9 @@ def send_message(text: str) -> InterviewState:
             raise OnboardingError("the interview is not active")
         state.messages.append({"role": _ROLE_USER, "content": text})
         prompt = text
-        if state.pending_context:
-            prompt = f"{state.pending_context}\n\nUser's message: {text}"
+        context = state.pending_context
+        if context:
+            prompt = f"{context}\n\nUser's message: {text}"
             state.pending_context = ""
         try:
             reply = _agent_turn(state, text, prompt)
@@ -1266,7 +1271,11 @@ def send_message(text: str) -> InterviewState:
             raise
         state.error = None
         state.messages.append({"role": _ROLE_ASSISTANT, "content": reply})
-        _after_reply(state, reply)
+        if not _after_reply(state, reply) and context:
+            # No draft this turn: keep the pending context (the resume) in
+            # play for the next one — a spent context that extracted nothing
+            # would leave later turns with no access to the resume text.
+            state.pending_context = context
         save_state(state)
         return state
 
