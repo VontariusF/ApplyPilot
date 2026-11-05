@@ -1007,6 +1007,11 @@ def normalize_profile(draft: dict, answers: dict[str, str] | None = None) -> tup
             "salary_currency": _str(comp, "salary_currency"),
             "salary_range_min": _str(comp, "salary_range_min"),
             "salary_range_max": _str(comp, "salary_range_max"),
+            # The agent's conversion note is a legitimate resume-fact-shaped
+            # input: carried through so the apply prompt's different-currency
+            # branch stays reachable (it was dead when only the wizard
+            # serialized this section).
+            "currency_conversion_note": _str(comp, "currency_conversion_note"),
         },
         "experience": {
             "years_of_experience_total": _str(exp, "years_of_experience_total"),
@@ -1826,6 +1831,18 @@ def record_answer(question_id: str, value: str = "", free_text: str = "",
                     raise OnboardingError("pick one of the listed choices")
                 state.answers[spec.id] = choice.value
                 label = choice.label
+                # A band button is a currency-labeled offer — its label came
+                # from captured_currency. Accepting it settles the currency
+                # question too: record the captured currency so a skipped
+                # currency question can't leave the profile stating a
+                # unit-less floor ("Never go below 70000" — of what?). Free
+                # text stays unstamped: a typed number can be genuinely
+                # unit-less, and the no-currency ⇒ no-salary prompt rule
+                # keeps covering it.
+                if spec.id == "salary_band" and not (state.answers.get("currency") or "").strip():
+                    band_currency = captured_currency(effective_answers(state))
+                    if band_currency:
+                        state.answers["currency"] = band_currency
             # kind="choice" marks wizard answers: the UI renders them as the
             # clicked button / filled widget, not as a chat bubble — typed
             # messages (no kind) always stay in the transcript.
@@ -2072,6 +2089,16 @@ def confirm_profile() -> dict:
             raise OnboardingError("there is no profile draft to confirm")
         draft = state.profile_draft
         profile, meta = normalize_profile(draft, state.answers)
+        # Readable failure instead of a run of opaque launcher crashes:
+        # build_prompt indexes the legal name's first word, so a nameless
+        # profile fails every job in the run with "list index out of
+        # range" (sweep art_kvtM7h6B P2). The name is already review-
+        # flagged — block the confirm until the review screen fills it.
+        if not profile["personal"]["full_name"].strip():
+            raise OnboardingError(
+                "the profile has no full name — add it on the review screen "
+                "before confirming (every application needs it)"
+            )
         if config.PROFILE_PATH.exists():
             try:
                 existing = json.loads(config.PROFILE_PATH.read_text(encoding="utf-8"))

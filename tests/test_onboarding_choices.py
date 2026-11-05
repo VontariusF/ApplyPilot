@@ -386,6 +386,10 @@ def test_skip_records_empty_and_flags_them_for_review(portal_client, fake_llm, m
     notes = " ".join(m["content"] for m in state.messages if m["role"] == "note")
     assert "left empty on purpose" in notes
 
+    # The name gate blocks a nameless confirm (readable failure instead of
+    # an opaque launcher crash downstream) — the review screen is how an
+    # intentionally skipped profile still ships.
+    onboarding.update_answers({"full_name": "Test User"})
     client.post("/onboarding/confirm")
     written = json.loads(config.PROFILE_PATH.read_text(encoding="utf-8"))
     assert written["work_authorization"]["legally_authorized_to_work"] == ""
@@ -863,7 +867,11 @@ def test_review_clearing_a_bridged_answer_removes_the_draft_value(app_dir):
     user deleted. Regression for the P1 in sweep art_W1q8u5XY."""
     onboarding.save_state(onboarding.InterviewState(
         phase=onboarding.REVIEW, backend="llm",
-        profile_draft={"personal": {"email": "resume@example.com"},
+        # full_name present: confirm now blocks a nameless profile with a
+        # readable message, and this test is about the email-clearing
+        # semantics, not the name gate.
+        profile_draft={"personal": {"full_name": "Test User",
+                                    "email": "resume@example.com"},
                        "_applypilot_search": {"remote": True}}))
 
     onboarding.update_answers({"email": "", "work_style": ""})

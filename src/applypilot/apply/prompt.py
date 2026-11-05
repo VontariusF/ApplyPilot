@@ -104,13 +104,16 @@ def _build_profile_summary(profile: dict) -> str:
     # Availability
     lines.append(f"Available: {avail.get('earliest_start_date') or 'Not provided — do not guess'}")
 
-    # Standard responses
+    # Standard responses — the profile carries no age, criminal-history,
+    # or prior-employment facts, so instruct instead of asserting: these
+    # lines used to state "Yes/No" answers with no profile backing, the
+    # same fabrication the onboarding guard blocks at the service layer.
     lines.extend([
-        "Age 18+: Yes",
-        "Background Check: Yes",
-        "Felony: No",
-        "Previously Worked Here: No",
-        "How Heard: Online Job Board",
+        "Age 18+, background check, felony, previously worked here: answer "
+        "only from the candidate's own statements; leave blank or choose "
+        "the non-committal option where the profile is silent. Never assume.",
+        "How Heard: leave blank or pick a job-board option; do not state a "
+        "source the candidate never gave.",
     ])
 
     # EEO
@@ -198,9 +201,16 @@ def _build_screening_section(profile: dict) -> str:
     """Build the screening questions guidance section."""
     personal = profile["personal"]
     exp = profile.get("experience", {})
-    city = personal.get("city", "their city")
-    years = exp.get("years_of_experience_total", "multiple")
-    target_role = exp.get("target_role", personal.get("current_job_title", "software engineer"))
+    # Truthiness defaults: normalize_profile always writes these keys
+    # (possibly ""), so .get's default arguments never fired and the
+    # section interpolated bare empty strings ("lives in , cannot
+    # relocate").
+    city = personal.get("city") or "their city"
+    years = exp.get("years_of_experience_total") or "multiple"
+    # The onboarding schema never writes personal.current_job_title, so
+    # that fallback was dead; fall back within the experience section
+    # instead, and stay generic rather than inventing "software engineer".
+    target_role = exp.get("target_role") or exp.get("current_title") or "professional"
     work_auth = profile["work_authorization"]
 
     return f"""== SCREENING QUESTIONS (be strategic) ==
@@ -222,8 +232,9 @@ def _build_hard_rules(profile: dict) -> str:
     personal = profile["personal"]
     work_auth = profile["work_authorization"]
 
-    full_name = personal["full_name"]
-    preferred_name = personal.get("preferred_name", full_name.split()[0])
+    full_name = str(personal.get("full_name") or "").strip()
+    legal_first = full_name.split()[0] if full_name else ""
+    preferred_name = str(personal.get("preferred_name") or "").strip() or legal_first
     preferred_last = full_name.split()[-1] if " " in full_name else ""
     display_name = f"{preferred_name} {preferred_last}".strip() if preferred_last else preferred_name
 
@@ -237,7 +248,7 @@ def _build_hard_rules(profile: dict) -> str:
         work_auth_rule = f"Work auth: {permit_type}. Sponsorship needed: {sponsorship}."
 
     name_rule = f'Name: Legal name = {full_name}.'
-    if preferred_name and preferred_name != full_name.split()[0]:
+    if preferred_name and preferred_name != legal_first:
         name_rule += f' Preferred name = {preferred_name}. Use "{display_name}" unless a field specifically says "legal name".'
 
     return f"""== HARD RULES (never break these) ==
@@ -504,7 +515,7 @@ def build_prompt(job: dict, tailored_resume: str,
     # Copy to a clean filename for upload (recruiters see the filename),
     # job-qualified so concurrent workers can never overwrite each other's
     # tailored documents (S2 F3).
-    full_name = personal["full_name"]
+    full_name = str(personal.get("full_name") or "").strip()
     name_slug = full_name.replace(" ", "_")
     job_key = upload_job_key(job)
     dest_dir = config.APPLY_WORKER_DIR / "current"
@@ -552,7 +563,7 @@ def build_prompt(job: dict, tailored_resume: str,
     captcha_section = _build_captcha_section()
 
     # Cover letter fallback text
-    city = personal.get("city", "the area")
+    city = personal.get("city") or "the area"
     if not cover_letter_text:
         cl_display = (
             f"None available. Skip if optional. If required, write 2 factual "
@@ -569,8 +580,11 @@ def build_prompt(job: dict, tailored_resume: str,
     from applypilot.config import load_blocked_sso
     blocked_sso = load_blocked_sso()
 
-    # Preferred display name
-    preferred_name = personal.get("preferred_name", full_name.split()[0])
+    # Preferred display name (truthiness-guarded: a nameless legacy
+    # profile degrades to an empty name instead of crashing the run —
+    # confirm time now blocks that case with a readable message).
+    preferred_name = str(personal.get("preferred_name") or "").strip() or (
+        full_name.split()[0] if full_name else "")
     last_name = full_name.split()[-1] if " " in full_name else ""
     display_name = f"{preferred_name} {last_name}".strip()
 
