@@ -9,7 +9,7 @@ probes) and assert the resulting states and copy, never a reimplementation.
 
 import pytest
 
-from applypilot import config, engine_auth, onboarding
+from applypilot import config, engine_auth, llm, onboarding
 from applypilot.discovery import composio
 from applypilot.portal import system_check as sc
 
@@ -32,6 +32,14 @@ def capable_machine(monkeypatch):
     monkeypatch.delenv("CAPSOLVER_API_KEY", raising=False)
     monkeypatch.delenv("COMPOSIO_API_KEY", raising=False)
     monkeypatch.setattr(composio, "composio_state", lambda: ("optional", ""))
+
+
+@pytest.fixture
+def provider_reachable(monkeypatch):
+    """The provider probe answers and parses (no network in tests)."""
+    monkeypatch.setattr(llm, "probe_provider",
+                        lambda: ("reachable",
+                                 "The provider answered a test request."))
 
 
 @pytest.fixture
@@ -62,7 +70,9 @@ def _write_setup(app_dir, *, profile=True, resume="txt", searches=True):
 # ---------------------------------------------------------------------------
 
 
-def test_healthy_install_is_all_pass(app_dir, capable_machine, signed_in_everywhere):
+def test_healthy_install_is_all_pass(app_dir, capable_machine,
+                                     signed_in_everywhere,
+                                     provider_reachable):
     _write_setup(app_dir)
     checks = {c.id: c for c in sc.run_checks()}
     assert sorted(checks) == sorted(CHECK_IDS)
@@ -118,6 +128,48 @@ def test_missing_jobspy_reader_warns(
     monkeypatch.setattr(sc.importlib.util, "find_spec", lambda name: None)
     checks = {c.id: c for c in sc.run_checks()}
     assert checks["jobspy"].state == sc.WARN
+
+
+# ---------------------------------------------------------------------------
+# Provider check contacts the endpoint (spec reliability fix 1)
+# ---------------------------------------------------------------------------
+
+
+def test_provider_check_fails_when_probe_cannot_reach(
+        app_dir, capable_machine, signed_in_everywhere, monkeypatch):
+    """A mispointed/unreachable endpoint shows red with the probe's plain
+    reason — env-var presence alone is not 'set up'."""
+    _write_setup(app_dir)
+    reason = ("The provider did not answer within 5 seconds — the endpoint "
+              "may be down or the URL mistyped.")
+    monkeypatch.setattr(llm, "probe_provider", lambda: ("unreachable", reason))
+    checks = {c.id: c for c in sc.run_checks()}
+    assert checks["provider"].state == sc.FAIL
+    assert reason in checks["provider"].meaning
+    assert checks["provider"].fix == sc.Fix("Open provider settings", "/settings")
+
+
+def test_provider_check_pass_copies_the_probe(
+        app_dir, capable_machine, signed_in_everywhere, provider_reachable):
+    _write_setup(app_dir)
+    checks = {c.id: c for c in sc.run_checks()}
+    assert checks["provider"].state == sc.PASS
+    assert "answered a test request" in checks["provider"].meaning
+
+
+def test_provider_check_warns_when_responses_are_unusable(
+        app_dir, capable_machine, signed_in_everywhere, monkeypatch):
+    """Alive but unusable (incompatible response schema): a green check
+    would hide every later parse failure — warn with the probe detail."""
+    _write_setup(app_dir)
+    detail = ("The provider answered the test request, but the response was "
+              "not usable — real runs may still fail. Check the model name "
+              "in provider settings.")
+    monkeypatch.setattr(llm, "probe_provider", lambda: ("degraded", detail))
+    checks = {c.id: c for c in sc.run_checks()}
+    assert checks["provider"].state == sc.WARN
+    assert detail in checks["provider"].meaning
+    assert checks["provider"].fix == sc.Fix("Open provider settings", "/settings")
 
 
 # ---------------------------------------------------------------------------

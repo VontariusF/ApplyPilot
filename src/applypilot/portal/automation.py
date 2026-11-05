@@ -386,6 +386,15 @@ def run_tick(cfg: dict | None = None, now: datetime | None = None) -> dict:
             outcome["skipped"].append("daily cap reached")
             return outcome
         params = preset_params(cfg, "apply_matches")
+        # Queue check first: launching an apply run with zero eligible
+        # jobs would exit "Queue empty" immediately and flood Runs
+        # history once per tick (~60s). The worker's own acquire logic
+        # stays the source of truth; this mirrors its queue predicate.
+        if database.count_apply_eligible(
+                min_score=int(params["min_score"])) == 0:
+            outcome["skipped"].append("nothing to apply to")
+            log.debug("auto-apply skipped: no eligible jobs in the queue")
+            return outcome
         params["limit"] = str(status["remaining"])
         row = start_guarded("apply", params)
         if row is None:

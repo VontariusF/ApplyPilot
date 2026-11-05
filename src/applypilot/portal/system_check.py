@@ -20,7 +20,7 @@ import os
 import shutil
 from dataclasses import dataclass
 
-from applypilot import config, engine_auth, onboarding
+from applypilot import config, engine_auth, llm, onboarding
 from applypilot.discovery import composio
 
 # The three states a check can be in (badge + wording switch on these).
@@ -151,18 +151,39 @@ def _ai_checks() -> list[Check]:
     """Provider + engine checks, from onboarding.readiness() and engine_auth."""
     ready = onboarding.readiness()
 
-    if ready["llm_ready"]:
-        provider = Check(
-            "provider", "AI provider", PASS,
-            "Your AI provider is set up — summarizing, tailoring, and the "
-            "interview agent run on it.",
-        )
-    else:
+    if not ready["llm_ready"]:
         provider = Check(
             "provider", "AI provider", FAIL,
             "No AI provider is configured yet — nothing AI-powered can run.",
             Fix("Open provider settings", "/settings"),
         )
+    else:
+        # Env-var presence alone proves nothing: a mispointed custom
+        # endpoint passes readiness while every apply run fails. The
+        # probe sends one minimal request through the same client real
+        # runs use (bounded by a short timeout), so green here means the
+        # endpoint actually answered and parsed.
+        probe_state, detail = llm.probe_provider()
+        if probe_state == "reachable":
+            provider = Check(
+                "provider", "AI provider", PASS,
+                "Your AI provider is set up and answered a test request — "
+                "summarizing, tailoring, and the interview agent run on it.",
+            )
+        elif probe_state == "degraded":
+            # The endpoint is alive but its responses are unusable — a
+            # green check here would hide every later parse failure.
+            provider = Check(
+                "provider", "AI provider", WARN,
+                f"{detail}",
+                Fix("Open provider settings", "/settings"),
+            )
+        else:
+            provider = Check(
+                "provider", "AI provider", FAIL,
+                f"{detail} Nothing AI-powered can run until it is fixed.",
+                Fix("Open provider settings", "/settings"),
+            )
 
     claude = ready["claude"]
     if claude.state == engine_auth.SIGNED_IN:

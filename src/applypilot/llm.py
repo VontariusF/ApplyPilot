@@ -303,6 +303,7 @@ class LLMClient:
         messages: list[dict],
         temperature: float,
         max_tokens: int,
+        timeout: float | None = None,
     ) -> str:
         """Call the native Gemini generateContent API.
 
@@ -347,6 +348,7 @@ class LLMClient:
                 # request URL, which then lands in logs and error strings.
                 "x-goog-api-key": self.api_key,
             },
+            **_timeout_kwargs(timeout),
         )
         resp.raise_for_status()
         data = resp.json()
@@ -381,6 +383,7 @@ class LLMClient:
         messages: list[dict],
         temperature: float,
         max_tokens: int,
+        timeout: float | None = None,
     ) -> str:
         """Call the OpenAI-compatible endpoint."""
         headers: dict[str, str] = {"Content-Type": "application/json"}
@@ -398,6 +401,7 @@ class LLMClient:
             f"{self.base_url}/chat/completions",
             json=payload,
             headers=headers,
+            **_timeout_kwargs(timeout),
         )
 
         # 403 on Gemini compat = model not available on compat layer.
@@ -551,6 +555,107 @@ def get_client() -> LLMClient:
                 log.info("LLM provider: %s (%s)  model: %s", label, base_url, model)
                 _instance = LLMClient(base_url, model, api_key, provider_name=label)
     return _instance
+
+
+# ---------------------------------------------------------------------------
+# Reachability probe (System Check)
+# ---------------------------------------------------------------------------
+
+# How long the System Check provider probe waits before declaring the
+# endpoint unreachable. Deliberately far below _TIMEOUT: the check page
+# renders this inline and must never hang on a dead endpoint.
+PROBE_TIMEOUT_SECONDS: float = 5.0
+
+# A 1-token completion is the cheapest request that exercises the exact
+# path a real apply run takes (same endpoint, same auth, same parsing).
+_PROBE_MAX_TOKENS = 1
+
+
+def _timeout_kwargs(timeout: float | None) -> dict:
+    """Per-request httpx kwargs for an optional timeout override.
+
+    Passing timeout=None to httpx DISABLES the client's configured
+    timeout entirely — omit the argument instead so normal chat() calls
+    inherit the client default; the probe passes an explicit short bound.
+    """
+    return {"timeout": timeout} if timeout is not None else {}
+
+
+def probe_provider(timeout: float = PROBE_TIMEOUT_SECONDS) -> tuple[str, str]:
+    """Send one minimal chat request to the configured provider.
+
+    The probe runs through the same client singleton (get_client) and the
+    same request/parsing path a real run uses — env-var presence proves
+    nothing on its own; a mispointed custom endpoint must show red here,
+    not silently fail every later apply run.
+
+    Returns:
+        (state, detail): state is "reachable" (the endpoint answered and
+        the response parsed), "degraded" (it answered but the response
+        was unusable — real runs may still fail), or "unreachable".
+        detail is one plain-language sentence. It may name HTTP status
+        codes and endpoint hosts but never echoes credential values —
+        request headers are never included in any error text, and
+        response bodies are never quoted back.
+
+    Bounded: a single request per attempt with a per-request timeout, no
+    chat()'s retry/sleep loop — the System Check page renders this inline.
+    """
+    try:
+        client = get_client()
+    except RuntimeError as exc:
+        # _detect_provider's error names missing env vars, never values.
+        return "unreachable", f"No AI provider is configured — {exc}"
+
+    messages = [{"role": "user", "content": "Reply with the single word: ok"}]
+
+    try:
+        try:
+            client._chat_compat(messages, temperature=0.0,
+                                max_tokens=_PROBE_MAX_TOKENS, timeout=timeout)
+        except _GeminiCompatForbidden:
+            # Exactly what chat() does on a Gemini compat 403: switch to
+            # the native API. Reachability follows whichever path works.
+            client._chat_native_gemini(messages, temperature=0.0,
+                                       max_tokens=_PROBE_MAX_TOKENS,
+                                       timeout=timeout)
+    except httpx.TimeoutException:
+        return "unreachable", (
+            f"The provider did not answer within {timeout:g} seconds — "
+            "the endpoint may be down or the URL mistyped.")
+    except httpx.HTTPStatusError as exc:
+        code = exc.response.status_code
+        if code in (401, 403):
+            return "unreachable", (
+                f"The provider rejected the test request (HTTP {code}) — "
+                "the API key was refused. Check it in provider settings.")
+        if code == 404:
+            return "unreachable", (
+                "The provider answered, but the endpoint or model was not "
+                "found (HTTP 404) — the URL or model name looks wrong.")
+        if code == 429:
+            return "unreachable", (
+                "The provider is reachable but refused the test request "
+                "(HTTP 429) — out of quota or rate-limited right now.")
+        return "unreachable", (
+            f"The provider rejected the test request (HTTP {code}). "
+            "Check the endpoint URL and model in provider settings.")
+    except httpx.HTTPError as exc:
+        # ConnectError / protocol errors: message names the host and OS
+        # errno — never headers or credentials.
+        detail = str(exc).strip() or exc.__class__.__name__
+        return "unreachable", (
+            f"Could not reach the provider endpoint — {detail}. "
+            "Check the endpoint URL in provider settings.")
+    except (LLMParseError, KeyError, ValueError, IndexError, TypeError):
+        # An HTTP 200 with a body the parser disliked (missing or empty
+        # choices, non-text content): the endpoint is alive and answering
+        # — degraded, not dead. Real runs may still fail parsing.
+        return "degraded", (
+            "The provider answered the test request, but the response was "
+            "not usable — real runs may still fail. Check the model name "
+            "in provider settings.")
+    return "reachable", "The provider answered a test request."
 
 
 def reset_client() -> None:
