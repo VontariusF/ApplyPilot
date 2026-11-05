@@ -557,6 +557,7 @@ pre.logview {
 .alert.error { background: var(--fail-bg); color: var(--fail); border-color: var(--fail); }
 .alert.warn { background: var(--warn-bg); color: var(--warn); border-color: var(--warn); }
 .alert.success { background: var(--ok-bg); color: var(--ok); border-color: var(--ok); }
+.alert.info { background: var(--info-bg); color: var(--info); border-color: var(--info); }
 
 .dim { color: var(--ink-2); }
 .empty { color: var(--ink-3); font-style: italic; }

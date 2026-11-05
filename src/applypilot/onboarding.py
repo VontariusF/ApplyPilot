@@ -106,6 +106,15 @@ class InterviewState:
     backend: str = ""  # "claude" | "llm" — empty until the interview starts
     messages: list[dict] = field(default_factory=list)  # [{role, content}]
     claude_session_id: str | None = None  # print-mode --resume anchor
+    # True when the live Claude session already received the pending
+    # resume text (kickoff or a context-bearing turn). The session holds
+    # it across --resume turns, so later turns skip re-sending it — a
+    # re-inject costs the full resume's tokens again every turn. Reset
+    # when the Claude session ends (backend fallback); the LLM provider
+    # rebuilds messages from the transcript and always needs the context
+    # passed explicitly.
+    claude_holds_pending_context: bool = False
+
     profile_draft: dict | None = None  # agent-emitted, pre-confirm
     pending_context: str = ""  # resume text injected into the next agent turn
     error: str | None = None  # last user-facing failure, shown in the chat
@@ -482,6 +491,20 @@ def salary_level_key(level: str | None) -> str:
 def experience_level(answers: dict[str, str]) -> str:
     """The salary level signaled by the recorded experience-band answer."""
     return _EXPERIENCE_LEVELS.get((answers.get("experience_years") or "").strip(), "mid")
+
+
+def salary_band_hint(answers: dict[str, str]) -> str:
+    """One-line hint for the salary question (agent-replies sweep P3).
+
+    experience_level defaults to 'mid' when experience is unrecorded, so
+    the rendered bands assume mid-level — the wizard used to do that
+    silently. Empty once experience is recorded (or bridged from the
+    resume): the bands are then the user's own level's.
+    """
+    if (answers.get("experience_years") or "").strip():
+        return ""
+    return ("Bands assume mid-level experience — answer the experience "
+            "question (or tell the agent) to see ranges for your level.")
 
 
 def captured_currency(answers: dict[str, str]) -> str:
@@ -1391,6 +1414,9 @@ def _agent_turn(state: InterviewState, user_text: str, prompt_for_claude: str,
             _note(state, "Claude Code became unavailable — continuing with the configured provider.")
             state.backend = "llm"
             state.claude_session_id = None
+            # The new provider never saw the resume — the context must ride
+            # explicitly again (it is the stateless backend's only channel).
+            state.claude_holds_pending_context = False
             return _llm_turn(state, directive, context_for_provider)
     return _llm_turn(state, directive, context_for_provider)
 
@@ -1557,11 +1583,17 @@ def start_interview(mode: str) -> InterviewState:
         state.backend = backend_name
         state.phase = INTERVIEW
         kickoff_prompt = KICKOFF_PROMPT
-        if state.pending_context:
+        if state.pending_context and not (
+                state.backend == "claude"
+                and state.claude_holds_pending_context):
             kickoff_prompt = f"{state.pending_context}\n\n{KICKOFF_PROMPT}"
         if backend_name == "claude":
             try:
                 reply = ClaudePrintBackend().kickoff(state, kickoff_prompt)
+                # The session now holds the resume (when the kickoff carried
+                # it) — later turns must not re-send the full text.
+                if state.pending_context:
+                    state.claude_holds_pending_context = True
             except InterviewBackendError as exc:
                 # A1 runtime reversal: sign-in looked green but print mode
                 # failed — the provider takes over when one exists.
@@ -1600,7 +1632,15 @@ def send_message(text: str) -> InterviewState:
         prompt = text
         context = state.pending_context
         if context:
-            prompt = f"{context}\n\nUser's message: {text}"
+            # P3 (agent replies sweep): a Claude session that already holds
+            # the resume gets just the message — re-sending the context
+            # token-for-token every turn bought nothing (the session keeps
+            # it across --resume turns). The stateless LLM provider still
+            # gets it via context_for_provider; the restore-on-failure
+            # semantics below are unchanged either way.
+            claude_holds = (state.backend == "claude"
+                            and state.claude_holds_pending_context)
+            prompt = text if claude_holds else f"{context}\n\nUser's message: {text}"
             state.pending_context = ""
         try:
             reply = _agent_turn(state, text, prompt, context_for_provider=context)
@@ -1617,6 +1657,10 @@ def send_message(text: str) -> InterviewState:
             raise
         state.error = None
         state.messages.append({"role": _ROLE_ASSISTANT, "content": reply})
+        # A Claude turn that carried the resume delivered it into the
+        # session — later turns must not re-send it.
+        if context and state.backend == "claude":
+            state.claude_holds_pending_context = True
         # A turn that consumed pending resume context is document-informed:
         # its extraction is treated like the kickoff's (agenda kept for the
         # bridge), not like a paraphrase of the user's own words. Pure chat
@@ -1868,7 +1912,14 @@ def record_answer(question_id: str, value: str = "", free_text: str = "",
             # click can never spend it.
             prompt = answer_ack_prompt(spec, label, resolved)
             context = state.pending_context
-            prompt_for_claude = f"{context}\n\nDirective: {prompt}" if context else prompt
+            # A Claude session holding the resume gets just the directive —
+            # the context rides only for a stateless provider (see
+            # send_message).
+            claude_holds = (state.backend == "claude"
+                            and state.claude_holds_pending_context)
+            prompt_for_claude = (
+                f"{context}\n\nDirective: {prompt}"
+                if context and not claude_holds else prompt)
             try:
                 reply = _agent_turn(state, prompt, prompt_for_claude,
                                     directive=prompt, context_for_provider=context)
@@ -1880,6 +1931,11 @@ def record_answer(question_id: str, value: str = "", free_text: str = "",
                 raise
             state.error = None
             state.messages.append({"role": _ROLE_ASSISTANT, "content": reply})
+            # A Claude ack that carried the resume delivered it into the
+            # session — later turns must not re-send it. (Ack turns extract
+            # nothing, so the context itself stays pending either way.)
+            if context and state.backend == "claude":
+                state.claude_holds_pending_context = True
             _after_reply(state, _without_fenced_blocks(reply), allow_review=False)
         save_state(state)
         return state
@@ -1990,7 +2046,8 @@ def set_agent_led(enabled: bool) -> InterviewState:
         # f679e54).
         context = state.pending_context
         prompt_for_claude = directive
-        if context:
+        if context and not (state.backend == "claude"
+                            and state.claude_holds_pending_context):
             prompt_for_claude = f"{context}\n\nDirective: {directive}"
         try:
             reply = _agent_turn(state, directive, prompt_for_claude, directive=directive,
@@ -2000,6 +2057,10 @@ def set_agent_led(enabled: bool) -> InterviewState:
             save_state(state)
             raise
         state.messages.append({"role": _ROLE_ASSISTANT, "content": reply})
+        # A Claude turn that carried the resume delivered it into the
+        # session — later turns must not re-send it.
+        if context and state.backend == "claude":
+            state.claude_holds_pending_context = True
         # The switch turn is directive-driven — any draft it emits
         # paraphrases the agenda, never the user's own words, so it
         # finishes like the kickoff (allow_review=False). When the

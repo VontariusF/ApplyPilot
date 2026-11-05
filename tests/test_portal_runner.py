@@ -372,3 +372,23 @@ def test_sweep_orphans_sweeps_reused_pid_but_keeps_live_child(portal_env):
     finally:
         victim.kill()
         victim.wait()
+
+
+def test_start_run_popen_failure_leaves_a_terminal_row(portal_env, monkeypatch):
+    """Portal sweep P3-6: the registry row exists before the spawn — a
+    Popen failure retires the row as 'failed' instead of leaking an
+    uncancellable orphan (previously the row was inserted only after a
+    successful spawn, so a crash in between left nothing to cancel)."""
+    def boom(*args, **kwargs):
+        raise OSError("no exec")
+
+    monkeypatch.setattr(runner.subprocess, "Popen", boom)
+    with pytest.raises(OSError):
+        runner.start_run("pipeline", {},
+                         command=[sys.executable, "-c", "pass"],
+                         emit_jsonl=False)
+    conn = get_connection()
+    rows = conn.execute("SELECT status, ended_at FROM runs").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["status"] == "failed"
+    assert rows[0]["ended_at"] is not None

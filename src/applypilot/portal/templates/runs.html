@@ -7,6 +7,7 @@
 </div>
 
 {% if error %}<p class="alert error">{{ error }}</p>{% endif %}
+{% if notice %}<p class="alert info">{{ notice }}</p>{% endif %}
 
 {% if scheduler_skip %}
 <p class="alert warn">Scheduled runs paused — {{ scheduler_skip }} Manual starts from the

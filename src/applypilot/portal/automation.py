@@ -431,6 +431,15 @@ def run_tick(cfg: dict | None = None, now: datetime | None = None) -> dict:
     database.init_db()
     runner.init_registry()
 
+    # P3-2 (reliability re-walk): a leaked 'running' registry row — a
+    # monitor thread that died, a child reaped unobserved — used to stall
+    # every future tick ("a run is already active") until a portal
+    # restart, because the orphan sweep ran only at app startup. The sweep
+    # is cheap (a pid/identity check per active row), so run it each tick:
+    # a dead run's row is reaped and this same tick proceeds.
+    for reaped in runner.sweep_orphans():
+        outcome["skipped"].append(f"reaped dead run {reaped}")
+
     if not (cfg["schedule_enabled"] or cfg["auto_apply_enabled"]):
         return outcome
 

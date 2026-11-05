@@ -543,10 +543,14 @@ def test_agent_mode_directive_reaches_backends_but_not_the_transcript(app_dir, f
 
 
 def test_agent_led_switch_passes_resume_to_claude(portal_client, fake_claude, monkeypatch):
-    """The Claude CLI gets the pending resume embedded in its prompt
-    text: the resumed session has no other channel for content
-    attached since the kickoff, so a mode-switch draft would otherwise
-    spend a resume Claude never saw (Codex P2 on f679e54)."""
+    """The resume reaches the Claude session exactly once: the draftless
+    kickoff prompt embeds it and flags the session as holding it, so the
+    mode-switch turn no longer re-sends the full text token-for-token
+    (agent-replies sweep P3 — the re-inject cost the resume's tokens on
+    every turn). The invariant from Codex P2 on f679e54 still holds — a
+    mode-switch draft can never spend a resume Claude never saw, because
+    the kickoff already delivered it. The stateless LLM provider keeps
+    getting the context via context_for_provider."""
     client, _ = portal_client
     patch_gates(monkeypatch)
     monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
@@ -554,12 +558,16 @@ def test_agent_led_switch_passes_resume_to_claude(portal_client, fake_claude, mo
     onboarding.start_intake()
     onboarding.add_resume(text="MARKER-RESUME-7788")
     client.post("/onboarding/start", data={"mode": "claude"})
-    assert onboarding.load_state().pending_context  # draftless kickoff
+    state = onboarding.load_state()
+    assert state.pending_context  # draftless kickoff
+    assert state.claude_holds_pending_context  # the kickoff delivered it
 
     onboarding.set_agent_led(True)
     prompts = [json.loads(line)["prompt"] for line in fake_claude.read_text().splitlines()]
+    assert prompts and "MARKER-RESUME-7788" in prompts[0]  # kickoff carried it
     switch_prompts = [p for p in prompts if "agent-led questions" in p]
-    assert switch_prompts and all("MARKER-RESUME-7788" in p for p in switch_prompts)
+    assert switch_prompts and all("MARKER-RESUME-7788" not in p
+                                  for p in switch_prompts)  # no re-inject
     state = onboarding.load_state()
     assert state.mode == onboarding.MODE_AGENT
     assert state.phase == onboarding.INTERVIEW
@@ -991,3 +999,27 @@ def test_double_submit_of_the_final_answer_is_idempotent(portal_client, fake_llm
     assert page.status_code == 200
     assert "the interview is not active" not in page.text
     assert onboarding.load_state().phase == onboarding.REVIEW
+
+
+def test_send_message_skips_reinject_when_session_holds_resume(
+        portal_client, fake_claude, monkeypatch):
+    """A draftless kickoff delivered the resume into the Claude session; a
+    later free-text turn must not send it token-for-token again
+    (agent-replies sweep P3) — but the pending context stays in play for
+    extraction."""
+    client, _ = portal_client
+    patch_gates(monkeypatch)
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+
+    onboarding.start_intake()
+    onboarding.add_resume(text="MARKER-RESUME-7788")
+    client.post("/onboarding/start", data={"mode": "claude"})
+    state = onboarding.load_state()
+    assert state.claude_holds_pending_context
+
+    onboarding.send_message("what should you ask next?")
+    prompts = [json.loads(line)["prompt"] for line in fake_claude.read_text().splitlines()]
+    assert prompts and "MARKER-RESUME-7788" in prompts[0]  # kickoff only
+    assert not any("MARKER-RESUME-7788" in p for p in prompts[1:])
+    state = onboarding.load_state()
+    assert state.pending_context  # extraction may still use it

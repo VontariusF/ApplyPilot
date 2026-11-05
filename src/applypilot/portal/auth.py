@@ -109,9 +109,14 @@ def host_is_allowed(host_header: str | None) -> bool:
     """True when the Host header names localhost (with any port)."""
     if not host_header:
         return False
-    host = host_header.rsplit(":", 1)[0] if host_header.count(":") <= 1 else host_header
-    # Bare IPv6 like [::1] arrives bracketed on some stacks.
-    host = host.strip("[]")
+    host = host_header
+    if host.startswith("["):
+        # Bracketed IPv6 with a port ("[::1]:8000"): the colon-split kept
+        # the whole header and .strip("[]") only removed the leading
+        # bracket, so IPv6-localhost was refused.
+        host = host[1:host.index("]")] if "]" in host else host[1:]
+    elif host.count(":") == 1:
+        host = host.rsplit(":", 1)[0]
     return host in ALLOWED_HOSTS
 
 

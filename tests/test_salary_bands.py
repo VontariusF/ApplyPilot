@@ -238,3 +238,13 @@ def test_ack_prompt_carries_the_derived_band_options():
     prompt = onboarding.answer_ack_prompt(spec, "₹12L – ₹18L",
                                           onboarding.resolved_choices(spec, answers))
     assert '"₹12L – ₹18L"' in prompt and '"₹18L – ₹24L"' in prompt
+
+
+def test_salary_band_hint_flags_the_mid_level_default():
+    """Onboarding sweep P3: the bands assume mid-level when experience is
+    unrecorded — the wizard used to do that silently."""
+    hint = onboarding.salary_band_hint({})
+    assert hint
+    assert "mid-level" in hint
+    # Recorded (or bridged) experience: the bands are the user's own level.
+    assert onboarding.salary_band_hint({"experience_years": "6\u201310"}) == ""

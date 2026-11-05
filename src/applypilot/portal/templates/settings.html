@@ -40,6 +40,7 @@
 </div>
 
 {% if saved %}<p class="alert success">Settings saved and applied to the running portal — no restart needed.</p>{% endif %}
+{% if error %}<p class="alert error">{{ error }}</p>{% endif %}
 
 <form method="post" action="/settings" class="settings-form">
   <section class="panel">

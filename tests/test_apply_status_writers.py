@@ -375,3 +375,36 @@ def test_reset_failed_clears_the_manual_marker(app_dir):
                    apply_status="failed", apply_task_id="manual-failed")
     launcher.reset_failed()
     assert job_row(url)["apply_task_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# Reliability sweep P3 fixes
+# ---------------------------------------------------------------------------
+
+def test_count_apply_eligible_agrees_with_acquire_on_manual_ats(queue):
+    """Reliability sweep P3-1 (REPRODUCED): the scheduler's guard used to
+    count manual-ATS jobs the worker refuses — every scheduled run then
+    marked one 'manual' and exited 'Queue empty', burning a tracked run
+    per manual-ATS job. The count mirrors the worker's predicate."""
+    from applypilot.apply import launcher
+
+    manual_url = "https://ibegin.tcsapps.com/job/123"
+    seed_job(url=manual_url, application_url=manual_url,
+             tailored_resume_path="/tmp/resume.pdf")
+    assert config.is_manual_ats(manual_url)
+    assert database.count_apply_eligible() == 0
+    # The worker agrees: nothing to acquire.
+    assert launcher.acquire_job() is None
+    # A normal job alongside still counts.
+    seed_job(url="https://jobs.example/normal",
+             tailored_resume_path="/tmp/resume.pdf")
+    assert database.count_apply_eligible() == 1
+
+
+def test_busy_timeout_is_the_single_documented_budget(queue):
+    """Portal sweep P3-2: one busy budget (10s), set immediately after
+    connect — the connect(timeout=30) default used to be silently lowered
+    by a later pragma, and WAL conversion ran before any budget was set."""
+    conn = get_connection()
+    row = conn.execute("PRAGMA busy_timeout").fetchone()
+    assert row[0] == 10000

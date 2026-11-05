@@ -11,6 +11,8 @@ import logging
 import os
 import stat
 
+from applypilot.portal.auth import host_is_allowed
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -173,3 +175,18 @@ def test_disable_auth_never_weakens_host_check(anon_client, monkeypatch):
     r = anon_client.get("/", headers={"Host": "evil.example.com"})
     assert r.status_code == 400
 
+
+
+def test_host_is_allowed_bracketed_ipv6_with_port():
+    """Portal sweep P3-8: bracketed IPv6 with a port ("[::1]:8000") is
+    localhost — the old colon-split kept the whole header and .strip("[]")
+    only removed the leading bracket, so IPv6-localhost was refused."""
+    assert host_is_allowed("[::1]:8000") is True
+    assert host_is_allowed("[::1]") is True
+    assert host_is_allowed("[127.0.0.1]:8000") is True
+    assert host_is_allowed("127.0.0.1:8000") is True
+    assert host_is_allowed("localhost") is True
+    assert host_is_allowed("example.com:8000") is False
+    assert host_is_allowed("[fe80::1]:8000") is False
+    assert host_is_allowed("") is False
+    assert host_is_allowed(None) is False
