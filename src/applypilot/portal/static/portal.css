@@ -688,6 +688,21 @@ pre.logview {
 }
 a.chip.needs-answer { background: var(--warn-bg); color: var(--warn); text-decoration: none; }
 a.chip.needs-answer:hover { filter: brightness(1.1); }
+.chip.needs-answer.current { background: var(--accent-soft); color: var(--accent); }
+.chip.from-resume { background: var(--ok-bg); color: var(--ok); margin-left: var(--space-2); }
+.prefill-chips { display: flex; flex-direction: column; gap: var(--space-2); }
+.prefill-chip { border: 1px solid var(--line); border-radius: var(--radius); padding: 6px var(--space-3); }
+.prefill-chip summary { cursor: pointer; display: flex; align-items: center; gap: var(--space-2); }
+.prefill-edit { display: flex; gap: var(--space-2); align-items: flex-end; flex-wrap: wrap; margin-top: var(--space-2); }
+.prefill-edit .chat-composer { flex: 1; min-width: 220px; }
+.prefill-edit select, .prefill-edit input, .prefill-edit textarea {
+  flex: 1;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  padding: 8px var(--space-3);
+}
 .button-link.secondary { background: var(--surface); color: var(--ink); border-color: var(--line-strong); }
 .button-link.secondary:hover { background: var(--surface-2); }
 

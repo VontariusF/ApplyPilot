@@ -7,6 +7,7 @@ every rendered portal page (catch copy built dynamically in routes) —
 plus the login page's Reveal-token behavior.
 """
 
+import json
 import re
 from pathlib import Path
 
@@ -116,3 +117,55 @@ def test_reveal_token_rejected_for_non_local_host(portal_env):
     bare = TestClient(app, base_url="http://evil.example")
     r = bare.post("/login/reveal")
     assert r.status_code == 400  # localhost-only guard fires before any reveal
+
+
+# ---------------------------------------------------------------------------
+# Layer 3: the resume-first chip surfaces (spec part 4) — the interview
+# renders prefilled chips and gap chips, the review renders badges; both
+# are new dynamically-built copy the source scan can't see.
+
+
+def _walk_to_review_by_skipping(client):
+    """Skip every open question (skips are quiet: no agent turn) until the
+    review form renders."""
+    for _ in range(len(onboarding.QUESTION_SPECS) + 1):
+        page = client.get("/onboarding/chat").text
+        if "Review your profile" in page:
+            return page
+        qid = re.search(r'data-question-id="([a-z_]+)"', page)
+        assert qid, "question card or review form expected"
+        client.post("/onboarding/answer", data={"question_id": qid.group(1), "skip": "1"})
+    raise AssertionError("never reached review")
+
+
+def test_chip_surfaces_are_zero_terminal(portal_client, fake_llm, monkeypatch):
+    """The interview's chip panel and the review's from-your-resume badges
+    render plain-language copy only — new dynamically-built copy the
+    template-source scan cannot see (layer 2 only walks static pages)."""
+    client, _ = portal_client
+    draft_reply = "Read your resume.\n\n```json\n" + json.dumps({
+        "_applypilot_profile": {
+            "personal": {"full_name": "Jane Doe", "email": "jane@example.com",
+                         "country": "United States"},
+            "experience": {"education_level": "Bachelor's"},
+        },
+        "_applypilot_search": {"queries": ["Data Engineer"], "location": "Austin, TX",
+                               "remote": True},
+    }) + "\n```"
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    fake_llm.respond(draft_reply)  # the kickoff turn's extraction reply
+
+    onboarding.start_intake()
+    client.post("/onboarding/resume", data={"resume_text": "resume"})
+    client.post("/onboarding/start", data={"mode": "llm"})
+
+    r = client.get("/onboarding/chat")
+    assert r.status_code == 200
+    assert "From your resume" in r.text  # the chip panel actually rendered
+    found = _violations(r.text)
+    assert not found, "interview chips: " + "; ".join(found)
+
+    review = _walk_to_review_by_skipping(client)
+    assert "from your resume" in review  # the badge actually rendered
+    found = _violations(review)
+    assert not found, "review badges: " + "; ".join(found)
