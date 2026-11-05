@@ -531,9 +531,6 @@ def resolved_choices(spec: QuestionSpec, answers: dict[str, str]) -> tuple[Choic
     return spec.choices
 
 
-QUESTIONS: dict[str, QuestionSpec] = {q.id: q for q in QUESTION_SPECS}
-
-
 # ---------------------------------------------------------------------------
 # The interview prompt
 # ---------------------------------------------------------------------------
@@ -640,41 +637,60 @@ def parse_claude_turn(stdout: str) -> tuple[str, str | None, bool]:
     Returns (result_text, session_id, is_error). The envelope is a single
     JSON object (verified against claude 2.1.197, 2026-11-04):
     {"type": "result", "result": "...", "session_id": "...", "is_error": false}.
-    Tolerates banner lines around the payload; when no JSON parses, the raw
-    text is treated as the result (a future envelope drift must not wedge
-    an interview — the LLM fallback is the safety net either way).
+    Tolerates banner lines around the payload (a string-aware scan); when
+    no JSON parses, the raw text is treated as the result (a future
+    envelope drift must not wedge an interview — the LLM fallback is the
+    safety net either way).
     """
-    candidate = stdout.strip()
-    if not candidate.startswith("{"):
-        candidate = ""
-        depth = 0
-        for i, ch in enumerate(stdout):
-            if ch == "{":
-                depth += 1
-                if depth == 1:
-                    start = i
-            elif ch == "}":
+    def fields(payload: dict) -> tuple[str, str | None, bool]:
+        result = payload.get("result")
+        session_id = payload.get("session_id")
+        is_error = bool(payload.get("is_error"))
+        text = result if isinstance(result, str) else ""
+        if not text and is_error:
+            text = "the CLI reported an error without details"
+        return text, (str(session_id) if session_id else None), is_error
+
+    # The documented envelope is a single JSON object: parse the whole
+    # stdout first — that is correct even when `result` itself contains
+    # braces, which a depth-counting scan cannot see through.
+    try:
+        parsed = json.loads(stdout.strip())
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict):
+        return fields(parsed)
+    # Banner tolerance: scan for an embedded object, tracking JSON string
+    # state — a naive {/} depth count desyncs on a brace inside a string
+    # (a result echoing resume or chat text) and shreds the envelope.
+    depth = 0
+    start = 0
+    in_string = False
+    escaped = False
+    for i, ch in enumerate(stdout):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            if depth:
                 depth -= 1
                 if depth == 0:
-                    candidate = stdout[start:i + 1]
                     try:
-                        json.loads(candidate)
-                        break
+                        parsed = json.loads(stdout[start:i + 1])
                     except json.JSONDecodeError:
-                        candidate = ""
-    if candidate:
-        try:
-            payload = json.loads(candidate)
-        except json.JSONDecodeError:
-            payload = None
-        if isinstance(payload, dict):
-            result = payload.get("result")
-            session_id = payload.get("session_id")
-            is_error = bool(payload.get("is_error"))
-            text = result if isinstance(result, str) else ""
-            if not text and is_error:
-                text = "the CLI reported an error without details"
-            return text, (str(session_id) if session_id else None), is_error
+                        parsed = None
+                    if isinstance(parsed, dict):
+                        return fields(parsed)
     return stdout.strip(), None, False
 
 
@@ -785,6 +801,18 @@ class LLMBackend:
 # ---------------------------------------------------------------------------
 
 _FENCED_BLOCK = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+
+
+def _without_fenced_blocks(reply: str) -> str:
+    """The reply with any fenced JSON block removed.
+
+    Acknowledgement turns consider no extraction: their prompt asks for a
+    two-sentence ack (and carries the user's free text verbatim — an
+    injection-amplifier slot), so a fenced block there is an unprompted
+    or a crafted regeneration, and neither may touch the draft. The
+    transcript keeps the reply as the user saw it.
+    """
+    return _FENCED_BLOCK.sub("", reply or "").strip()
 
 
 def extract_profile_draft(reply: str) -> dict | None:
@@ -1024,6 +1052,20 @@ def normalize_profile(draft: dict, answers: dict[str, str] | None = None) -> tup
 _NO_BRIDGE_IDS = frozenset({"currency"})
 
 
+def _salary_bridge_value(text: str) -> str | None:
+    """A draft salary expectation as a plain number, or None.
+
+    The salary widget is a number input: an extracted "$120,000" renders
+    blank in it, and saving then submits an empty answer. A value that is
+    a plain number once currency symbols and thousands separators are
+    removed bridges as that number ("$120,000" -> "120000"); anything
+    else ("competitive", "120k") stays unbridged so the wizard asks with
+    its own widget instead of planting an answer it cannot display.
+    """
+    cleaned = re.sub(r"[\s,$£€₹]", "", text)
+    return cleaned if cleaned.isdigit() else None
+
+
 def draft_to_answers(profile_draft: dict | None, answers: dict[str, str]) -> dict[str, str]:
     """Map extracted draft values onto question answers — the prefill bridge.
 
@@ -1071,6 +1113,11 @@ def draft_to_answers(profile_draft: dict | None, answers: dict[str, str]) -> dic
             text = str(value).strip() if value is not None else ""
         if not text:
             continue
+        if spec.id == "salary_band":
+            normalized = _salary_bridge_value(text)
+            if normalized is None:
+                continue
+            text = normalized
         if spec.choices and not spec.allow_free_text and not any(c.value == text for c in spec.choices):
             # A pure-choice question cannot represent this value (an
             # extracted "6" for a banded years question): leave it
@@ -1165,7 +1212,12 @@ def update_answers(updates: dict[str, str]) -> InterviewState:
     a quiet portal-side correction. The draft re-normalizes from the
     merged answers, and answers win over anything the agent extracted,
     so a cleared gating answer serializes to "" and stays flagged — the
-    fabrication guard still holds.
+    fabrication guard still holds. A cleared answer also removes the
+    draft's value at the source (_draft_remove_value, the same semantics
+    clear_prefill applies mid-walk): _answers_to_draft skips empty
+    non-gated answers, so a bare empty answer would otherwise let the
+    resume's value resurrect on the re-normalize below (the review form
+    submits every field, cleared ones included).
     """
     with _STATE_LOCK:
         state = load_state()
@@ -1176,8 +1228,13 @@ def update_answers(updates: dict[str, str]) -> InterviewState:
             if spec is None:  # not a wizard question — ignore, never store
                 continue
             value = (value or "").strip()
-            if spec.choices:
-                if (value and not any(c.value == value for c in spec.choices)
+            # Salary bands validate against the derived choices — the same
+            # effective basis the review row rendered — not the static
+            # registry tuple (which is empty for salary_band, so anything
+            # saved there before).
+            resolved = resolved_choices(spec, effective_answers(state))
+            if resolved:
+                if (value and not any(c.value == value for c in resolved)
                         and not spec.allow_free_text):
                     raise OnboardingError("that question takes one of the listed choices")
                 # allow_free_text choice questions take off-list values
@@ -1187,6 +1244,10 @@ def update_answers(updates: dict[str, str]) -> InterviewState:
             elif spec.allow_free_text:
                 state.answers[spec.id] = value
             # neither choices nor free text: not editable — ignore
+            if not value and spec.maps_to:
+                # Cleared: remove the draft's value at the source so the
+                # re-normalize below cannot resurrect it (see docstring).
+                _draft_remove_value(state.profile_draft or {}, spec.maps_to)
         state.error = None
         profile, meta = normalize_profile(state.profile_draft or {}, state.answers)
         state.profile_draft = {**profile, "_applypilot_search": meta}
@@ -1370,6 +1431,46 @@ def _strip_gated_claims(draft: dict) -> dict:
     return stripped
 
 
+def _draft_value_empty(value) -> bool:
+    """Merge-empty: absent, blank, an empty list/dict, or the False
+    default (search.remote's unset value)."""
+    return value is None or value == "" or value == [] or value == {} or value is False
+
+
+def _merge_extracted_draft(existing: dict, profile: dict, meta: dict) -> tuple[dict, dict]:
+    """Merge a fresh extraction into the draft the interview already holds.
+
+    Field-wise union over normalized shapes on both sides: a value the
+    new extraction carries fills a field the existing draft holds empty
+    or absent — a non-empty existing value never loses its slot to a
+    later, sparser fenced block (the resume's extraction is not
+    re-derivable once the pending context is spent, and only recorded
+    answers, review edits, and chip clears intentionally change values —
+    each of which runs through normalize_profile after the merge).
+    Sections the incoming extraction lacks keep whatever they held.
+    """
+    if not isinstance(existing, dict) or not existing:
+        return profile, meta
+    merged_profile: dict = {}
+    for section, fields in profile.items():
+        if not isinstance(fields, dict):
+            continue
+        base = existing.get(section)
+        base = base if isinstance(base, dict) else {}
+        merged_fields = dict(base)
+        for field_name, value in fields.items():
+            if _draft_value_empty(merged_fields.get(field_name)):
+                merged_fields[field_name] = value
+        merged_profile[section] = merged_fields
+    existing_meta = existing.get("_applypilot_search")
+    existing_meta = existing_meta if isinstance(existing_meta, dict) else {}
+    merged_meta = dict(existing_meta)
+    for key, value in meta.items():
+        if _draft_value_empty(merged_meta.get(key)):
+            merged_meta[key] = value
+    return merged_profile, merged_meta
+
+
 def _after_reply(state: InterviewState, reply: str, allow_review: bool = True) -> bool:
     """Post-reply bookkeeping: draft extraction and phase transition.
 
@@ -1399,6 +1500,11 @@ def _after_reply(state: InterviewState, reply: str, allow_review: bool = True) -
     if draft is not None:
         draft = _strip_gated_claims(draft)
         profile, meta = normalize_profile(draft, state.answers)
+        # Merge, never replace: a later fenced block fills the fields the
+        # earlier extraction left empty and cannot erase the ones it
+        # already filled (the resume's extraction is not re-derivable once
+        # the pending context is spent).
+        profile, meta = _merge_extracted_draft(state.profile_draft or {}, profile, meta)
         state.profile_draft = {**profile, "_applypilot_search": meta}
         if allow_review:
             state.phase = REVIEW
@@ -1631,6 +1737,20 @@ def wizard_question(state: InterviewState) -> QuestionSpec | None:
     return None if spec is None else _with_resolved_choices(spec, state)
 
 
+def _finish_agenda(state: InterviewState) -> bool:
+    """The review transition for a completed agenda: nothing left to ask,
+    so the wizard's answers (plus anything the agent extracted) become the
+    review draft and the phase moves to REVIEW — the same transition
+    record_answer runs on its last answer. False when the agenda is still
+    open or the phase is not INTERVIEW; callers keep their current flow."""
+    if state.phase != INTERVIEW or remaining_questions(state):
+        return False
+    profile, meta = normalize_profile(state.profile_draft or {}, state.answers)
+    state.profile_draft = {**profile, "_applypilot_search": meta}
+    state.phase = REVIEW
+    return True
+
+
 def record_answer(question_id: str, value: str = "", free_text: str = "",
                   skip: bool = False) -> InterviewState:
     """Record one guided answer and advance the agenda (the portal owns order).
@@ -1640,34 +1760,67 @@ def record_answer(question_id: str, value: str = "", free_text: str = "",
     state.answers; free text stores what the user typed. The agent
     acknowledgement is grounded on the exact exchange (answer_ack_prompt:
     question id, text, options, submitted value — both backends, spec
-    art_ti3XJuNr) and never carries the pending resume context: that
-    attaches to the next question-asking turn. A skip records the
-    question as intentionally empty — it never becomes a profile
-    value, so review keeps flagging it (PR #22 guard). The agent
+    art_ti3XJuNr), with the options resolved from the effective answers
+    the surface rendered (recorded answers over draft prefill). A skip
+    records the question as intentionally empty — it never becomes a
+    profile value, so review keeps flagging it (PR #22 guard). The agent
     acknowledgement runs after the answer is persisted: a backend failure
-    costs the acknowledgement, never the user's click.
+    costs the acknowledgement, never the user's click. The acknowledgement
+    turn considers no fenced block (an ack extracts nothing — see
+    _without_fenced_blocks).
     """
     with _STATE_LOCK:
         state = load_state()
-        if state is None or state.phase != INTERVIEW:
+        if state is None:
             raise OnboardingError("the interview is not active")
         spec = QUESTIONS.get(question_id)
         if spec is None:
             raise OnboardingError("unknown question")
+
+        # Idempotent double-submit (the surface's double-click guard is
+        # client-side only): a repeat POST of an already-recorded answer
+        # succeeds as a no-op — around agenda completion the second
+        # request otherwise lands on the REVIEW phase and renders an
+        # error banner even though the first one recorded the answer fine.
+        typed = (free_text or "").strip()
+        submitted = "" if skip else (typed or (value or "").strip())
+        if spec.id in state.answers and state.answers[spec.id] == submitted:
+            return state
+        if state.phase != INTERVIEW:
+            raise OnboardingError("the interview is not active")
+
+        # The registry's gates hold at the service layer too, not just in
+        # the UI: record only the question the wizard is showing (or one
+        # the extraction prefilled — the chip editor records those), so a
+        # stale tab or a crafted POST cannot answer the work-auth pair
+        # before the country that gates it.
+        prefilled = draft_to_answers(state.profile_draft, state.answers)
+        current = current_question(state)
+        if spec.id in state.answers:
+            raise OnboardingError(
+                "that question was already answered — recorded answers change on the review screen")
+        if (current is None or spec.id != current.id) and spec.id not in prefilled:
+            raise OnboardingError("that question isn't open right now")
+
+        # Validate against the choices the surface rendered — the effective
+        # answer set (recorded answers over draft prefill), not the recorded
+        # map alone: with experience bridged from the resume, salary_band's
+        # derived bands differ between the two, and most of the rendered
+        # buttons would otherwise be rejected here.
+        resolved = resolved_choices(spec, effective_answers(state))
 
         if skip:
             state.answers[spec.id] = ""
             _note(state, f"Skipped \"{spec.prompt}\" — left empty on purpose (the review screen lists it as add-later).")
             label = ""
         else:
-            typed = (free_text or "").strip()
             if typed:
                 if not spec.allow_free_text:
                     raise OnboardingError("that question takes one of the listed choices")
                 state.answers[spec.id] = typed
                 label = typed
             else:
-                choice = next((c for c in resolved_choices(spec, state.answers)
+                choice = next((c for c in resolved
                                if c.value == (value or "").strip()), None)
                 if choice is None:
                     raise OnboardingError("pick one of the listed choices")
@@ -1678,25 +1831,27 @@ def record_answer(question_id: str, value: str = "", free_text: str = "",
             # messages (no kind) always stay in the transcript.
             state.messages.append({"role": _ROLE_USER, "content": label, "kind": "choice"})
 
-        if current_question(state) is None:
-            # Agenda complete: the wizard's answers (plus anything the agent
-            # extracted along the way) become the review draft.
-            profile, meta = normalize_profile(state.profile_draft or {}, state.answers)
-            state.profile_draft = {**profile, "_applypilot_search": meta}
-            state.phase = REVIEW
+        # Agenda complete: the wizard's answers (plus anything the agent
+        # extracted along the way) become the review draft.
+        _finish_agenda(state)
         save_state(state)
 
         if label:
             # Grounded ack (spec art_ti3XJuNr): both backends hear the
             # question's id, text, options, and the submitted value — the
             # Claude CLI as its turn prompt, the provider as an unrecorded
-            # directive after the transcript. A pure answer-acknowledgement
-            # turn never touches the pending resume context: it attaches to
-            # the next question-asking turn instead, so an answer click can
-            # neither hijack it into an unrelated ack nor spend it.
-            prompt = answer_ack_prompt(spec, label, resolved_choices(spec, state.answers))
+            # directive after the transcript. The pending resume rides
+            # along while it is still unspent (a draftless kickoff leaves
+            # pure guided mode no other turn that re-offers it) — as
+            # grounding only: ack turns consider no fenced block, so the
+            # spend still waits for a document-informed turn and an answer
+            # click can never spend it.
+            prompt = answer_ack_prompt(spec, label, resolved)
+            context = state.pending_context
+            prompt_for_claude = f"{context}\n\nDirective: {prompt}" if context else prompt
             try:
-                reply = _agent_turn(state, prompt, prompt, directive=prompt)
+                reply = _agent_turn(state, prompt, prompt_for_claude,
+                                    directive=prompt, context_for_provider=context)
             except RuntimeError as exc:
                 # The user's answer stays recorded; the chat shows the
                 # failure and the next render carries the error banner.
@@ -1705,7 +1860,7 @@ def record_answer(question_id: str, value: str = "", free_text: str = "",
                 raise
             state.error = None
             state.messages.append({"role": _ROLE_ASSISTANT, "content": reply})
-            _after_reply(state, reply, allow_review=False)
+            _after_reply(state, _without_fenced_blocks(reply), allow_review=False)
         save_state(state)
         return state
 
@@ -1773,16 +1928,30 @@ def set_agent_led(enabled: bool) -> InterviewState:
     The switch persists before the agent hears about it, so a backend
     failure costs one acknowledgement, never the mode change. Returning
     to buttons resumes the agenda at the first unanswered question —
-    nothing already answered is asked again.
+    nothing already answered is asked again — or, when nothing is left
+    to ask, lands on the review draft: the agenda-complete switch IS the
+    transition (there is no question for an acknowledgement to precede,
+    and the surface would otherwise render a composer over an empty
+    agenda with no path to review — the agent-led dead end).
     """
     with _STATE_LOCK:
         state = load_state()
         if state is None or state.phase != INTERVIEW:
             raise OnboardingError("the interview is not active")
         if (state.mode == MODE_AGENT) == enabled:
-            return state  # idempotent — double-clicks and stale tabs
+            # Idempotent — double-clicks and stale tabs — except that
+            # returning to buttons with an empty agenda is the one exit
+            # from that same dead end (every question answered while
+            # showing the agent-led branch, e.g. via keep-editing): the
+            # completed agenda goes straight to review.
+            if not enabled and _finish_agenda(state):
+                save_state(state)
+            return state
         state.mode = MODE_AGENT if enabled else MODE_CHOICES
         state.error = None
+        if not enabled and _finish_agenda(state):
+            save_state(state)
+            return state
         save_state(state)
         if enabled:
             remaining = ", ".join(spec.prompt.strip("?") for spec in remaining_questions(state))
@@ -1941,7 +2110,15 @@ def keep_editing() -> InterviewState:
 
 def redo_interview() -> InterviewState:
     """Wipe the interview state and start over (profile.json stays put)."""
-    clear_state()
+    # Readiness BEFORE clearing: redo intends to discard the interview,
+    # but if the only backend signed out since the original run,
+    # start_interview would fail over an empty store — an error with no
+    # path forward. Tell the user to configure a backend first instead.
     ready = readiness()
+    if not ready["can_start_any"]:
+        raise OnboardingError(
+            "Start over needs an interview backend — sign in to Claude Code "
+            "or add an AI provider on the Settings page first.")
+    clear_state()
     mode = "claude" if ready["can_start_claude"] else "llm"
     return start_interview(mode)
