@@ -299,6 +299,28 @@ _ALL_COLUMNS: dict[str, str] = {
 }
 
 
+def _add_column(conn: sqlite3.Connection, col: str, dtype: str) -> bool:
+    """ALTER TABLE jobs ADD COLUMN, tolerating a concurrent identical ALTER.
+
+    The lock below serializes threads in this process, but the portal and
+    CLI run init_db in separate processes and SQLite only serializes the
+    writes — the loser of that race gets 'duplicate column name' after
+    the winner committed. That is the winner's success, not a failure:
+    re-read the pragma to confirm the column now exists and report it as
+    added (P2-3). Any other OperationalError propagates.
+    """
+    try:
+        conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} {dtype}")
+        return True
+    except sqlite3.OperationalError as exc:
+        if "duplicate column" not in str(exc).lower():
+            raise
+        present = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+        if col in present:
+            return True
+        raise  # 'duplicate column' phrasing without the column present: real error
+
+
 def ensure_columns(conn: sqlite3.Connection | None = None) -> list[str]:
     """Add any missing columns to the jobs table (forward migration).
 
@@ -319,7 +341,9 @@ def ensure_columns(conn: sqlite3.Connection | None = None) -> list[str]:
 
     # B4.8/spike-confirmed race: two threads can both pass the PRAGMA check
     # before either commits its ALTER TABLE, raising a duplicate-column
-    # OperationalError. Serialize the whole check-and-migrate section.
+    # OperationalError. The lock serializes threads in this process; the
+    # same race across processes (portal vs CLI) is tolerated in
+    # _add_column, so the lock is advisory rather than load-bearing (P2-3).
     with _migration_lock:
         existing = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
         added = []
@@ -330,8 +354,8 @@ def ensure_columns(conn: sqlite3.Connection | None = None) -> list[str]:
                 # is always created with the table itself so this is safe
                 if "PRIMARY KEY" in dtype:
                     continue
-                conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} {dtype}")
-                added.append(col)
+                if _add_column(conn, col, dtype):
+                    added.append(col)
 
         if added:
             conn.commit()
