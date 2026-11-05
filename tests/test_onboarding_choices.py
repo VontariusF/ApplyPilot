@@ -523,6 +523,31 @@ def test_agent_mode_directive_reaches_backends_but_not_the_transcript(app_dir, f
     assert not any("switched back to the guided" in m["content"] for m in state.messages)
 
 
+def test_agent_led_switch_passes_resume_to_claude(portal_client, fake_claude, monkeypatch):
+    """The Claude CLI gets the pending resume embedded in its prompt
+    text: the resumed session has no other channel for content
+    attached since the kickoff, so a mode-switch draft would otherwise
+    spend a resume Claude never saw (Codex P2 on f679e54)."""
+    client, _ = portal_client
+    patch_gates(monkeypatch)
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+
+    onboarding.start_intake()
+    onboarding.add_resume(text="MARKER-RESUME-7788")
+    client.post("/onboarding/start", data={"mode": "claude"})
+    assert onboarding.load_state().pending_context  # draftless kickoff
+
+    onboarding.set_agent_led(True)
+    prompts = [json.loads(line)["prompt"] for line in fake_claude.read_text().splitlines()]
+    switch_prompts = [p for p in prompts if "agent-led questions" in p]
+    assert switch_prompts and all("MARKER-RESUME-7788" in p for p in switch_prompts)
+    state = onboarding.load_state()
+    assert state.mode == onboarding.MODE_AGENT
+    assert state.phase == onboarding.INTERVIEW
+    assert state.profile_draft in (None, {})  # no draft from the fake's ack
+    assert state.pending_context  # nothing consumed: the resume stays in play
+
+
 # ---------------------------------------------------------------------------
 # The CLI backend runs the same agenda
 

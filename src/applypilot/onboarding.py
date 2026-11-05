@@ -1520,10 +1520,16 @@ def set_agent_led(enabled: bool) -> InterviewState:
         # directive alone — and clearing the context then would
         # permanently lose the only copy of the resume (Codex P2 on
         # ece4654). With the context supplied, a consuming draft has
-        # actually earned the spend.
+        # actually earned the spend. The Claude CLI gets the context
+        # embedded in its prompt text (the resumed session has no other
+        # channel for content attached since the kickoff — Codex P2 on
+        # f679e54).
         context = state.pending_context
+        prompt_for_claude = directive
+        if context:
+            prompt_for_claude = f"{context}\n\nDirective: {directive}"
         try:
-            reply = _agent_turn(state, directive, directive, directive=directive,
+            reply = _agent_turn(state, directive, prompt_for_claude, directive=directive,
                                 context_for_provider=context)
         except RuntimeError as exc:
             state.error = str(exc)
