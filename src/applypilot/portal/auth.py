@@ -12,6 +12,7 @@ pages (whose cross-site requests carry no SameSite=Strict cookie).
 """
 
 import logging
+import os
 import re
 import secrets
 from pathlib import Path
@@ -19,6 +20,19 @@ from pathlib import Path
 from applypilot import config
 
 COOKIE_NAME = "portal_token"
+
+# Opt-out of the portal TOKEN check (P2-4): the deployed Mac launchd unit
+# runs with this set. Name matches the deployed plist verbatim. Only the
+# token check relaxes — the middleware's localhost host-check runs first
+# regardless, so an opted-out portal is still unreachable off the machine.
+AUTH_DISABLE_ENV = "APPLIPILOT_PORTAL_DISABLE_AUTH"
+_AUTH_DISABLE_TRUTHY = {"1", "true", "yes"}
+
+
+def auth_disabled() -> bool:
+    """True when APPLIPILOT_PORTAL_DISABLE_AUTH opts the token check out."""
+    return os.environ.get(AUTH_DISABLE_ENV, "").strip().lower() in _AUTH_DISABLE_TRUTHY
+
 
 # Hosts the portal answers for. Binding is 127.0.0.1; this blocks DNS
 # rebinding, where an attacker page resolves a public name to 127.0.0.1

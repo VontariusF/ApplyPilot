@@ -306,6 +306,15 @@ applypilot portal --port 9000
   (`http://127.0.0.1:8765/?token=…`) once, and the browser keeps it as an
   HttpOnly `SameSite=Strict` cookie. Non-localhost `Host` headers are refused
   (DNS-rebinding defense).
+- The token check can be opted out for kiosk-style local runs by setting
+  `APPLIPILOT_PORTAL_DISABLE_AUTH=1` (truthy: `1`/`true`/`yes`) in the
+  portal's environment — the name matches the pre-existing launchd
+  deployments that already set it. This relaxes only the token check: the
+  portal still refuses non-localhost `Host` headers, so an opted-out portal
+  remains unreachable from other machines as long as the bind stays on
+  `127.0.0.1`. Like `APPLYPILOT_DIR`, it is read from the portal process's
+  environment (the store's `.env` is loaded into that environment at
+  startup); it is deliberately not a Settings-page field.
 - Secrets are never rendered back to the page — settings reads are masked to
   the last four characters, and the run log viewer redacts configured API
   keys, tokens, and passwords before display.

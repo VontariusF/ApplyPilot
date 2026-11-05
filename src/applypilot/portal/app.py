@@ -146,11 +146,17 @@ def create_app() -> FastAPI:
     # headers are refused outright (DNS-rebinding defense). The token is
     # accepted only from the cookie or a header — never the query string,
     # which access logs and browser history record verbatim (F9).
+    # APPLIPILOT_PORTAL_DISABLE_AUTH (P2-4) opts the TOKEN check out — the
+    # deployed Mac launchd unit runs that way. The host-check above runs
+    # regardless: an opted-out portal must never become a LAN-reachable
+    # unauthenticated store reader if the bind ever widens.
     # ------------------------------------------------------------------
     @app.middleware("http")
     async def auth_guard(request: Request, call_next):
         if not auth.host_is_allowed(request.headers.get("host")):
             return PlainTextResponse("forbidden: portal is localhost-only", status_code=400)
+        if auth.auth_disabled():
+            return await call_next(request)
         provided = auth.extract_token(
             request.cookies.get(auth.COOKIE_NAME),
             request.headers.get("x-portal-token")
