@@ -1364,8 +1364,17 @@ def _onboarding_context(error: str = "", login_error: str = "", login: int = 0,
     only in-wait signature change is the sign-in flip itself, which swaps
     the gate card for the ready card anyway.
     """
-    state = onboarding.load_state()
     ready = onboarding.readiness()
+    state = onboarding.load_state()
+    # Resume-first entry (spec art_ti3XJuNr): the first surface a ready
+    # user sees opens intake — the resume upload — instead of jumping
+    # straight into questions. Rendered surfaces are the flow's entry
+    # points (page GET, POST re-renders, SSE), so the intake state is
+    # opened here once; start_intake is idempotent and a live state in a
+    # later phase resumes untouched. Locked-out users keep the gate
+    # cards — nothing startable, nothing to upload into.
+    if state is None and (ready["can_start_claude"] or ready["can_start_llm"]):
+        state = onboarding.start_intake()
     in_review = state is not None and state.phase == onboarding.REVIEW
     login_process = engine_auth.active_login()
     in_interview = state is not None and state.phase == onboarding.INTERVIEW

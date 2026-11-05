@@ -97,6 +97,51 @@ def test_engine_login_redirects_back_to_onboarding(portal_client, monkeypatch):
     assert r.headers["location"].startswith("/onboarding?")
 
 
+def test_first_ready_page_opens_the_intake_screen(portal_client, monkeypatch, fake_llm):
+    """Resume-first entry (spec art_ti3XJuNr): the first page a ready user
+    sees opens intake — the resume upload — with the interview start kept
+    as the explicit skip path. A locked-out user still sees only the gate."""
+    client, _ = portal_client
+    patch_gates(monkeypatch, claude=SIGNED_IN)
+    r = client.get("/onboarding")
+    assert r.status_code == 200
+    assert "Start with your resume" in r.text
+    assert "/onboarding/resume" in r.text
+    assert "Start the interview" in r.text  # skip affordance survives
+    state = onboarding.load_state()
+    assert state is not None and state.phase == onboarding.INTAKE
+
+    patch_gates(monkeypatch, claude=SIGNED_OUT)  # claude gate off again
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: False)  # no provider left
+    r = client.get("/onboarding")
+    assert "Agent account needed" in r.text  # locked out: nothing startable
+
+
+def test_intake_page_flow_drives_the_resume_first_kickoff(portal_client, monkeypatch, fake_llm):
+    """The rendered intake screen feeds the real flow: page render opens
+    intake, the upload stores the pending context, and starting the
+    interview kicks off with the resume text reaching the provider."""
+    client, _ = portal_client
+    patch_gates(monkeypatch, claude=SIGNED_IN)
+    draft_reply = "Read your resume.\n\n```json\n" + json.dumps({
+        "_applypilot_profile": {
+            "personal": {"full_name": "Jane Doe", "email": "jane@example.com",
+                         "country": "United States"},
+            "work_authorization": {},
+        },
+        "_applypilot_search": {"queries": ["Data Engineer"], "location": "Austin, TX"},
+    }) + "\n```"
+    fake_llm.replies[:] = [draft_reply]  # first turn (the kickoff) returns the draft
+
+    client.get("/onboarding")  # intake opens on the first ready render
+    client.post("/onboarding/resume", data={"resume_text": "MARKER-RESUME-2468"})
+    client.post("/onboarding/start", data={"mode": "llm"})
+    state = onboarding.load_state()
+    assert state.profile_draft["personal"]["full_name"] == "Jane Doe"
+    # The kickoff prompt carried the uploaded resume text to the provider.
+    assert any("MARKER-RESUME-2468" in m["content"] for m in fake_llm.calls[0])
+
+
 def test_engine_login_rejects_unknown_destination(portal_client, monkeypatch):
     import subprocess
 
