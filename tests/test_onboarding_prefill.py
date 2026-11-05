@@ -162,6 +162,37 @@ def test_pending_context_survives_until_extraction(portal_client, fake_llm, monk
     assert state.profile_draft["personal"]["full_name"] == "Jane Doe"
 
 
+def test_guided_answer_keeps_the_resume_in_play(portal_client, fake_llm, monkeypatch):
+    """The guided-answer path (record_answer) carries the same resume
+    context the chat path does: the provider's request includes the
+    uploaded text on the wizard's ack turn, and a draftless ack keeps
+    the context for later — one button click must not drop the only
+    copy of the resume (Codex P2 on 80f92a0)."""
+    client, _ = portal_client
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    fake_llm.respond("Hello! Tell me about your background.")  # kickoff: no draft
+
+    onboarding.start_intake()
+    client.post("/onboarding/resume", data={"resume_text": "MARKER-RESUME-7788"})
+    client.post("/onboarding/start", data={"mode": "llm"})
+    state = onboarding.load_state()
+    assert "MARKER-RESUME-7788" in state.pending_context
+
+    fake_llm.respond("Got it — noted.")
+    client.post("/onboarding/answer",
+                data={"question_id": "full_name", "free_text": "Jane Q. Public"})
+    state = onboarding.load_state()
+    assert state.answers["full_name"] == "Jane Q. Public"
+    assert "MARKER-RESUME-7788" in state.pending_context  # draftless ack: retained
+    # The provider got the resume on the guided turn too.
+    assert any("MARKER-RESUME-7788" in m["content"] for m in fake_llm.calls[-1])
+
+    fake_llm.respond(DRAFT_REPLY)  # extraction lands on a later turn
+    client.post("/onboarding/send", data={"text": "that's everything"})
+    state = onboarding.load_state()
+    assert state.pending_context == ""  # spent
+
+
 def test_kickoff_extraction_never_records_gated_claims(portal_client, fake_llm, monkeypatch):
     """The intake kickoff reads a document, not the user: its draft may
     prefill identity and preferences, but gated work-auth claims are
@@ -234,3 +265,23 @@ def test_intake_kickoff_prompt_carries_the_resume(portal_client, fake_llm, monke
     assert "MARKER-RESUME-7788" in kickoff_messages[-1]["content"]
     state = onboarding.load_state()
     assert state.phase == onboarding.INTERVIEW  # no draft: the agenda is intact
+
+
+# ---------------------------------------------------------------------------
+# The review form: effective values
+
+def test_review_fields_show_effective_draft_values():
+    """Review rows render effective answers — recorded answers over draft
+    prefill, the same precedence remaining_questions uses — so a question
+    skipped via prefill shows the extracted value instead of a blank,
+    while a recorded answer still wins (Codex P2 on 80f92a0)."""
+    prefilled = seeded_state()
+    prefilled.phase = onboarding.REVIEW
+    rows = {r["spec"].id: r["value"] for r in onboarding.review_fields(prefilled)}
+    assert rows["full_name"] == "Jane Doe"  # from the draft, never recorded
+    assert rows["education"] == "Bachelor's"  # from the draft
+
+    answered = seeded_state({"full_name": "Jane Q. Public"})
+    answered.phase = onboarding.REVIEW
+    rows = {r["spec"].id: r["value"] for r in onboarding.review_fields(answered)}
+    assert rows["full_name"] == "Jane Q. Public"  # recorded beats extraction

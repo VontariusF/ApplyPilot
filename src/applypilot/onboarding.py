@@ -934,10 +934,15 @@ _REVIEW_FLAGGED_PATHS = frozenset({
 
 
 def review_fields(state: InterviewState) -> list[dict]:
-    """Rows for the review form: every question with its saved answer and
-    whether the field it feeds is still empty in the draft (the 'needs
-    answer' chips — same fields missing_review_fields flags)."""
+    """Rows for the review form: every question with its effective answer
+    (recorded answers over draft prefill — the same precedence
+    remaining_questions uses, so a skipped prefilled question shows its
+    extracted value instead of a blank) and whether the field it feeds is
+    still empty in the draft (the 'needs answer' chips — same fields
+    missing_review_fields flags)."""
     draft = state.profile_draft or {}
+    prefilled = draft_to_answers(draft, state.answers)
+    effective = {**prefilled, **state.answers}
 
     def draft_value(path: str) -> str:
         if path.startswith("search."):
@@ -953,7 +958,7 @@ def review_fields(state: InterviewState) -> list[dict]:
             continue
         rows.append({
             "spec": spec,
-            "value": state.answers.get(spec.id, ""),
+            "value": effective.get(spec.id, ""),
             "needs_answer": spec.maps_to in _REVIEW_FLAGGED_PATHS and not draft_value(spec.maps_to),
         })
     return rows
@@ -1414,11 +1419,12 @@ def record_answer(question_id: str, value: str = "", free_text: str = "",
 
         if label:
             prompt = label
-            if state.pending_context:
-                prompt = f"{state.pending_context}\n\nUser's message: {label}"
+            context = state.pending_context
+            if context:
+                prompt = f"{context}\n\nUser's message: {label}"
                 state.pending_context = ""
             try:
-                reply = _agent_turn(state, prompt, prompt)
+                reply = _agent_turn(state, prompt, prompt, context_for_provider=context)
             except RuntimeError as exc:
                 # The user's answer stays recorded; the chat shows the
                 # failure and the next render carries the error banner.
@@ -1427,7 +1433,10 @@ def record_answer(question_id: str, value: str = "", free_text: str = "",
                 raise
             state.error = None
             state.messages.append({"role": _ROLE_ASSISTANT, "content": reply})
-            _after_reply(state, reply, allow_review=False)
+            if not _after_reply(state, reply, allow_review=False) and context:
+                # Same retention rule as send_message: a draftless turn
+                # keeps the pending resume in play for the next one.
+                state.pending_context = context
         save_state(state)
         return state
 
