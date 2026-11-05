@@ -103,21 +103,22 @@ def seed_applied(n: int) -> None:
 # submits; "free:" entries are typed into the per-kind widget; None
 # entries are skipped (their review chips are the point).
 WALK = {
+    "full_name": "free:Test Person",
+    "education": "Bachelor's",
+    "experience_years": "3–5",
+    "work_style": "remote",
+    "country": "United States",
     "work_authorized": None,  # skipped: gated field, gets the review chip
     "sponsorship": "no",
     "permit_type": "Citizen",
-    "work_style": "remote",
     "currency": "USD",
     "salary_band": "120000",
     "start_date": "Immediately",
-    "education": "Bachelor's",
-    "experience_years": "3–5",
     "target_roles": "free:Data Engineer\nAnalytics Engineer",
     "location": "free:Austin, TX",
     "skills_languages": "free:Python\nSQL",
     "skills_frameworks": "free:FastAPI",
     "skills_tools": "free:Docker",
-    "full_name": "free:Test Person",
     "email": "free:test@example.com",
     "phone": "free:+1 555 0100",
     "city": "free:Austin, TX",

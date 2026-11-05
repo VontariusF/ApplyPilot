@@ -194,12 +194,63 @@ class QuestionSpec:
 
 
 QUESTION_SPECS: tuple[QuestionSpec, ...] = (
-    # -- Eligibility: the gating pair first (the fields PR #22 guards) --
+    # -- Identity first: who the applications are for (the resume usually
+    #    already knows most of this, and nothing below makes sense without it) --
+    QuestionSpec(
+        id="full_name",
+        prompt="What's your full name?",
+        allow_free_text=True,
+        maps_to="personal.full_name",
+        agent_hint="the name as it should appear on applications",
+    ),
+    QuestionSpec(
+        id="education",
+        prompt="What's your highest education?",
+        choices=(Choice("Bachelor's", "Bachelor's"), Choice("Master's", "Master's"),
+                 Choice("PhD", "PhD"), Choice("Self-taught", "Self-taught")),
+        allow_free_text=True,
+        maps_to="experience.education_level",
+        agent_hint="bootcamps and certificates count too",
+    ),
+    QuestionSpec(
+        id="experience_years",
+        prompt="How many years have you worked in your field?",
+        choices=(Choice("0–2", "0–2"), Choice("3–5", "3–5"),
+                 Choice("6–10", "6–10"), Choice("10+", "10+")),
+        maps_to="experience.years_of_experience_total",
+        agent_hint="a rough band is fine",
+    ),
+    # -- Preferences --
+    QuestionSpec(
+        id="work_style",
+        prompt="How do you want to work?",
+        choices=(Choice("remote", "Remote"), Choice("hybrid", "Hybrid"),
+                 Choice("onsite", "On-site")),
+        maps_to="search.remote",
+        agent_hint="the trade-offs of remote, hybrid, and onsite",
+    ),
+    # -- Location: captured before anything that depends on a country. The
+    #    work-auth pair below gates on this answer (fail-closed), so a
+    #    "Not sure yet" (or a typed country) defers those to the review step. --
+    QuestionSpec(
+        id="country",
+        prompt="Which country will you be working from / applying to jobs in?",
+        choices=(Choice("United States", "United States"), Choice("United Kingdom", "United Kingdom"),
+                 Choice("Canada", "Canada"), Choice("European Union", "European Union"),
+                 Choice("India", "India"), Choice("Other", "Other"),
+                 Choice("Not sure yet", "Not sure yet")),
+        allow_free_text=True,  # "Other" — the typed country is the answer
+        maps_to="personal.country",
+        agent_hint="where the applications will be filed — or 'not sure yet' to decide later",
+    ),
+    # -- Eligibility: the gating pair (the fields PR #22 guards), asked only
+    #    once a country exists --
     QuestionSpec(
         id="work_authorized",
         prompt="Are you legally authorized to work in the country you're applying in?",
         choices=(Choice("yes", "Yes"), Choice("no", "No")),
         maps_to="work_authorization.legally_authorized_to_work",
+        depends_on={"country": "United States,United Kingdom,Canada,European Union,India,Other"},
         agent_hint="what counts as work authorization and how it's usually proved",
     ),
     QuestionSpec(
@@ -207,6 +258,7 @@ QUESTION_SPECS: tuple[QuestionSpec, ...] = (
         prompt="Will you now or in the future need visa sponsorship?",
         choices=(Choice("yes", "Yes"), Choice("no", "No"), Choice("not_sure", "Not sure")),
         maps_to="work_authorization.require_sponsorship",
+        depends_on={"country": "United States,United Kingdom,Canada,European Union,India,Other"},
         agent_hint="what sponsorship means and when employers offer it",
     ),
     QuestionSpec(
@@ -220,15 +272,6 @@ QUESTION_SPECS: tuple[QuestionSpec, ...] = (
         maps_to="work_authorization.work_permit_type",
         depends_on={"work_authorized": "yes"},
         agent_hint="visa and permit categories beyond the four listed",
-    ),
-    # -- Preferences --
-    QuestionSpec(
-        id="work_style",
-        prompt="How do you want to work?",
-        choices=(Choice("remote", "Remote"), Choice("hybrid", "Hybrid"),
-                 Choice("onsite", "On-site")),
-        maps_to="search.remote",
-        agent_hint="the trade-offs of remote, hybrid, and onsite",
     ),
     QuestionSpec(
         id="currency",
@@ -258,23 +301,6 @@ QUESTION_SPECS: tuple[QuestionSpec, ...] = (
         free_text_kind="date",
         maps_to="availability.earliest_start_date",
         agent_hint="typical notice periods",
-    ),
-    QuestionSpec(
-        id="education",
-        prompt="What's your highest education?",
-        choices=(Choice("Bachelor's", "Bachelor's"), Choice("Master's", "Master's"),
-                 Choice("PhD", "PhD"), Choice("Self-taught", "Self-taught")),
-        allow_free_text=True,
-        maps_to="experience.education_level",
-        agent_hint="bootcamps and certificates count too",
-    ),
-    QuestionSpec(
-        id="experience_years",
-        prompt="How many years have you worked in your field?",
-        choices=(Choice("0–2", "0–2"), Choice("3–5", "3–5"),
-                 Choice("6–10", "6–10"), Choice("10+", "10+")),
-        maps_to="experience.years_of_experience_total",
-        agent_hint="a rough band is fine",
     ),
     # -- Search shape --
     QuestionSpec(
@@ -318,13 +344,6 @@ QUESTION_SPECS: tuple[QuestionSpec, ...] = (
         agent_hint="tools only — languages and frameworks are separate questions",
     ),
     # -- Personal fields (review flags name/email/phone when empty) --
-    QuestionSpec(
-        id="full_name",
-        prompt="What's your full name?",
-        allow_free_text=True,
-        maps_to="personal.full_name",
-        agent_hint="the name as it should appear on applications",
-    ),
     QuestionSpec(
         id="email",
         prompt="What email address should applications use?",

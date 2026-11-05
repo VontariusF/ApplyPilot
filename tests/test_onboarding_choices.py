@@ -45,20 +45,21 @@ def fake_claude(tmp_path, monkeypatch):
 # Walk fixtures: the full happy-path answer set (registry order)
 
 FULL_WALK = {
+    "full_name": "free:Test Person",
+    "education": "Bachelor's",
+    "experience_years": "3–5",
+    "work_style": "remote",
+    "country": "United States",
     "work_authorized": "yes",
     "sponsorship": "no",
     "permit_type": "Citizen",
-    "work_style": "remote",
     "currency": "USD",
     "salary_band": "120000",
     "start_date": "Immediately",
-    "education": "Bachelor's",
-    "experience_years": "3–5",
     "target_roles": "free:Data Engineer\nAnalytics Engineer",
     "skills_languages": "free:Python\nSQL",
     "skills_frameworks": "free:FastAPI",
     "skills_tools": "free:Docker",
-    "full_name": "free:Test Person",
     "email": "free:test@example.com",
     "phone": "free:+1 555 0100",
     "city": "free:Austin, TX",
@@ -145,21 +146,22 @@ def _expected_ack_prompts():
 
 def test_registry_covers_the_spec_table():
     expected = [
+        "full_name",
+        "education",
+        "experience_years",
+        "work_style",
+        "country",
         "work_authorized",
         "sponsorship",
         "permit_type",
-        "work_style",
         "currency",
         "salary_band",
         "start_date",
-        "education",
-        "experience_years",
         "target_roles",
         "location",
         "skills_languages",
         "skills_frameworks",
         "skills_tools",
-        "full_name",
         "email",
         "phone",
         "city",
@@ -185,6 +187,17 @@ def test_registry_covers_the_spec_table():
     assert permit.choices and permit.allow_free_text
     assert permit.free_text_kind is None
     assert permit.depends_on == {"work_authorized": "yes"}
+
+    # The country question precedes the work-auth pair and gates it
+    # (exact-choice, fail-closed): "Not sure yet" is deliberately absent
+    # from the allowlist, deferring those questions to the review step.
+    country = onboarding.QUESTIONS["country"]
+    assert country.choices and country.allow_free_text
+    assert country.free_text_kind is None
+    assert country.maps_to == "personal.country"
+    allowed_countries = ",".join(c.value for c in country.choices if c.value != "Not sure yet")
+    for gated in ("work_authorized", "sponsorship"):
+        assert onboarding.QUESTIONS[gated].depends_on == {"country": allowed_countries}
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +228,7 @@ def test_walk_renders_records_and_advances_every_question(portal_client, fake_ll
     assert draft["compensation"]["salary_currency"] == "USD"
     assert draft["experience"]["education_level"] == "Bachelor's"
     assert draft["experience"]["years_of_experience_total"] == "3–5"
+    assert draft["personal"]["country"] == "United States"
     assert draft["skills_boundary"]["programming_languages"] == ["Python", "SQL"]
     assert draft["_applypilot_search"]["queries"] == ["Data Engineer", "Analytics Engineer"]
     assert draft["_applypilot_search"]["remote"] is True
@@ -244,6 +258,67 @@ def test_depends_on_skips_unmet_questions(portal_client, fake_llm, monkeypatch):
     assert "location" not in state.answers  # remote-only: no radius needed
     profile, _ = onboarding.normalize_profile({}, state.answers)
     assert profile["work_authorization"]["work_permit_type"] == ""
+
+
+def test_work_auth_questions_wait_for_country():
+    """Missing location → the work-auth pair is not on the agenda.
+
+    _depends_met fails closed: an unanswered parent keeps its children
+    waiting, so no authorization question ever precedes a country.
+    """
+    state = onboarding.InterviewState(answers={
+        "full_name": "Test Person", "education": "Bachelor's",
+        "experience_years": "3–5", "work_style": "remote",
+    })
+    open_ids = [q.id for q in onboarding.remaining_questions(state)]
+    assert open_ids[0] == "country"
+    assert "work_authorized" not in open_ids
+    assert "sponsorship" not in open_ids
+
+    state.answers["country"] = "United States"
+    open_ids = [q.id for q in onboarding.remaining_questions(state)]
+    assert open_ids[:2] == ["work_authorized", "sponsorship"]
+
+
+def test_not_sure_country_defers_work_auth_to_review(portal_client, fake_llm, monkeypatch):
+    """'Not sure yet' is outside the gating allowlist: the wizard defers
+    the work-auth pair to the review step instead of blocking on it."""
+    client, _ = portal_client
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    _start(client)
+    rendered = _walk(client, dict(FULL_WALK, country="Not sure yet"))
+
+    assert "work_authorized" not in rendered
+    assert "sponsorship" not in rendered
+    assert "permit_type" not in rendered
+    state = onboarding.load_state()
+    assert state.phase == onboarding.REVIEW  # deferred, not blocked
+    assert state.answers["country"] == "Not sure yet"
+
+
+def test_legacy_mid_interview_store_still_completes(portal_client, fake_llm, monkeypatch):
+    """A store recorded at the pre-reorder registry keeps its answers and
+    finishes: remaining_questions is computed, never persisted."""
+    client, _ = portal_client
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    _start(client)
+
+    # The old order asked the gating pair and preferences before identity.
+    legacy_ids = ["work_authorized", "sponsorship", "permit_type", "work_style",
+                  "currency", "salary_band", "start_date", "education", "experience_years"]
+    for qid in legacy_ids:
+        raw = FULL_WALK[qid]
+        if raw.startswith("free:"):
+            _answer(client, qid, free=raw[5:])
+        else:
+            _answer(client, qid, value=raw)
+
+    # The reorder resequences only what's left: identity, then country.
+    rendered = _walk(client, FULL_WALK)
+    assert rendered[:2] == ["full_name", "country"]
+    state = onboarding.load_state()
+    assert state.phase == onboarding.REVIEW
+    assert state.answers == STORED
 
 
 def test_free_text_kinds_route_correctly(portal_client, fake_llm, monkeypatch):
@@ -417,12 +492,13 @@ def test_agent_mode_hands_the_agenda_back_and_resumes(portal_client, fake_llm, m
     assert state.answers == {"work_authorized": "yes"}
     assert any(m["role"] == "user" and m["content"] == "I have a Master's degree" for m in state.messages)
 
-    # Back to buttons: the agenda resumes at the NEXT unanswered question.
+    # Back to buttons: the agenda resumes at the NEXT unanswered question
+    # (identity first under the reordered registry).
     page = client.post("/onboarding/agent-mode", data={"enabled": "0"})
     assert page.status_code == 200
     state = onboarding.load_state()
     assert state.mode == onboarding.MODE_CHOICES
-    assert _qid(page.text) == "sponsorship"
+    assert _qid(page.text) == "full_name"
 
 
 def test_agent_mode_directive_reaches_backends_but_not_the_transcript(app_dir, fake_llm, monkeypatch):
@@ -434,7 +510,7 @@ def test_agent_mode_directive_reaches_backends_but_not_the_transcript(app_dir, f
     onboarding.set_agent_led(True)
     directive = fake.calls[-1][-1]["content"]
     assert "agent-led questions" in directive
-    assert "Are you legally authorized" in directive  # the still-open fields
+    assert "What's your full name" in directive  # the still-open fields
     state = onboarding.load_state()
     assert not any("agent-led questions" in m["content"] for m in state.messages)
     assert any(m["role"] == "assistant" for m in state.messages)  # the ack landed
@@ -551,28 +627,34 @@ def test_guided_screen_renders_choices_and_something_else(portal_client, fake_ll
     monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
     page = _start(client)
 
-    # First question (work_authorized): buttons, no free text allowed.
+    # First question (full_name): a free-text-only question renders the
+    # widget directly — typing is the answer, no buttons or
+    # "Something else…" gate in the way.
+    assert 'data-question-id="full_name"' in page
+    assert "choice-grid" not in page
+    assert "Something else…" not in page
+
+    # The work-auth pair renders buttons — asked only once a country exists.
+    _answer(client, "full_name", free="Test Person")
+    _answer(client, "education", value="Bachelor's")
+    _answer(client, "experience_years", value="3–5")
+    _answer(client, "work_style", value="remote")
+    page = _answer(client, "country", value="United States")
     assert "choice-grid" in page and 'data-question-id="work_authorized"' in page
     assert "Something else…" not in page
 
     # The permit question carries both buttons and the typed escape hatch.
     _answer(client, "work_authorized", value="yes")
-    page = client.get("/onboarding/chat").text  # sponsorship is current
     _answer(client, "sponsorship", value="no")
     page = client.get("/onboarding/chat").text  # permit_type is current
     assert 'data-question-id="permit_type"' in page
     assert "Something else…" in page  # the collapsed typed-answer box
     page = _answer(client, "permit_type", value="Citizen")
-    _answer(client, "work_style", value="remote")
     page = _answer(client, "currency", value="USD")
     assert "Something else…" in page  # currency also allows a typed code
 
-    # A free-text-only question renders the widget directly — typing is
-    # the answer, no "Something else…" gate in the way.
     page = _answer(client, "salary_band", free="145000")
     page = _answer(client, "start_date", value="Immediately")
-    page = _answer(client, "education", value="Bachelor's")
-    page = _answer(client, "experience_years", value="3–5")
     page = _answer(client, "target_roles", free="Data Engineer\nAnalytics Engineer")
     assert "Something else…" not in page  # no choices on target_roles
     assert "<textarea" in page
@@ -606,20 +688,21 @@ def test_free_text_widget_matches_the_kind(portal_client, fake_llm, monkeypatch)
     client, _ = portal_client
     monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
     _start(client)
-    for _ in range(8):  # walk to salary_band: choices + a number widget
+    for _ in range(12):  # walk to salary_band: choices + a number widget
         page = client.get("/onboarding/chat").text
         qid = _qid(page)
         if qid == "salary_band":
             break
         spec = onboarding.QUESTIONS[qid]
-        _answer(client, qid, value=spec.choices[0].value)
+        if spec.choices:
+            _answer(client, qid, value=spec.choices[0].value)
+        else:
+            _answer(client, qid, free="Test Person")
     assert '<input type="number"' in page
 
     # The date kind renders a date input (start_date question).
     page = _answer(client, "salary_band", free="145000")
     page = _answer(client, "start_date", value="Immediately")
-    page = _answer(client, "education", value="Bachelor's")
-    page = _answer(client, "experience_years", value="3–5")
     page = _answer(client, "target_roles", free="Data Engineer")
     assert "<textarea" in page  # multiline kind for the skills/roles questions
 
@@ -628,6 +711,11 @@ def test_choice_answers_stay_out_of_the_transcript_typed_chat_shows(portal_clien
     client, _ = portal_client
     monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
     _start(client)
+    _answer(client, "full_name", free="Test Person")
+    _answer(client, "education", value="Bachelor's")
+    _answer(client, "experience_years", value="3–5")
+    _answer(client, "work_style", value="remote")
+    _answer(client, "country", value="United States")
     page = _answer(client, "work_authorized", value="yes")
     # The picked answer renders as the clicked button, not a chat bubble.
     assert "chat-msg user" not in page
