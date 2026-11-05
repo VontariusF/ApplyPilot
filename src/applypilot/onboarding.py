@@ -55,10 +55,11 @@ from applypilot import config, engine_auth
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Phases: gate -> interview -> review -> done
+# Phases: gate -> intake -> interview -> review -> done
 # ---------------------------------------------------------------------------
 
 GATE = "gate"  # engine sign-in step (D1) — no interview yet
+INTAKE = "intake"  # resume upload step, offered before any question (resume-first)
 INTERVIEW = "interview"  # agent asks; user answers
 REVIEW = "review"  # profile.md rendered; confirm or keep editing
 DONE = "done"  # files written; the onboarding gate stops redirecting
@@ -523,8 +524,8 @@ class ClaudePrintBackend:
 
     name = "claude"
 
-    def kickoff(self, state: InterviewState) -> str:
-        return self._run(state, KICKOFF_PROMPT, resume=False)
+    def kickoff(self, state: InterviewState, prompt: str | None = None) -> str:
+        return self._run(state, prompt or KICKOFF_PROMPT, resume=False)
 
     def send(self, state: InterviewState, user_text: str) -> str:
         return self._run(state, user_text, resume=state.claude_session_id is not None)
@@ -575,12 +576,12 @@ class LLMBackend:
 
         return llm.get_client()
 
-    def kickoff(self, state: InterviewState) -> str:
+    def kickoff(self, state: InterviewState, prompt: str | None = None) -> str:
         # The synthetic kickoff prompt is not part of the transcript (it
         # would render as a phantom user bubble); the greeting is.
         return self._client().chat([
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": _ROLE_USER, "content": KICKOFF_PROMPT},
+            {"role": _ROLE_USER, "content": prompt or KICKOFF_PROMPT},
         ])
 
     def send(self, state: InterviewState, user_text: str) -> str:
@@ -1068,19 +1069,26 @@ def _llm_turn(state: InterviewState, directive: str | None = None) -> str:
     return client.chat(messages)
 
 
-def _after_reply(state: InterviewState, reply: str) -> None:
+def _after_reply(state: InterviewState, reply: str, allow_review: bool = True) -> None:
     """Post-reply bookkeeping: draft extraction and phase transition.
 
     The transcript is the service layer's job; this only reacts to the
     reply's content. The wizard's answers overlay the agent's fenced-JSON
     draft — the wizard is the source of truth (PR #22 guard: the agent
     only fills what the wizard doesn't own).
+
+    allow_review=False for the kickoff and guided-answer turns: there the
+    agenda is not the agent's to finish — an extraction mid-walk feeds the
+    prefill bridge (remaining_questions then asks only the gaps) instead
+    of yanking the wizard to review. Free-form chat finishes on the draft
+    as before.
     """
     draft = extract_profile_draft(reply)
     if draft is not None:
         profile, meta = normalize_profile(draft, state.answers)
         state.profile_draft = {**profile, "_applypilot_search": meta}
-        state.phase = REVIEW
+        if allow_review:
+            state.phase = REVIEW
 
 
 def start_interview(mode: str) -> InterviewState:
@@ -1090,11 +1098,14 @@ def start_interview(mode: str) -> InterviewState:
     skip to provider-key mode. The gate phase never reaches here unlocked.
     An existing live state resumes as-is — two tabs (or the post-sign-in
     refresh) must not wipe an interview in progress; only a cleared state
-    (first run, or after redo_interview) starts fresh.
+    (first run, or after redo_interview) starts fresh. The exception is
+    INTAKE: starting the interview is the transition out of the intake
+    step, carrying the uploaded resume's pending context into the kickoff
+    turn so its reply extracts the draft before the first question.
     """
     with _STATE_LOCK:
         existing = load_state()
-        if existing is not None:
+        if existing is not None and existing.phase != INTAKE:
             return existing
         ready = readiness()
         if mode == "claude":
@@ -1110,10 +1121,19 @@ def start_interview(mode: str) -> InterviewState:
         else:
             raise OnboardingError(f"unknown interview mode {mode!r}")
 
-        state = InterviewState(phase=INTERVIEW, backend=backend_name)
+        if existing is not None:  # INTAKE — the resume-first entry
+            state = existing
+        else:
+            state = InterviewState(phase=INTERVIEW, backend=backend_name)
+        state.backend = backend_name
+        state.phase = INTERVIEW
+        kickoff_prompt = KICKOFF_PROMPT
+        if state.pending_context:
+            kickoff_prompt = f"{state.pending_context}\n\n{KICKOFF_PROMPT}"
+            state.pending_context = ""
         if backend_name == "claude":
             try:
-                reply = ClaudePrintBackend().kickoff(state)
+                reply = ClaudePrintBackend().kickoff(state, kickoff_prompt)
             except InterviewBackendError as exc:
                 # A1 runtime reversal: sign-in looked green but print mode
                 # failed — the provider takes over when one exists.
@@ -1122,11 +1142,14 @@ def start_interview(mode: str) -> InterviewState:
                 log.warning("Onboarding kickoff: claude failed (%s); using the LLM provider", exc)
                 _note(state, "Claude Code didn't answer — continuing with the configured provider.")
                 state.backend = "llm"
-                reply = LLMBackend().kickoff(state)
+                reply = LLMBackend().kickoff(state, kickoff_prompt)
         else:
-            reply = LLMBackend().kickoff(state)
+            reply = LLMBackend().kickoff(state, kickoff_prompt)
         state.messages.append({"role": _ROLE_ASSISTANT, "content": reply})
-        _after_reply(state, reply)
+        # The kickoff never finishes the interview on its own: an extracted
+        # draft prefills the agenda (gaps-only), it does not end it — the
+        # wizard still asks the gated and preference questions.
+        _after_reply(state, reply, allow_review=False)
         save_state(state)
         return state
 
@@ -1156,6 +1179,25 @@ def send_message(text: str) -> InterviewState:
         state.error = None
         state.messages.append({"role": _ROLE_ASSISTANT, "content": reply})
         _after_reply(state, reply)
+        save_state(state)
+        return state
+
+
+def start_intake() -> InterviewState:
+    """Open the intake step: resume upload before any question.
+
+    Resume-first onboarding's first screen (spec art_ti3XJuNr): a state
+    in the INTAKE phase accepts /onboarding/resume uploads and nothing
+    else — no backend, no agent turns. Starting the interview
+    (start_interview) is the transition out. An existing live state in a
+    later phase resumes as-is (two tabs must not wipe work in progress);
+    a fresh or gate-phase store opens intake.
+    """
+    with _STATE_LOCK:
+        existing = load_state()
+        if existing is not None and existing.phase != GATE:
+            return existing
+        state = InterviewState(phase=INTAKE)
         save_state(state)
         return state
 
@@ -1339,10 +1381,15 @@ def add_resume(text: str | None = None, pdf_bytes: bytes | None = None,
     resume.txt, so the interview and the whole downstream pipeline read
     it like any text resume; when nothing readable comes out (scanned or
     encrypted), the note asks for the text instead — nothing invented.
+
+    Accepted in INTAKE as well as INTERVIEW: the intake step collects
+    the resume before any question is asked (resume-first, spec
+    art_ti3XJuNr) — the pending context rides the interview's kickoff
+    turn, whose reply extracts the draft the prefill bridge consumes.
     """
     with _STATE_LOCK:
         state = load_state()
-        if state is None or state.phase != INTERVIEW:
+        if state is None or state.phase not in (INTAKE, INTERVIEW):
             raise OnboardingError("the interview is not active")
         if pdf_bytes is not None:
             config.RESUME_PDF_PATH.write_bytes(pdf_bytes)
