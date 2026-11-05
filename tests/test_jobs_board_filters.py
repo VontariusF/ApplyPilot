@@ -355,3 +355,16 @@ def test_rescore_does_not_block_event_loop(portal_env, portal_client,
     assert page_status == 200
     assert elapsed < 0.9 * BLOCK_SECONDS, \
         f"GET / finished {elapsed:.2f}s after scoring started — event loop was blocked"
+
+
+def test_board_context_async_matches_sync(portal_client, seeded_profile):
+    """Portal sweep P3-7: the board context build runs off the event loop
+    via to_thread — the async wrapper returns exactly what the sync build
+    does."""
+    import asyncio
+
+    from applypilot.portal.app import (_board_view, _jobs_board_context,
+                                       _jobs_board_context_async)
+
+    assert asyncio.run(_jobs_board_context_async(_board_view({}))) == (
+        _jobs_board_context(_board_view({})))

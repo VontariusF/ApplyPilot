@@ -267,3 +267,19 @@ def test_llm_reset_client_drops_singleton(monkeypatch):
     assert fresh.provider_name == "openai"
     assert fresh.api_key == "ok-after-reset"
     fresh._client.close()
+
+
+def test_settings_rejects_invalid_choice_value(portal_client):
+    """Portal sweep P3-1: choice fields are validated server-side — a
+    scripted POST with a bogus LLM_PROVIDER redirects with an in-page
+    error and persists nothing, instead of writing junk and 500ing."""
+    client, _ = portal_client
+    r = client.post("/settings", data={"LLM_PROVIDER": "bogus-provider"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert "error=" in r.headers["location"]
+    page = client.get(r.headers["location"]).text
+    assert "bogus-provider" not in page
+    assert "must be one of" in page
+    env_text = (config.ENV_PATH.read_text() if config.ENV_PATH.exists() else "")
+    assert "bogus-provider" not in env_text

@@ -205,3 +205,45 @@ def test_stream_log_lines_recovers_after_rotation(portal_env):
     assert "pre-rotation line 0" in datas
     assert "post-rotation line" in datas
     assert log.stat().st_size < old_size
+
+
+def test_absorb_event_survives_malformed_worker_id():
+    """Portal sweep P3-5: a non-numeric worker_id used to raise ValueError
+    inside the SSE generator, killing the whole stream. It is skipped
+    instead."""
+    from applypilot.portal.app import _absorb_event
+
+    workers, events = {}, []
+    assert _absorb_event(
+        json.dumps({"kind": "state", "worker_id": "not-a-number"}),
+        workers, events) is False
+    assert workers == {}
+    assert events == []
+    # Well-formed events still absorb.
+    assert _absorb_event(
+        json.dumps({"kind": "state", "worker_id": 1, "status": "applying"}),
+        workers, events) is True
+    assert workers[1]["status"] == "applying"
+
+
+def test_read_log_tail_raw_keeps_jsonl_parseable(portal_env, monkeypatch):
+    """Portal sweep P3-5: the events backfill parses raw lines — a
+    configured secret rewritten inside a JSONL line (display redaction)
+    used to break the parse and silently drop the backfilled event."""
+    from applypilot.portal import settings as settings_mod
+    from applypilot.portal.app import _read_log_tail
+
+    log = portal_env / "runs" / "ev.jsonl"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    secret = "sk-supersecret-value-1234"
+    line = json.dumps({"kind": "event", "msg": f"key={secret}"}) + "\n"
+    log.write_text(line, encoding="utf-8")
+    monkeypatch.setattr(settings_mod, "collect_secret_values",
+                        lambda: [secret])
+
+    raw = _read_log_tail(log, redact=False)
+    assert secret in raw
+    json.loads(raw.splitlines()[0])  # still parseable
+
+    redacted = _read_log_tail(log, redact=True)
+    assert secret not in redacted

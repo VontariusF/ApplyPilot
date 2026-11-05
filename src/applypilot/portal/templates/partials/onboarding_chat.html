@@ -238,6 +238,7 @@
           </div>
         {% endif %}
         <h3>{{ question.prompt }}</h3>
+        {% if question_hint %}<p class="hint">{{ question_hint }}</p>{% endif %}
         {% if question.choices %}
           <div class="choice-grid">
             {% for c in question.choices %}

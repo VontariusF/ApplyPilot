@@ -237,13 +237,13 @@ def create_app() -> FastAPI:
                        sites=queries.distinct_sites(),
                        statuses=queries.distinct_apply_statuses(),
                        progress=_jobs_progress(),
-                       **_jobs_board_context(view))
+                       **await _jobs_board_context_async(view))
 
     @app.get("/jobs/table", response_class=HTMLResponse)
     async def jobs_table(request: Request):
         view = _board_view(request.query_params)
         return _render(request, "partials/jobs_board.html",
-                       **_jobs_board_context(view))
+                       **await _jobs_board_context_async(view))
 
     @app.get("/jobs/detail", response_class=HTMLResponse)
     async def jobs_detail(request: Request, url: str):
@@ -308,14 +308,14 @@ def create_app() -> FastAPI:
             if hx:
                 return _render(request, "partials/jobs_board.html",
                                toast_message=str(e), toast_kind="error",
-                               **_jobs_board_context(view))
+                               **await _jobs_board_context_async(view))
             return RedirectResponse(f"/jobs?error={quote(str(e))}", status_code=303)
         if hx:
             # Stay on the board: the card shows a busy state and the SSE feed
             # refreshes it when documents are ready.
             return _render(request, "partials/jobs_board.html",
                            toast_message="Tailoring started — the card updates when documents are ready.",
-                           toast_kind="info", **_jobs_board_context(view))
+                           toast_kind="info", **await _jobs_board_context_async(view))
         return RedirectResponse(f"/jobs/detail?url={quote(url, safe='')}",
                                 status_code=303)
 
@@ -345,14 +345,14 @@ def create_app() -> FastAPI:
                 return _render(request, "partials/jobs_board.html",
                                toast_message=message, toast_kind="error",
                                status_code=409,
-                               **_jobs_board_context(view))
+                               **await _jobs_board_context_async(view))
             return PlainTextResponse(message, status_code=409)
         if not job.get("tailored_resume_path"):
             message = "This job has no tailored documents yet — run Tailor now first."
             if hx:
                 return _render(request, "partials/jobs_board.html",
                                toast_message=message, toast_kind="error",
-                               **_jobs_board_context(view))
+                               **await _jobs_board_context_async(view))
             return RedirectResponse(f"/jobs?error={quote(message)}", status_code=303)
         try:
             runner.start_run("apply", {"url": url})
@@ -360,12 +360,12 @@ def create_app() -> FastAPI:
             if hx:
                 return _render(request, "partials/jobs_board.html",
                                toast_message=str(e), toast_kind="error",
-                               **_jobs_board_context(view))
+                               **await _jobs_board_context_async(view))
             return RedirectResponse(f"/jobs?error={quote(str(e))}", status_code=303)
         if hx:
             return _render(request, "partials/jobs_board.html",
                            toast_message="Applying now — the card updates when the application finishes.",
-                           toast_kind="info", **_jobs_board_context(view))
+                           toast_kind="info", **await _jobs_board_context_async(view))
         return RedirectResponse(f"/jobs/detail?url={quote(url, safe='')}",
                                 status_code=303)
 
@@ -385,7 +385,7 @@ def create_app() -> FastAPI:
             return _render(request, "partials/jobs_board.html",
                            toast_message="Job dismissed — find it in the Dismissed section below if that was a mistake.",
                            toast_kind="info",
-                           **_jobs_board_context(_board_form_view(form)))
+                           **await _jobs_board_context_async(_board_form_view(form)))
         return RedirectResponse("/jobs", status_code=303)
 
     @app.post("/jobs/undismiss")
@@ -401,7 +401,7 @@ def create_app() -> FastAPI:
             return _render(request, "partials/jobs_board.html",
                            toast_message="Job restored to the board.",
                            toast_kind="info",
-                           **_jobs_board_context(_board_form_view(form)))
+                           **await _jobs_board_context_async(_board_form_view(form)))
         return RedirectResponse("/jobs", status_code=303)
 
     @app.post("/jobs/reset-failed")
@@ -423,15 +423,26 @@ def create_app() -> FastAPI:
         # The scoring call is a blocking LLM HTTP request (up to ~240s with
         # retries) — off the event loop, or every portal request stalls
         # behind it. Same pattern as the onboarding routes.
-        await asyncio.to_thread(run_scoring, url=url)
+        result = await asyncio.to_thread(run_scoring, url=url) or {}
         if request.headers.get("HX-Request"):
             # Inline feedback (spec Jobs panel): the fit-assessment panel
             # itself re-renders with the fresh score instead of a silent
             # full-page redirect.
             job = queries.job_detail(url) or {}
             keywords, reasoning = queries.split_score_reasoning(job.get("score_reasoning"))
+            # Portal sweep P3-3: a no-op rescore (no full description, or
+            # every scoring call failed) used to render the same "just
+            # rescored" state as a success. Say what happened instead.
+            rescore_error = ""
+            if result.get("errors") and not result.get("scored"):
+                rescore_error = (
+                    "Rescore did not score this job — it has no full description "
+                    "to assess, or the scoring call failed. Details are in the "
+                    "job's score error below.")
             return _render(request, "partials/fit_assessment.html", job=job,
-                           keywords=keywords, reasoning=reasoning, rescored=True)
+                           keywords=keywords, reasoning=reasoning,
+                           rescored=not rescore_error,
+                           rescore_error=rescore_error)
         return RedirectResponse(f"/jobs/detail?url={quote(url, safe='')}",
                                 status_code=303)
 
@@ -520,6 +531,7 @@ def create_app() -> FastAPI:
     async def runs_page(request: Request):
         return _render(request, "runs.html", runs=runner.list_runs(),
                        error=request.query_params.get("error"),
+                       notice=request.query_params.get("notice"),
                        scheduler_skip=automation_mod.load()["state"].get("scheduler_skip"))
 
     @app.post("/runs/start")
@@ -540,7 +552,7 @@ def create_app() -> FastAPI:
                 # state's Find-jobs button), not a dead-end /runs redirect.
                 return _render(request, "partials/jobs_board.html",
                                toast_message=str(e), toast_kind="error",
-                               **_jobs_board_context(_board_form_view(form)))
+                               **await _jobs_board_context_async(_board_form_view(form)))
             return RedirectResponse(f"{target}?error={quote(str(e))}",
                                     status_code=303)
         if request.headers.get("HX-Request") and target == "/runs":
@@ -548,13 +560,20 @@ def create_app() -> FastAPI:
             # shows the run — no dead-end redirect to /runs. The POST carries
             # no view params, so the default board view renders.
             return _render(request, "partials/jobs_board.html",
-                           **_jobs_board_context(_board_form_view(form)))
+                           **await _jobs_board_context_async(_board_form_view(form)))
         return RedirectResponse(target, status_code=303)
 
     @app.post("/runs/cancel/{run_id}")
     async def runs_cancel(run_id: str):
-        runner.cancel_run(run_id)
-        return RedirectResponse("/runs", status_code=303)
+        # Portal sweep P3-4: cancel_run is False for an already-terminal
+        # run — surface the difference instead of redirecting silently
+        # (the user cannot otherwise tell "cancelled" from "no-op").
+        if runner.cancel_run(run_id):
+            return RedirectResponse("/runs?notice=Run+cancelled.",
+                                    status_code=303)
+        return RedirectResponse(
+            "/runs?error=That+run+was+not+active+%E2%80%94+nothing+to+cancel.",
+            status_code=303)
 
     @app.post("/runs/retry/{run_id}")
     async def runs_retry(run_id: str):
@@ -563,7 +582,7 @@ def create_app() -> FastAPI:
             runner.retry_run(run_id)
         except runner.ParamError as e:
             return RedirectResponse(f"/runs?error={quote(str(e))}", status_code=303)
-        return RedirectResponse("/runs", status_code=303)
+        return RedirectResponse("/runs?notice=Retry+started.", status_code=303)
 
     @app.get("/runs/{run_id}/log", response_class=HTMLResponse)
     async def run_log(request: Request, run_id: str):
@@ -974,14 +993,21 @@ def create_app() -> FastAPI:
     # Settings
     # ------------------------------------------------------------------
     @app.get("/settings", response_class=HTMLResponse)
-    async def settings_page(request: Request, saved: int = 0):
+    async def settings_page(request: Request, saved: int = 0, error: str = ""):
         return _render(request, "settings.html", fields=settings_mod.masked_view(),
-                       saved=bool(saved), model_choices=_fetch_model_choices())
+                       saved=bool(saved), error=error,
+                       model_choices=_fetch_model_choices())
 
     @app.post("/settings")
     async def settings_save(request: Request):
         form = {k: str(v) for k, v in (await request.form()).items()}
-        settings_mod.apply_settings(form)
+        try:
+            settings_mod.apply_settings(form)
+        except settings_mod.SettingsParamError as e:
+            # In-page error (same pattern as ?saved=): a scripted POST with
+            # an invalid CHOICE value used to surface as an unhandled 500.
+            return RedirectResponse(f"/settings?error={quote(str(e))}",
+                                    status_code=303)
         return RedirectResponse("/settings?saved=1", status_code=303)
 
     @app.get("/settings/models")
@@ -1185,6 +1211,16 @@ def _board_active_filters(view: dict[str, str]) -> list[dict]:
     if view["discovered_to"].strip():
         add("discovered_to", f"Found until {view['discovered_to'].strip()}")
     return active
+
+
+async def _jobs_board_context_async(view: dict[str, str]) -> dict:
+    """Board context off the event loop (portal sweep P3-7).
+
+    The build queries SQLite and does the salary filter/sort in Python
+    over every matching row — blocking work that used to run inside the
+    async routes on every board render and SSE refetch.
+    """
+    return await asyncio.to_thread(_jobs_board_context, view)
 
 
 def _jobs_board_context(view: dict[str, str]) -> dict:
@@ -1417,6 +1453,12 @@ async def _onboarding_context(error: str = "", login_error: str = "",
     # choices (salary_band's bands derive from the captured currency and
     # level); flow logic below keeps using current_question.
     question = onboarding.wizard_question(state) if in_interview and not agent_led else None
+    # Salary-band level hint (agent-replies sweep P3): the bands assume
+    # mid-level when experience is unrecorded — say so under the prompt.
+    question_hint = ""
+    if question is not None and question.id == "salary_band":
+        question_hint = onboarding.salary_band_hint(
+            onboarding.effective_answers(state))
     return {
         "state": state,
         # Render version for the SSE staleness guard (see onboarding_surface).
@@ -1426,6 +1468,7 @@ async def _onboarding_context(error: str = "", login_error: str = "",
         "missing": onboarding.missing_review_fields(state.profile_draft) if in_review else [],
         "review_fields": onboarding.review_fields(state) if in_review else [],
         "question": question,
+        "question_hint": question_hint,
         # Resume-sourced chips (spec art_ti3XJuNr): what extraction already
         # answered, shown editable in the interview; and the gaps still
         # open, as needs-answer chips. Empty outside the guided interview.
@@ -1633,11 +1676,14 @@ async def _stream_chat(last: tuple) -> AsyncIterator[dict]:
     yield {"event": "end", "data": "closed"}
 
 
-def _read_log_tail(path: Path) -> str:
-    """Redacted initial log backfill: last BACKFILL_BYTES.
+def _read_log_tail(path: Path, redact: bool = True) -> str:
+    """Initial log backfill: last BACKFILL_BYTES.
 
     Missing file -> "". A byte-offset start can split a line; the partial
-    leading fragment is dropped.
+    leading fragment is dropped. Redaction is a display concern (the
+    partials escape); callers that parse the lines (the JSONL events
+    backfill) pass redact=False — a configured secret rewritten inside a
+    JSONL line breaks the parse and silently drops that event.
     """
     if not path.exists():
         return ""
@@ -1650,7 +1696,7 @@ def _read_log_tail(path: Path) -> str:
         first_newline = text.find("\n")
         if first_newline >= 0:
             text = text[first_newline + 1:]
-    return settings_mod.redact_for_render(text)
+    return settings_mod.redact_for_render(text) if redact else text
 
 
 def _read_from(path: Path, offset: int) -> tuple[bytes, int]:
@@ -1729,7 +1775,11 @@ async def _stream_events(event_path: Path, get_run) -> AsyncIterator[dict]:
 
     offset = _start_offset(event_path) if event_path.exists() else 0
     if offset:
-        for line in _read_log_tail(event_path).splitlines():
+        # Raw lines (portal sweep P3-5): redaction is for display, and a
+        # redacted secret inside a JSONL line breaks the parse — the
+        # backfilled event would be silently dropped. _absorb_event
+        # tolerates junk; the partials escape on render.
+        for line in _read_log_tail(event_path, redact=False).splitlines():
             _absorb_event(line, workers, events)
     yield {"event": "state", "data": workers_html()}
     yield {"event": "event", "data": events_html()}
@@ -1763,7 +1813,14 @@ def _absorb_event(line: str, workers: dict[int, dict], events: list[str]) -> boo
         return False
     kind = parsed.get("kind")
     if kind == "state":
-        workers[int(parsed.get("worker_id", 0))] = parsed
+        try:
+            worker = int(parsed.get("worker_id", 0))
+        except (TypeError, ValueError):
+            # Portal sweep P3-5: a malformed worker_id used to raise
+            # ValueError and kill the whole SSE generator. Skip the line;
+            # the stream stays up for well-formed events.
+            return False
+        workers[worker] = parsed
         return True
     if kind == "event":
         events.append(str(parsed.get("msg", "")))

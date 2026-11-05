@@ -21,6 +21,15 @@ SECRET = "secret"
 TEXT = "text"
 CHOICE = "choice"
 
+
+class SettingsParamError(ValueError):
+    """A submitted settings value violates a field's contract.
+
+    Raised for a CHOICE value outside the field's listed choices; the
+    /settings route renders it in-page as the save error.
+    """
+
+
 FIELDS: list[dict] = [
     {"key": "LLM_PROVIDER", "kind": CHOICE,
      "choices": ["gemini", "openai", "custom", "local"],
@@ -139,6 +148,27 @@ def _effective_changes(
     return sets, drops
 
 
+def _validate_choices(values: dict[str, str], cleared: set[str]) -> None:
+    """CHOICE fields accept only their listed values (portal sweep P3-1).
+
+    The select elements restrict the UI, but the server previously
+    persisted any string — a crafted or scripted POST could write e.g.
+    LLM_PROVIDER=bogus into .env and brick every LLM call until the file
+    was hand-edited. _parse_form already rejects unknown keys; this
+    closes the value half. A cleared key is dropped regardless of its
+    submitted value, and an empty submission drops text/choice keys
+    (_effective_changes), so neither reaches this check.
+    """
+    choices = {f["key"]: f["choices"] for f in FIELDS if f["kind"] == CHOICE}
+    for key, val in values.items():
+        allowed = choices.get(key)
+        if key in cleared or not val or allowed is None:
+            continue
+        if val not in allowed:
+            raise SettingsParamError(
+                f"{key} must be one of: {', '.join(allowed)}")
+
+
 def _merge_env_text(text: str, sets: dict[str, str], drops: set[str]) -> str:
     """Line-based merge: comments, blanks, and unknown keys survive in place.
 
@@ -181,6 +211,7 @@ def apply_settings(form: dict[str, str]) -> dict[str, str]:
     Returns the resulting key/value map (raw, in-memory) for tests.
     """
     values, cleared = _parse_form(form)
+    _validate_choices(values, cleared)
     sets, drops = _effective_changes(values, cleared)
     if config.ENV_PATH.exists():
         text = config.ENV_PATH.read_text(encoding="utf-8")

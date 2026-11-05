@@ -18,6 +18,7 @@
   <p class="fit-summary"><strong>Why it’s {{ "an" if job.fit_score in (8, 11, 18) else "a" }} {{ job.fit_score }}/10:</strong> {{ reasoning or "No reasoning captured." }}</p>
   {% endif %}
   {% if rescored %}<p class="inline-note">Score updated just now.</p>{% endif %}
+  {% if rescore_error %}<div class="alert error">{{ rescore_error }}</div>{% endif %}
   <form class="inline-form rescore-form" hx-post="/jobs/rescore" hx-target="#fit-assessment" hx-swap="outerHTML">
     <input type="hidden" name="url" value="{{ job.url }}">
     <button type="submit" class="secondary">Rescore</button>

@@ -76,9 +76,15 @@ def get_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
         except sqlite3.ProgrammingError:
             pass
 
-    conn = sqlite3.connect(path, timeout=30)
-    conn.execute("PRAGMA journal_mode=WAL")
+    conn = sqlite3.connect(path)
+    # One busy budget for every connection: PRAGMA busy_timeout overrides
+    # the connect(timeout=...) handler, so the old 30s-vs-10s pair was two
+    # numbers pretending to be one — and the WAL switch below ran before
+    # the pragma existed, on default handling. The pragma is set first, so
+    # first-ever WAL conversion on a contended store waits the same
+    # budget as every later statement.
     conn.execute("PRAGMA busy_timeout=10000")
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.row_factory = sqlite3.Row
     _local.connections[path] = conn
     return conn
@@ -705,8 +711,9 @@ def count_apply_eligible(min_score: int = 7) -> int:
     Mirrors the queue predicate of apply/launcher.acquire_job's non-target
     branch — tailored, not locked (or a stale lock), under the apply
     attempt limit, scored at or above min_score, and not on a blocked
-    site/URL pattern. Keep the two in sync; the launcher's query owns the
-    semantics, this count only answers "is there anything to apply to".
+    site/URL pattern or a manual-ATS site. Keep the two in sync; the
+    launcher's query owns the semantics, this count only answers "is
+    there anything to apply to".
     """
     stale_minutes = config.DEFAULTS["apply_stale_lock_minutes"]
     cutoff = (datetime.now(timezone.utc)
@@ -723,6 +730,18 @@ def count_apply_eligible(min_score: int = 7) -> int:
     if blocked_patterns:
         url_clauses = " ".join("AND url NOT LIKE ?" for _ in blocked_patterns)
         params.extend(blocked_patterns)
+    # acquire_job skips manual-ATS sites after the SQL (is_manual_ats on
+    # application_url or url); the count must skip them too, or a
+    # scheduled run sees eligible jobs the worker refuses and burns a
+    # tracked run per manual-ATS job. LIKE is case-insensitive for ASCII
+    # by default, matching is_manual_ats's lowercased containment check.
+    ats_clauses = ""
+    manual_domains = config.load_sites_config().get("manual_ats", [])
+    if manual_domains:
+        ats_clauses = " ".join(
+            "AND COALESCE(application_url, url) NOT LIKE ?"
+            for _ in manual_domains)
+        params.extend(f"%{domain.lower()}%" for domain in manual_domains)
     row = conn.execute(f"""
         SELECT COUNT(*) FROM jobs
         WHERE tailored_resume_path IS NOT NULL
@@ -733,6 +752,7 @@ def count_apply_eligible(min_score: int = 7) -> int:
           AND fit_score >= ?
           {site_clause}
           {url_clauses}
+          {ats_clauses}
     """, params).fetchone()
     return row[0]
 

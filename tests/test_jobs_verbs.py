@@ -260,3 +260,19 @@ def test_busy_verbs_reads_registry_params(portal_client, seeded_profile,
                                   "params": json.dumps({"url": url}),
                                   "status": "running"}])
     assert portal_app._busy_verbs() == {url: "tailor"}
+
+
+def test_rescore_noop_renders_honest_error(portal_client, seeded_profile,
+                                           monkeypatch):
+    """Portal sweep P3-3: a no-op rescore (no full description to assess,
+    or every scoring call failed) must not render the success state."""
+    from applypilot.portal import app as portal_app
+
+    url = seed_job()
+    monkeypatch.setattr(portal_app, "run_scoring",
+                        lambda **kwargs: {"scored": 0, "errors": 1})
+    client, _ = portal_client
+    r = client.post("/jobs/rescore", data={"url": url}, headers=HX)
+    assert r.status_code == 200
+    assert "Rescore did not score this job" in r.text
+    assert "Score updated just now." not in r.text

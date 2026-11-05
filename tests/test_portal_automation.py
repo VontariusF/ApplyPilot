@@ -8,7 +8,9 @@ parameters; tailor-now resets + runs one job through the registry.
 """
 
 import json
+import os
 import stat
+import sys
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -59,15 +61,30 @@ def seed_applied(n: int) -> None:
 
 def insert_registry_row(run_id: str, kind: str,
                         params: dict | None = None,
-                        status: str = "running") -> None:
+                        status: str = "running",
+                        live: bool = False) -> None:
     runner.init_registry()
     conn = get_connection()
-    conn.execute(
-        "INSERT INTO runs (id, kind, params, status, started_at) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (run_id, kind, json.dumps(params or {}), status,
-         datetime.now(timezone.utc).isoformat()),
-    )
+    if live:
+        # A row that must look like a genuinely active run to the orphan
+        # sweep: identity columns from the current process, which is very
+        # much alive (P3-2 moved the sweep into run_tick).
+        pid = os.getpid()
+        conn.execute(
+            "INSERT INTO runs (id, kind, params, status, started_at, pid, pgid, "
+            "pid_start_time, pid_cmdline) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (run_id, kind, json.dumps(params or {}), status,
+             datetime.now(timezone.utc).isoformat(), pid, pid,
+             runner._proc_start_time(pid),
+             json.dumps(runner._proc_cmdline(pid))),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO runs (id, kind, params, status, started_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (run_id, kind, json.dumps(params or {}), status,
+             datetime.now(timezone.utc).isoformat()),
+        )
     conn.commit()
 
 
@@ -271,7 +288,9 @@ def test_scheduler_empty_queue_guard_matches_worker_eligibility(
 
 
 def test_scheduler_never_double_starts_while_a_run_is_active(portal_env, start_spy):
-    insert_registry_row("active-1", "pipeline")
+    # A live row (P3-2: run_tick sweeps dead ones now, so the busy guard
+    # needs a row whose process exists) blocks a second start.
+    insert_registry_row("active-1", "pipeline", live=True)
     automation.update({"schedule_enabled": True, "auto_apply_enabled": True})
     outcome = automation.run_tick()
     assert outcome["started"] == []
@@ -366,7 +385,8 @@ def test_retry_route_spawns_a_new_registry_row(portal_env, portal_client, monkey
     monkeypatch.setattr(runner, "start_run", fake_start)
     response = client.post("/runs/retry/dead-2", follow_redirects=False)
     assert response.status_code == 303
-    assert response.headers["location"] == "/runs"
+    # P3-4: the outcome is surfaced, not a silent redirect.
+    assert response.headers["location"] == "/runs?notice=Retry+started."
     assert captured == {"kind": "pipeline", "params": {"min_score": "8"}}
 
 
@@ -578,3 +598,37 @@ def test_tailor_now_route_surfaces_the_refusal(portal_env, portal_client,
     assert response.status_code == 200
     assert "applying to this job right now" in response.text
     assert start_spy == []
+
+
+def test_run_tick_sweeps_dead_registry_row(portal_env, start_spy):
+    """Reliability sweep P3-2: a leaked 'running' row (monitor thread died,
+    child reaped unobserved) used to stall every future tick with 'a run is
+    already active' until a portal restart. run_tick runs the cheap orphan
+    sweep first, the dead row is reaped, and the scheduler proceeds."""
+    insert_registry_row("leaked-1", "pipeline")  # no live process behind it
+    automation.update({"schedule_enabled": True})
+    outcome = automation.run_tick()
+    # The reap itself is noted in the tick outcome; the important part is
+    # that the leaked row no longer reads as "a run is already active".
+    assert "a run is already active" not in outcome["skipped"]
+    assert [s["kind"] for s in outcome["started"]] == ["pipeline"]
+    row = runner.get_run("leaked-1")
+    assert row["status"] == "failed"  # reaped
+
+
+def test_cancel_route_surfaces_outcome(portal_env, portal_client):
+    """Portal sweep P3-4: cancel tells the user what happened instead of a
+    silent redirect — 'cancelled' vs 'nothing was running'."""
+    client, _ = portal_client
+    row = runner.start_run(
+        "pipeline", {},
+        command=[sys.executable, "-c", "import time; time.sleep(30)"],
+        emit_jsonl=False,
+    )
+    response = client.post(f"/runs/cancel/{row['id']}", follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/runs?notice=Run+cancelled."
+    # A terminal run: the no-op is surfaced as an error, not silence.
+    response = client.post(f"/runs/cancel/{row['id']}", follow_redirects=False)
+    assert response.status_code == 303
+    assert "That+run+was+not+active" in response.headers["location"]

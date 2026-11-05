@@ -410,24 +410,47 @@ def start_run(kind: str, params: dict, command: list[str] | None = None,
     else:
         popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 
-    proc = subprocess.Popen(
-        command,
-        stdout=log_file,
-        stderr=subprocess.STDOUT,
-        stdin=subprocess.DEVNULL,
-        env=env,
-        cwd=str(Path.home()),
-        **popen_kwargs,
-    )
-
+    # Portal sweep P3-6: the registry row exists before the child spawns.
+    # Popen-first meant a crash (or an insert failure) in between leaked a
+    # running child with no registry row — no cancel path, no sweep.
+    # 'starting' is deliberately not 'running': running_runs() (and the
+    # scheduler's busy check) only counts rows with a live child; the
+    # UPDATE below flips this one once the pid exists.
     conn = get_connection()
     conn.execute(
-        "INSERT INTO runs (id, kind, params, status, pid, pgid, pid_start_time, pid_cmdline, "
-        "started_at, log_path, event_path) "
-        "VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)",
-        (run_id, kind, json.dumps(params), proc.pid, proc.pid,
-         _proc_start_time(proc.pid), json.dumps(command), _now(),
-         str(log_path), str(event_path) if env.get("APPLYPILOT_EVENT_LOG") else None),
+        "INSERT INTO runs (id, kind, params, status, started_at, log_path, event_path) "
+        "VALUES (?, ?, ?, 'starting', ?, ?, ?)",
+        (run_id, kind, json.dumps(params), _now(), str(log_path),
+         str(event_path) if env.get("APPLYPILOT_EVENT_LOG") else None),
+    )
+    conn.commit()
+
+    try:
+        proc = subprocess.Popen(
+            command,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            env=env,
+            cwd=str(Path.home()),
+            **popen_kwargs,
+        )
+    except Exception:
+        # Nothing spawned: retire the row so history and the sweep see a
+        # terminal state instead of a 'starting' zombie.
+        conn.execute(
+            "UPDATE runs SET status = 'failed', ended_at = ? "
+            "WHERE id = ? AND status = 'starting'",
+            (_now(), run_id),
+        )
+        conn.commit()
+        log_file.close()
+        raise
+
+    conn.execute(
+        "UPDATE runs SET status = 'running', pid = ?, pgid = ?, pid_start_time = ?, "
+        "pid_cmdline = ? WHERE id = ?",
+        (proc.pid, proc.pid, _proc_start_time(proc.pid), json.dumps(command), run_id),
     )
     conn.commit()
 
