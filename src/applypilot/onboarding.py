@@ -464,6 +464,31 @@ _RESUME_CONTEXT_TMPL = (
     "the interview.)"
 )
 
+_ANSWER_ACK_TMPL = (
+    'The user just answered the wizard question "{question}" '
+    '(question id: {qid}) with "{answer}".{options_clause} '
+    "Acknowledge that specific answer in at most two sentences. Correct "
+    "course only when it contradicts what you already know; do not pivot "
+    "to unrelated profile topics."
+)
+
+
+def answer_ack_prompt(spec: QuestionSpec, label: str) -> str:
+    """The grounded acknowledgement prompt for one guided answer
+    (spec art_ti3XJuNr, grounded agent replies): the agent reads the
+    question's id, text, offered options, and the submitted value — never
+    a bare answer label, and never a topic the question didn't ask
+    about. Both backends receive it: the Claude CLI as its turn prompt,
+    the provider as an unrecorded directive after the transcript."""
+    options_clause = ""
+    if spec.choices:
+        options = ", ".join(f'"{c.label}"' for c in spec.choices)
+        options_clause = f" The offered options were: {options}."
+    return _ANSWER_ACK_TMPL.format(
+        question=spec.prompt, qid=spec.id, answer=label,
+        options_clause=options_clause,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Backends
@@ -1465,13 +1490,19 @@ def record_answer(question_id: str, value: str = "", free_text: str = "",
         save_state(state)
 
         if label:
-            prompt = label
+            # Grounded ack (spec art_ti3XJuNr): both backends hear the
+            # question's id, text, options, and the submitted value — the
+            # Claude CLI as its turn prompt, the provider as an unrecorded
+            # directive after the transcript.
+            grounded = answer_ack_prompt(spec, label)
+            prompt = grounded
             context = state.pending_context
             if context:
-                prompt = f"{context}\n\nUser's message: {label}"
+                prompt = f"{context}\n\n{grounded}"
                 state.pending_context = ""
             try:
-                reply = _agent_turn(state, prompt, prompt, context_for_provider=context)
+                reply = _agent_turn(state, prompt, prompt, directive=grounded,
+                                    context_for_provider=context)
             except RuntimeError as exc:
                 # The user's answer stays recorded; the chat shows the
                 # failure and the next render carries the error banner.

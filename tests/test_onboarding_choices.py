@@ -127,17 +127,18 @@ def _walk(client, answers):
 
 
 def _expected_ack_prompts():
-    """The user turns the agent should read for STORED: labels for choices,
-    the typed text for free text, nothing for skipped questions."""
-    prompts = []
+    """(spec, label) pairs the agent should read for STORED answers:
+    the typed text for free text, the choice label otherwise; skipped
+    questions record empty with no acknowledgement turn."""
+    acks = []
     for spec in onboarding.QUESTION_SPECS:
         if spec.id == "location":
             continue  # never rendered: the walk chose remote
         raw = STORED[spec.id]
         if not raw:
             continue  # skipped — recorded empty, no acknowledgement turn
-        prompts.append(next((c.label for c in spec.choices if c.value == raw), raw))
-    return prompts
+        acks.append((spec, next((c.label for c in spec.choices if c.value == raw), raw)))
+    return acks
 
 
 # ---------------------------------------------------------------------------
@@ -573,7 +574,14 @@ def test_claude_backend_walk_sends_labels_as_prompts(app_dir, fake_claude, monke
     assert state.phase == onboarding.REVIEW
     assert state.answers == STORED
     prompts = [json.loads(line)["prompt"] for line in fake_claude.read_text().splitlines()]
-    assert prompts[1:] == _expected_ack_prompts()
+    # Grounded acks (spec art_ti3XJuNr): every CLI turn prompt names the
+    # question it answers, its options, and the submitted value — never a
+    # bare label.
+    assert len(prompts) == len(_expected_ack_prompts()) + 1  # + the kickoff
+    for (spec, label), prompt in zip(_expected_ack_prompts(), prompts[1:], strict=True):
+        assert spec.prompt in prompt
+        assert label in prompt
+        assert onboarding.answer_ack_prompt(spec, label) in prompt
     resumes = [json.loads(line)["resume"] for line in fake_claude.read_text().splitlines()]
     assert all(r == "fake-session-1" for r in resumes[1:])  # session continuity
 
