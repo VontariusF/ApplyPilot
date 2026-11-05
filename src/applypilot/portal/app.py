@@ -1172,7 +1172,7 @@ def _board_active_filters(view: dict[str, str]) -> list[dict]:
         add("apply_status", f"Status: {view['apply_status'].strip()}")
     salary = _opt_float(view["min_salary"])
     if salary is not None:
-        add("min_salary", f"Pay at least ${salary:,.0f}")
+        add("min_salary", f"Pay at least {salary:,.0f}+")
     fit = _opt_int(view["min_score"])
     if fit is not None and fit != 7:
         add("min_score", f"Match {fit}/10 or better")

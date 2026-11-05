@@ -258,7 +258,7 @@ def test_active_filters_render_as_dismissible_chips(portal_client, seeded_profil
     html = client.get("/jobs?site=ExampleBoard&location=Austin&min_salary=80000"
                       "&min_score=9&remote=yes&discovered_from=2026-01-01").text
     for label in ("Board: ExampleBoard", "Location: Austin",
-                  "Pay at least $80,000", "Match 9/10 or better",
+                  "Pay at least 80,000+", "Match 9/10 or better",
                   "Remote only", "Found since 2026-01-01"):
         assert label in html
     # Removing the site filter drops exactly that param.
