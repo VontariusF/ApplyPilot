@@ -271,6 +271,19 @@ def load_env():
     load_dotenv()
 
 
+def default_apply_model() -> str:
+    """The apply engine's model when a run names none (P1-2).
+
+    Reads AUTOAPPLY_MODEL — the Settings page's "Default apply model" —
+    at call time so live saves apply; an unset or empty value falls back
+    to 'haiku'. Callers run after load_env(): the portal pushes saved
+    values into os.environ on save (settings._refresh_process_env) and
+    start_run copies that environment into spawned children, while direct
+    CLI runs load the store's .env in _bootstrap().
+    """
+    return os.environ.get("AUTOAPPLY_MODEL") or "haiku"
+
+
 # Secret env keys whose values must never reach disk surfaces (prompt logs,
 # the portal log viewer). S2/F1: the apply prompt embeds the CapSolver key
 # verbatim, and provider keys can enter prompt text through custom-endpoint

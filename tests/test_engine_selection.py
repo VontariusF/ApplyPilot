@@ -609,6 +609,42 @@ def test_apply_default_engine_is_claude(profile_and_job, monkeypatch):
     assert "claude" in result.output
 
 
+def test_apply_model_default_reads_autoapply_model(profile_and_job, monkeypatch):
+    """P1-2: an unnamed --model resolves from the AUTOAPPLY_MODEL setting
+    at call time (after _bootstrap loads the store's .env), then 'haiku'."""
+    seed_ready_job()
+    monkeypatch.setenv("AUTOAPPLY_MODEL", "qwen2.5:7b")
+    monkeypatch.setattr("applypilot.config.check_tier", _no_tier)
+
+    captured = {}
+
+    def fake_main(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("applypilot.apply.launcher.main", fake_main)
+
+    result = runner.invoke(app, ["apply", "--limit", "1"])
+    assert result.exit_code == 0, result.output
+    assert captured["model"] == "qwen2.5:7b"
+
+
+def test_apply_model_default_unset_is_haiku(profile_and_job, monkeypatch):
+    seed_ready_job()
+    monkeypatch.delenv("AUTOAPPLY_MODEL", raising=False)
+    monkeypatch.setattr("applypilot.config.check_tier", _no_tier)
+
+    captured = {}
+
+    def fake_main(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("applypilot.apply.launcher.main", fake_main)
+
+    result = runner.invoke(app, ["apply", "--limit", "1"])
+    assert result.exit_code == 0, result.output
+    assert captured["model"] == "haiku"
+
+
 def test_apply_engine_env_override(profile_and_job, monkeypatch):
     seed_ready_job()
     monkeypatch.setenv("AUTOAPPLY_ENGINE", "droid")

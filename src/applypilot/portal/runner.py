@@ -108,7 +108,11 @@ def build_apply_command(params: dict) -> list[str]:
     argv = [sys.executable, "-m", "applypilot", "apply",
             "--min-score", str(_int_param(params, "min_score", 7, 0, 10)),
             "--workers", str(_int_param(params, "workers", 1, 1, 4)),
-            "--model", _model_param(params, "model", "haiku")]
+            # P1-2: a run that names no model gets the Settings page's
+            # "Default apply model" (AUTOAPPLY_MODEL, pushed to os.environ
+            # on save), not a hardcoded id — the promise the field always
+            # made. An explicit form value still wins.
+            "--model", _model_param(params, "model", config.default_apply_model())]
     url = _url_param(params)
     if url:
         # One-job apply run: PR #6's exact-first --url matching does the rest.

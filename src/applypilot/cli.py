@@ -246,11 +246,12 @@ def apply(
         help=("Auto-apply engine: 'claude' (Claude Code, default) or 'droid' (Factory "
               "Droid). Falls back to the AUTOAPPLY_ENGINE env var, then 'claude'."),
     ),
-    model: str = typer.Option(
-        "haiku", "--model", "-m",
+    model: Optional[str] = typer.Option(
+        None, "--model", "-m",
         help=("Model id passed verbatim to the selected engine: Claude model ids for "
               "claude; Droid model ids (including custom:<name> entries from "
-              "~/.factory/config.json) for droid."),
+              "~/.factory/config.json) for droid. Defaults to the AUTOAPPLY_MODEL "
+              "setting, then 'haiku'."),
     ),
     continuous: bool = typer.Option(False, "--continuous", "-c", help="Run forever, polling for new jobs."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview actions without submitting."),
@@ -280,6 +281,15 @@ def apply(
         raise typer.Exit(code=1)
 
     _bootstrap()
+
+    # The model default resolves at call time — after _bootstrap() loaded
+    # the store's .env into the environment — so the Settings page's saved
+    # AUTOAPPLY_MODEL governs direct CLI runs too, matching the portal's
+    # run builder (P1-2).
+    if model is None:
+        from applypilot.config import default_apply_model
+
+        model = default_apply_model()
 
     from applypilot.config import check_tier, PROFILE_PATH as _profile_path
     from applypilot.database import get_connection

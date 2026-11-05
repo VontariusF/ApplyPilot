@@ -390,3 +390,26 @@ def test_settings_merge_write_still_honored_with_model_fields(portal_client):
     raw = config.ENV_PATH.read_text(encoding="utf-8")
     assert "# my comment" in raw
     assert "UNKNOWN_VAR=keepme" in raw
+
+
+# ---------------------------------------------------------------------------
+# P1-2: the saved default apply model governs runs that name no model
+# ---------------------------------------------------------------------------
+
+def test_default_apply_model_reads_env(monkeypatch):
+    from applypilot import config
+
+    monkeypatch.setenv("AUTOAPPLY_MODEL", "gpt-4o-mini")
+    assert config.default_apply_model() == "gpt-4o-mini"
+
+
+def test_default_apply_model_unset_or_empty_falls_back(monkeypatch):
+    """Both an unset setting and a cleared one fall back to 'haiku' — a
+    cleared field must not put an empty --model on the apply argv."""
+    from applypilot import config
+
+    monkeypatch.delenv("AUTOAPPLY_MODEL", raising=False)
+    assert config.default_apply_model() == "haiku"
+    monkeypatch.setenv("AUTOAPPLY_MODEL", "")
+    assert config.default_apply_model() == "haiku"
+

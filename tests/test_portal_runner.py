@@ -66,6 +66,34 @@ def test_apply_command_carries_the_daily_cap(portal_env):
     assert "--daily-cap" not in plain
 
 
+def test_apply_command_model_default_reads_setting(portal_env, monkeypatch):
+    """P1-2: a run that names no model gets the Settings page's saved
+    AUTOAPPLY_MODEL (pushed to os.environ on save and copied into this
+    process's env), not a hardcoded id."""
+    monkeypatch.setenv("AUTOAPPLY_MODEL", "qwen2.5:7b")
+    argv = runner.build_apply_command({})
+    assert argv[argv.index("--model") + 1] == "qwen2.5:7b"
+
+
+def test_apply_command_model_default_unset_falls_back(portal_env, monkeypatch):
+    monkeypatch.delenv("AUTOAPPLY_MODEL", raising=False)
+    argv = runner.build_apply_command({})
+    assert argv[argv.index("--model") + 1] == "haiku"
+
+
+def test_apply_command_model_default_empty_falls_back(portal_env, monkeypatch):
+    """A cleared Settings field must not put an empty --model on the argv."""
+    monkeypatch.setenv("AUTOAPPLY_MODEL", "")
+    argv = runner.build_apply_command({})
+    assert argv[argv.index("--model") + 1] == "haiku"
+
+
+def test_apply_command_named_model_beats_setting(portal_env, monkeypatch):
+    monkeypatch.setenv("AUTOAPPLY_MODEL", "qwen2.5:7b")
+    argv = runner.build_apply_command({"model": "sonnet"})
+    assert argv[argv.index("--model") + 1] == "sonnet"
+
+
 def test_invalid_params_rejected(portal_env):
     with pytest.raises(runner.ParamError, match="unknown stage"):
         runner.build_pipeline_command({"stages": "bogus"})
