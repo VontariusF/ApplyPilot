@@ -1095,7 +1095,8 @@ def _note(state: InterviewState, text: str) -> None:
 
 
 def _agent_turn(state: InterviewState, user_text: str, prompt_for_claude: str,
-                directive: str | None = None) -> str:
+                directive: str | None = None,
+                context_for_provider: str | None = None) -> str:
     """Run one agent turn on the active backend, with the A1 fallback.
 
     The transcript already holds the user's message; the backend only
@@ -1105,7 +1106,11 @@ def _agent_turn(state: InterviewState, user_text: str, prompt_for_claude: str,
     an error. prompt_for_claude lets callers enrich the CLI prompt
     (resume context) without polluting the transcript; directive is a
     synthetic instruction (mode switches) that reaches the backend but
-    is never appended to the transcript.
+    is never appended to the transcript; context_for_provider is the
+    LLM-provider counterpart of prompt_for_claude — unrecorded context
+    (the pending resume) that _llm_turn prepends to the request, since
+    it rebuilds its messages from the transcript, which only carries the
+    upload's filename/size note.
     """
     if state.backend == "claude":
         try:
@@ -1117,15 +1122,20 @@ def _agent_turn(state: InterviewState, user_text: str, prompt_for_claude: str,
             _note(state, "Claude Code became unavailable — continuing with the configured provider.")
             state.backend = "llm"
             state.claude_session_id = None
-            return _llm_turn(state, directive)
-    return _llm_turn(state, directive)
+            return _llm_turn(state, directive, context_for_provider)
+    return _llm_turn(state, directive, context_for_provider)
 
 
-def _llm_turn(state: InterviewState, directive: str | None = None) -> str:
-    """One LLMBackend turn: the projected transcript, plus an unrecorded
-    trailing directive when the caller supplied one (mode switches)."""
+def _llm_turn(state: InterviewState, directive: str | None = None,
+              context: str | None = None) -> str:
+    """One LLMBackend turn: the projected transcript, plus unrecorded
+    extras — a leading context block (the pending resume; the transcript
+    itself only carries the upload's filename/size note) and a trailing
+    directive when the caller supplied one (mode switches)."""
     client = LLMBackend()._client()
     messages = LLMBackend._send_list(state.messages)
+    if context:
+        messages.insert(0, {"role": _ROLE_USER, "content": context})
     if directive:
         messages.append({"role": _ROLE_USER, "content": directive})
     return client.chat(messages)
@@ -1262,7 +1272,7 @@ def send_message(text: str) -> InterviewState:
             prompt = f"{context}\n\nUser's message: {text}"
             state.pending_context = ""
         try:
-            reply = _agent_turn(state, text, prompt)
+            reply = _agent_turn(state, text, prompt, context_for_provider=context)
         except RuntimeError as exc:
             # The user's message stays in the transcript; the chat shows the
             # failure and the composer stays live for a retry.

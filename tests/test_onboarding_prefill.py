@@ -132,6 +132,35 @@ def test_offlist_extracted_country_still_asks_the_gated_pair():
     open_ids = [q.id for q in onboarding.remaining_questions(state)]
     assert "work_authorized" in open_ids and "sponsorship" in open_ids
 
+def test_pending_context_survives_until_extraction(portal_client, fake_llm, monkeypatch):
+    """The pending resume context is the only copy of the resume the
+    agent can reach: a draftless kickoff or chat turn keeps it for the
+    next turn — and the provider actually receives it on those turns
+    (the llm backend rebuilds its request from the transcript, which
+    only carries the upload's filename/size note); extraction spends it."""
+    client, _ = portal_client
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    fake_llm.respond("Hello! Tell me about your background.")  # kickoff: no draft
+
+    onboarding.start_intake()
+    client.post("/onboarding/resume", data={"resume_text": "MARKER-RESUME-7788"})
+    client.post("/onboarding/start", data={"mode": "llm"})
+    state = onboarding.load_state()
+    assert "MARKER-RESUME-7788" in state.pending_context  # retained
+
+    fake_llm.respond("Thanks — anything else?")  # chat turn: still no draft
+    client.post("/onboarding/send", data={"text": "I also like hiking"})
+    state = onboarding.load_state()
+    assert "MARKER-RESUME-7788" in state.pending_context  # still retained
+    # The provider got it: the context rides the request, unrecorded.
+    assert any("MARKER-RESUME-7788" in m["content"] for m in fake_llm.calls[-1])
+
+    fake_llm.respond(DRAFT_REPLY)  # extraction lands
+    client.post("/onboarding/send", data={"text": "that's everything"})
+    state = onboarding.load_state()
+    assert state.pending_context == ""  # spent
+    assert state.profile_draft["personal"]["full_name"] == "Jane Doe"
+
 
 def test_kickoff_extraction_never_records_gated_claims(portal_client, fake_llm, monkeypatch):
     """The intake kickoff reads a document, not the user: its draft may
