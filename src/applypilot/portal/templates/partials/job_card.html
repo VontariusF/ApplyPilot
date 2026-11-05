@@ -11,6 +11,7 @@
     <span class="score-pill {{ 'hot' if job.fit_score >= 8 else 'warm' if job.fit_score >= 6 else 'cool' }}">{{ job.fit_score }}/10</span>
     {% endif %}
     {% if job.apply_status %}<span class="badge {{ job.apply_status | lower }}">{{ job.apply_status }}</span>{% endif %}
+    {% if job.apply_conflict %}<span class="badge failed" title="{{ job.apply_conflict }}">conflict</span>{% endif %}
   </header>
   <h3 class="card-title"><a href="/jobs/detail?url={{ job.url | urlencode }}">{{ job.title or "(untitled)" }}</a></h3>
   <p class="card-meta">
@@ -39,6 +40,16 @@
     <span class="spinner" role="status" aria-label="working"></span>
     <span>{{ "Tailoring documents…" if verb == "tailor" else "Submitting your application…" }}</span>
     <p class="dim">This runs in the background — the card updates automatically when it finishes.</p>
+  </div>
+  {% elif job.apply_status == "in_progress" %}
+  {# Writer coordination (fix 3): a run owns this job even though no portal
+     run row is executing (a cancelled/lost run leaves the lock until the
+     stale cutoff). Apply would exit "Queue empty" doing nothing — show a
+     disabled state instead of a verb that can't work. #}
+  <div class="card-busy">
+    <span class="spinner" role="status" aria-label="working"></span>
+    <span>Application in progress…</span>
+    <p class="dim">A run owns this job — Apply unlocks when it finishes{% if job.last_attempted_at %} (or after an hour, if the run was lost){% endif %}.</p>
   </div>
   {% else %}
   <div class="card-actions">

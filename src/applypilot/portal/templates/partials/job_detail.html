@@ -58,6 +58,7 @@
     {% if job.applied_resume_version_id %}<li><span>Resume uploaded</span> <span>version #{{ job.applied_resume_version_id }}</span></li>{% endif %}
     {% if job.applied_cover_version_id %}<li><span>Cover letter uploaded</span> <span>version #{{ job.applied_cover_version_id }}</span></li>{% endif %}
     {% if job.apply_error %}<li><span>Error</span> <span class="error-text">{{ job.apply_error }}</span></li>{% endif %}
+    {% if job.apply_conflict %}<li><span>Conflict</span> <span class="error-text">{{ job.apply_conflict }}</span></li>{% endif %}
     {% if job.agent_id %}<li><span>Agent</span> <span>{{ job.agent_id }}</span></li>{% endif %}
   </ul>
 </section>
@@ -73,6 +74,22 @@
   </div>
   <p class="dim">Regenerate clears tailoring state and re-enqueues this job for the tailor stage on the next run. Existing documents stay on disk and remain in version history.</p>
   <div class="mark-actions">
+    {% if job.apply_status == "in_progress" %}
+    {# Writer coordination (fix 5): a run owns this job — marks are refused
+       (409) until it records its result, so the buttons are disabled. #}
+    <p class="dim">A run is applying to this job right now — manual marks unlock when it finishes and its result is recorded.</p>
+    <form method="post" action="/jobs/mark" class="inline-form">
+      <input type="hidden" name="url" value="{{ job.url }}">
+      <input type="hidden" name="status" value="applied">
+      <button type="submit" class="success" disabled title="A run owns this job — wait for it to finish">Mark applied</button>
+    </form>
+    <form method="post" action="/jobs/mark" class="inline-form mark-failed">
+      <input type="hidden" name="url" value="{{ job.url }}">
+      <input type="hidden" name="status" value="failed">
+      <input type="text" name="reason" placeholder="failure reason (optional)">
+      <button type="submit" class="danger" disabled title="A run owns this job — wait for it to finish">Mark failed</button>
+    </form>
+    {% else %}
     <form method="post" action="/jobs/mark" class="inline-form">
       <input type="hidden" name="url" value="{{ job.url }}">
       <input type="hidden" name="status" value="applied">
@@ -84,6 +101,7 @@
       <input type="text" name="reason" placeholder="failure reason (optional)">
       <button type="submit" class="danger">Mark failed</button>
     </form>
+    {% endif %}
   </div>
 </section>
 
