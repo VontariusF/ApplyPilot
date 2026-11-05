@@ -55,10 +55,11 @@ from applypilot import config, engine_auth
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Phases: gate -> interview -> review -> done
+# Phases: gate -> intake -> interview -> review -> done
 # ---------------------------------------------------------------------------
 
 GATE = "gate"  # engine sign-in step (D1) — no interview yet
+INTAKE = "intake"  # resume upload step, offered before any question (resume-first)
 INTERVIEW = "interview"  # agent asks; user answers
 REVIEW = "review"  # profile.md rendered; confirm or keep editing
 DONE = "done"  # files written; the onboarding gate stops redirecting
@@ -83,6 +84,7 @@ _PROFILE_KEYS = (
 # context for the agent, never agent output.
 _ROLE_USER = "user"
 _ROLE_ASSISTANT = "assistant"
+_ROLE_SYSTEM = "system"
 _ROLE_NOTE = "note"
 
 _STATE_LOCK = threading.Lock()  # one agent turn at a time (single-user portal)
@@ -193,6 +195,13 @@ class QuestionSpec:
     agent_hint: str = ""
 
 
+# The work-auth pair opens for any decided country: "*" matches any
+# nonempty answer and "!Not sure yet" keeps the explicit undecided
+# choice deferring the pair to the review step (the old six-value
+# allowlist locked out typed countries like "Australia" and extracted
+# ones alike, silently deferring the pair instead of asking it).
+GATED_COUNTRY_GATE = "*,!Not sure yet"
+
 QUESTION_SPECS: tuple[QuestionSpec, ...] = (
     # -- Identity first: who the applications are for (the resume usually
     #    already knows most of this, and nothing below makes sense without it) --
@@ -250,7 +259,7 @@ QUESTION_SPECS: tuple[QuestionSpec, ...] = (
         prompt="Are you legally authorized to work in the country you're applying in?",
         choices=(Choice("yes", "Yes"), Choice("no", "No")),
         maps_to="work_authorization.legally_authorized_to_work",
-        depends_on={"country": "United States,United Kingdom,Canada,European Union,India,Other"},
+        depends_on={"country": GATED_COUNTRY_GATE},
         agent_hint="what counts as work authorization and how it's usually proved",
     ),
     QuestionSpec(
@@ -258,7 +267,7 @@ QUESTION_SPECS: tuple[QuestionSpec, ...] = (
         prompt="Will you now or in the future need visa sponsorship?",
         choices=(Choice("yes", "Yes"), Choice("no", "No"), Choice("not_sure", "Not sure")),
         maps_to="work_authorization.require_sponsorship",
-        depends_on={"country": "United States,United Kingdom,Canada,European Union,India,Other"},
+        depends_on={"country": GATED_COUNTRY_GATE},
         agent_hint="what sponsorship means and when employers offer it",
     ),
     QuestionSpec(
@@ -523,8 +532,8 @@ class ClaudePrintBackend:
 
     name = "claude"
 
-    def kickoff(self, state: InterviewState) -> str:
-        return self._run(state, KICKOFF_PROMPT, resume=False)
+    def kickoff(self, state: InterviewState, prompt: str | None = None) -> str:
+        return self._run(state, prompt or KICKOFF_PROMPT, resume=False)
 
     def send(self, state: InterviewState, user_text: str) -> str:
         return self._run(state, user_text, resume=state.claude_session_id is not None)
@@ -575,12 +584,12 @@ class LLMBackend:
 
         return llm.get_client()
 
-    def kickoff(self, state: InterviewState) -> str:
+    def kickoff(self, state: InterviewState, prompt: str | None = None) -> str:
         # The synthetic kickoff prompt is not part of the transcript (it
         # would render as a phantom user bubble); the greeting is.
         return self._client().chat([
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": _ROLE_USER, "content": KICKOFF_PROMPT},
+            {"role": _ROLE_USER, "content": prompt or KICKOFF_PROMPT},
         ])
 
     def send(self, state: InterviewState, user_text: str) -> str:
@@ -834,6 +843,72 @@ def normalize_profile(draft: dict, answers: dict[str, str] | None = None) -> tup
     return profile, search_meta
 
 
+# Questions the prefill bridge never fills even though the registry is
+# not gated. currency rides normalize_profile's "USD" default: a stored
+# "USD" is indistinguishable from an extracted one, so bridging it would
+# record a currency preference the user never gave — the wizard keeps
+# asking it (spec: currency must stay asked).
+_NO_BRIDGE_IDS = frozenset({"currency"})
+
+
+def draft_to_answers(profile_draft: dict | None, answers: dict[str, str]) -> dict[str, str]:
+    """Map extracted draft values onto question answers — the prefill bridge.
+
+    The reverse of normalize_profile's field walk: for every question the
+    user has not answered whose maps_to path the extraction evidences, the
+    draft value becomes the answer, so remaining_questions asks only the
+    residual gaps. A preference question is bridged only on extraction
+    evidence: work_style bridges solely on remote=True (False is the bool
+    default, not an answer), and currency never bridges (_NO_BRIDGE_IDS).
+
+    The fabrication guard is absolute here: gated fields (work
+    authorization, sponsorship) are never prefilled from extraction — a
+    resume claiming eligibility is a claim to confirm, not an answer to
+    record. A pure-choice question (choices without allow_free_text)
+    bridges only values its listed choices can represent — an extracted
+    "6" for a banded years question stays unanswered so the wizard asks
+    it. Extraction also never overwrites a recorded answer: questions
+    already in `answers` are skipped, so the user's click always wins.
+    """
+    if not isinstance(profile_draft, dict) or not profile_draft:
+        return {}
+    wrapped = profile_draft.get("_applypilot_profile")
+    sections = wrapped if isinstance(wrapped, dict) else profile_draft
+    meta = profile_draft.get("_applypilot_search")
+    meta = meta if isinstance(meta, dict) else {}
+    filled: dict[str, str] = {}
+    for spec in QUESTION_SPECS:
+        if spec.id in answers or not spec.maps_to:
+            continue
+        if spec.maps_to in _GATED_PATHS or spec.id in _NO_BRIDGE_IDS:
+            continue
+        if spec.maps_to == "search.remote":
+            if meta.get("remote") is True:
+                filled[spec.id] = "remote"
+            continue
+        if spec.maps_to.startswith("search."):
+            value = meta.get(spec.maps_to.split(".", 1)[1])
+        else:
+            section, field_name = spec.maps_to.split(".", 1)
+            section_data = sections.get(section)
+            value = section_data.get(field_name) if isinstance(section_data, dict) else None
+        if isinstance(value, list):
+            text = ", ".join(str(v).strip() for v in value if str(v).strip())
+        else:
+            text = str(value).strip() if value is not None else ""
+        if not text:
+            continue
+        if spec.choices and not spec.allow_free_text and not any(c.value == text for c in spec.choices):
+            # A pure-choice question cannot represent this value (an
+            # extracted "6" for a banded years question): leave it
+            # unanswered so the wizard asks it with its listed choices,
+            # instead of planting an answer review can neither show nor
+            # keep.
+            continue
+        filled[spec.id] = text
+    return filled
+
+
 def missing_review_fields(profile: dict) -> list[str]:
     """Human names for fields the review screen shows as "add later"."""
     missing = []
@@ -871,10 +946,15 @@ _REVIEW_FLAGGED_PATHS = frozenset({
 
 
 def review_fields(state: InterviewState) -> list[dict]:
-    """Rows for the review form: every question with its saved answer and
-    whether the field it feeds is still empty in the draft (the 'needs
-    answer' chips — same fields missing_review_fields flags)."""
+    """Rows for the review form: every question with its effective answer
+    (recorded answers over draft prefill — the same precedence
+    remaining_questions uses, so a skipped prefilled question shows its
+    extracted value instead of a blank) and whether the field it feeds is
+    still empty in the draft (the 'needs answer' chips — same fields
+    missing_review_fields flags)."""
     draft = state.profile_draft or {}
+    prefilled = draft_to_answers(draft, state.answers)
+    effective = {**prefilled, **state.answers}
 
     def draft_value(path: str) -> str:
         if path.startswith("search."):
@@ -890,7 +970,7 @@ def review_fields(state: InterviewState) -> list[dict]:
             continue
         rows.append({
             "spec": spec,
-            "value": state.answers.get(spec.id, ""),
+            "value": effective.get(spec.id, ""),
             "needs_answer": spec.maps_to in _REVIEW_FLAGGED_PATHS and not draft_value(spec.maps_to),
         })
     return rows
@@ -900,9 +980,11 @@ def update_answers(updates: dict[str, str]) -> InterviewState:
     """Save review-form edits back into the answers map (phase stays REVIEW).
 
     The review form shows the same widget set the wizard rendered, so the
-    validation mirrors record_answer: choice questions accept only their
-    listed values (an empty selection clears the answer and stays
-    flagged), typed text only where allow_free_text. Unknown field names
+    validation mirrors record_answer: choice questions accept their listed
+    values — plus any off-list value where allow_free_text (the wizard
+    accepts typed answers too, so an extracted "BSc" saves) — an empty
+    selection clears the answer and stays flagged, and typed text only
+    where allow_free_text. Unknown field names
     are ignored — never stored. No agent turn runs: editing at review is
     a quiet portal-side correction. The draft re-normalizes from the
     merged answers, and answers win over anything the agent extracted,
@@ -919,8 +1001,12 @@ def update_answers(updates: dict[str, str]) -> InterviewState:
                 continue
             value = (value or "").strip()
             if spec.choices:
-                if value and not any(c.value == value for c in spec.choices):
+                if (value and not any(c.value == value for c in spec.choices)
+                        and not spec.allow_free_text):
                     raise OnboardingError("that question takes one of the listed choices")
+                # allow_free_text choice questions take off-list values
+                # (the wizard accepts typed answers too) — an extracted
+                # "BSc" or "Australia" renders selected and saves as-is.
                 state.answers[spec.id] = value
             elif spec.allow_free_text:
                 state.answers[spec.id] = value
@@ -1032,7 +1118,8 @@ def _note(state: InterviewState, text: str) -> None:
 
 
 def _agent_turn(state: InterviewState, user_text: str, prompt_for_claude: str,
-                directive: str | None = None) -> str:
+                directive: str | None = None,
+                context_for_provider: str | None = None) -> str:
     """Run one agent turn on the active backend, with the A1 fallback.
 
     The transcript already holds the user's message; the backend only
@@ -1042,7 +1129,11 @@ def _agent_turn(state: InterviewState, user_text: str, prompt_for_claude: str,
     an error. prompt_for_claude lets callers enrich the CLI prompt
     (resume context) without polluting the transcript; directive is a
     synthetic instruction (mode switches) that reaches the backend but
-    is never appended to the transcript.
+    is never appended to the transcript; context_for_provider is the
+    LLM-provider counterpart of prompt_for_claude — unrecorded context
+    (the pending resume) that _llm_turn prepends to the request, since
+    it rebuilds its messages from the transcript, which only carries the
+    upload's filename/size note.
     """
     if state.backend == "claude":
         try:
@@ -1054,33 +1145,88 @@ def _agent_turn(state: InterviewState, user_text: str, prompt_for_claude: str,
             _note(state, "Claude Code became unavailable — continuing with the configured provider.")
             state.backend = "llm"
             state.claude_session_id = None
-            return _llm_turn(state, directive)
-    return _llm_turn(state, directive)
+            return _llm_turn(state, directive, context_for_provider)
+    return _llm_turn(state, directive, context_for_provider)
 
 
-def _llm_turn(state: InterviewState, directive: str | None = None) -> str:
-    """One LLMBackend turn: the projected transcript, plus an unrecorded
-    trailing directive when the caller supplied one (mode switches)."""
+def _llm_turn(state: InterviewState, directive: str | None = None,
+              context: str | None = None) -> str:
+    """One LLMBackend turn: the projected transcript, plus unrecorded
+    extras — a context block riding after the system message (the pending
+    resume; the transcript itself only carries the upload's
+    filename/size note) and a trailing
+    directive when the caller supplied one (mode switches)."""
     client = LLMBackend()._client()
     messages = LLMBackend._send_list(state.messages)
+    if context:
+        # Unrecorded user-side input rides AFTER the system message,
+        # never before it: strict OpenAI-compatible custom/local
+        # endpoints reject (or fail to apply) a mid-conversation system
+        # role, so reordering would break the onboarding instructions
+        # for every resume-backed turn (Codex P2 on 24969c0).
+        at = 1 if messages and messages[0].get("role") == _ROLE_SYSTEM else 0
+        messages.insert(at, {"role": _ROLE_USER, "content": context})
     if directive:
         messages.append({"role": _ROLE_USER, "content": directive})
     return client.chat(messages)
 
 
-def _after_reply(state: InterviewState, reply: str) -> None:
+def _strip_gated_claims(draft: dict) -> dict:
+    """A wizard-path extraction has no authority over the gated pair.
+
+    The resume-first kickoff (and any extraction while the wizard walks
+    its agenda) reads a document, not the user — _GATED_PATHS stays
+    absolute (spec art_ti3XJuNr): work authorization and sponsorship
+    are set by a wizard answer, never by an extraction. Later chat
+    turns are stripped too (Codex P1 on 1f1b505): a backend that once
+    saw the resume — Claude's session memory, or the provider's
+    transcript with the earlier unstripped reply — can echo its
+    authorization claims into any draft, indistinguishable from the
+    user's own prose. Returns a copy; the caller's draft is untouched.
+    """
+    stripped = json.loads(json.dumps(draft))  # deep copy: callers reuse the dict
+    profile = stripped.get("_applypilot_profile")
+    auth = profile.get("work_authorization") if isinstance(profile, dict) else None
+    if isinstance(auth, dict):
+        auth.pop("legally_authorized_to_work", None)
+        auth.pop("require_sponsorship", None)
+    return stripped
+
+
+def _after_reply(state: InterviewState, reply: str, allow_review: bool = True) -> bool:
     """Post-reply bookkeeping: draft extraction and phase transition.
 
     The transcript is the service layer's job; this only reacts to the
     reply's content. The wizard's answers overlay the agent's fenced-JSON
     draft — the wizard is the source of truth (PR #22 guard: the agent
-    only fills what the wizard doesn't own).
+    only fills what the wizard doesn't own). Returns True when the reply
+    carried a draft — the caller decides what that retires (the pending
+    resume context) and what it must not end (the wizard's agenda).
+
+    allow_review=False for the kickoff and guided-answer turns: there the
+    agenda is not the agent's to finish — an extraction mid-walk feeds the
+    prefill bridge (remaining_questions then asks only the gaps) instead
+    of yanking the wizard to review. Free-form chat still finishes on the
+    draft — but the gated pair is stripped from EVERY extraction (Codex
+    P1 on 1f1b505): after a resume-backed turn spends the pending
+    context, the backend can still echo resume-derived authorization
+    claims — Claude from its session memory, the provider from the
+    earlier unstripped assistant reply in the transcript — and a later
+    chat turn cannot tell that echo from the user's own prose. The
+    wizard is the only authority for work authorization and sponsorship
+    (spec art_ti3XJuNr: _GATED_PATHS is absolute); recorded answers
+    overlay the draft either way, so stripping never fights a confirmed
+    answer.
     """
     draft = extract_profile_draft(reply)
     if draft is not None:
+        draft = _strip_gated_claims(draft)
         profile, meta = normalize_profile(draft, state.answers)
         state.profile_draft = {**profile, "_applypilot_search": meta}
-        state.phase = REVIEW
+        if allow_review:
+            state.phase = REVIEW
+        return True
+    return False
 
 
 def start_interview(mode: str) -> InterviewState:
@@ -1090,11 +1236,14 @@ def start_interview(mode: str) -> InterviewState:
     skip to provider-key mode. The gate phase never reaches here unlocked.
     An existing live state resumes as-is — two tabs (or the post-sign-in
     refresh) must not wipe an interview in progress; only a cleared state
-    (first run, or after redo_interview) starts fresh.
+    (first run, or after redo_interview) starts fresh. The exception is
+    INTAKE: starting the interview is the transition out of the intake
+    step, carrying the uploaded resume's pending context into the kickoff
+    turn so its reply extracts the draft before the first question.
     """
     with _STATE_LOCK:
         existing = load_state()
-        if existing is not None:
+        if existing is not None and existing.phase != INTAKE:
             return existing
         ready = readiness()
         if mode == "claude":
@@ -1110,10 +1259,18 @@ def start_interview(mode: str) -> InterviewState:
         else:
             raise OnboardingError(f"unknown interview mode {mode!r}")
 
-        state = InterviewState(phase=INTERVIEW, backend=backend_name)
+        if existing is not None:  # INTAKE — the resume-first entry
+            state = existing
+        else:
+            state = InterviewState(phase=INTERVIEW, backend=backend_name)
+        state.backend = backend_name
+        state.phase = INTERVIEW
+        kickoff_prompt = KICKOFF_PROMPT
+        if state.pending_context:
+            kickoff_prompt = f"{state.pending_context}\n\n{KICKOFF_PROMPT}"
         if backend_name == "claude":
             try:
-                reply = ClaudePrintBackend().kickoff(state)
+                reply = ClaudePrintBackend().kickoff(state, kickoff_prompt)
             except InterviewBackendError as exc:
                 # A1 runtime reversal: sign-in looked green but print mode
                 # failed — the provider takes over when one exists.
@@ -1122,11 +1279,19 @@ def start_interview(mode: str) -> InterviewState:
                 log.warning("Onboarding kickoff: claude failed (%s); using the LLM provider", exc)
                 _note(state, "Claude Code didn't answer — continuing with the configured provider.")
                 state.backend = "llm"
-                reply = LLMBackend().kickoff(state)
+                reply = LLMBackend().kickoff(state, kickoff_prompt)
         else:
-            reply = LLMBackend().kickoff(state)
+            reply = LLMBackend().kickoff(state, kickoff_prompt)
         state.messages.append({"role": _ROLE_ASSISTANT, "content": reply})
-        _after_reply(state, reply)
+        # The kickoff never finishes the interview on its own: an extracted
+        # draft prefills the agenda (gaps-only), it does not end it — the
+        # wizard still asks the gated and preference questions. The pending
+        # resume context is spent only when the reply actually extracted a
+        # draft; otherwise it stays for the next turn (the persisted upload
+        # note holds just the filename and size — this is the only copy of
+        # the resume text in the agent's reach).
+        if _after_reply(state, reply, allow_review=False):
+            state.pending_context = ""
         save_state(state)
         return state
 
@@ -1142,42 +1307,96 @@ def send_message(text: str) -> InterviewState:
             raise OnboardingError("the interview is not active")
         state.messages.append({"role": _ROLE_USER, "content": text})
         prompt = text
-        if state.pending_context:
-            prompt = f"{state.pending_context}\n\nUser's message: {text}"
+        context = state.pending_context
+        if context:
+            prompt = f"{context}\n\nUser's message: {text}"
             state.pending_context = ""
         try:
-            reply = _agent_turn(state, text, prompt)
+            reply = _agent_turn(state, text, prompt, context_for_provider=context)
         except RuntimeError as exc:
             # The user's message stays in the transcript; the chat shows the
-            # failure and the composer stays live for a retry.
+            # failure and the composer stays live for a retry. The context
+            # goes back in play too: a failed turn extracted nothing, so
+            # persisting the spent state here would drop the only copy of
+            # the resume.
+            if context:
+                state.pending_context = context
             state.error = str(exc)
             save_state(state)
             raise
         state.error = None
         state.messages.append({"role": _ROLE_ASSISTANT, "content": reply})
-        _after_reply(state, reply)
+        # A turn that consumed pending resume context is document-informed:
+        # its extraction is treated like the kickoff's (agenda kept for the
+        # bridge), not like a paraphrase of the user's own words. Pure chat
+        # turns keep the draft-to-review finish; the gated pair is stripped
+        # from every extraction either way (_after_reply — Codex P1 on
+        # 1f1b505: a backend echoing the resume's claims into a later
+        # chat-turn draft must not slip them into review).
+        if not _after_reply(state, reply, allow_review=not context) and context:
+            # No draft this turn: keep the pending context (the resume) in
+            # play for the next one — a spent context that extracted nothing
+            # would leave later turns with no access to the resume text.
+            state.pending_context = context
+        save_state(state)
+        return state
+
+
+def start_intake() -> InterviewState:
+    """Open the intake step: resume upload before any question.
+
+    Resume-first onboarding's first screen (spec art_ti3XJuNr): a state
+    in the INTAKE phase accepts /onboarding/resume uploads and nothing
+    else — no backend, no agent turns. Starting the interview
+    (start_interview) is the transition out. An existing live state in a
+    later phase resumes as-is (two tabs must not wipe work in progress);
+    a fresh or gate-phase store opens intake.
+    """
+    with _STATE_LOCK:
+        existing = load_state()
+        if existing is not None and existing.phase != GATE:
+            return existing
+        state = InterviewState(phase=INTAKE)
         save_state(state)
         return state
 
 
 def remaining_questions(state: InterviewState) -> list[QuestionSpec]:
-    """The agenda still open: unanswered specs whose depends_on is met."""
+    """The agenda still open: unanswered specs whose depends_on is met.
+
+    Gaps-only asking (resume-first): questions the extraction draft can
+    already answer are not asked — draft_to_answers maps state.profile_draft
+    onto the open ids, and a recorded answer always beats extraction.
+    Dependency gating evaluates against the effective answer set, so an
+    extracted country opens the work-auth pair like a clicked one would.
+    """
+    prefilled = draft_to_answers(state.profile_draft, state.answers)
+    effective = {**prefilled, **state.answers}
     open_specs = []
     for spec in QUESTION_SPECS:
-        if spec.id in state.answers:
+        if spec.id in state.answers or spec.id in prefilled:
             continue
-        if _depends_met(spec, state.answers):
+        if _depends_met(spec, effective):
             open_specs.append(spec)
     return open_specs
 
 
 def _depends_met(spec: QuestionSpec, answers: dict[str, str]) -> bool:
-    """True when every depends_on parent's answer is in its allowlist
-    ("a,b" = either value). An unanswered parent fails closed: the child
-    waits until the parent settles, so the agenda never asks about a
-    permit before it knows the user is authorized."""
+    """True when every depends_on parent's answer satisfies its gate
+    ("a,b" = either exact value; "*" = any nonempty answer; "!x" = an
+    excluded value — combinable, e.g. "*,!Not sure yet"). An unanswered
+    parent fails closed: the child waits until the parent settles, so
+    the agenda never asks about a permit before it knows the user is
+    authorized."""
     for parent, allowed in (spec.depends_on or {}).items():
-        if answers.get(parent, "") not in allowed.split(","):
+        value = answers.get(parent, "")
+        if not value:
+            return False
+        tokens = allowed.split(",")
+        # Exclusions win before any wildcard or exact match.
+        if any(token.startswith("!") and value == token[1:] for token in tokens):
+            return False
+        if not any(token == "*" or value == token for token in tokens):
             return False
     return True
 
@@ -1185,8 +1404,9 @@ def _depends_met(spec: QuestionSpec, answers: dict[str, str]) -> bool:
 def current_question(state: InterviewState) -> QuestionSpec | None:
     """The question the wizard shows now, or None when the agenda is done.
 
-    Registry order is the agenda. Answered and skipped questions don't
-    repeat; a question whose depends_on isn't met by the answers so far
+    Registry order is the agenda. Answered, skipped, and prefilled-from-
+    extraction questions don't repeat; a question whose depends_on isn't
+    met by the effective answers so far
     is skipped silently — its parent governs whether it makes sense at
     all, and the agent-led mode can still collect it in prose.
     """
@@ -1246,20 +1466,29 @@ def record_answer(question_id: str, value: str = "", free_text: str = "",
 
         if label:
             prompt = label
-            if state.pending_context:
-                prompt = f"{state.pending_context}\n\nUser's message: {label}"
+            context = state.pending_context
+            if context:
+                prompt = f"{context}\n\nUser's message: {label}"
                 state.pending_context = ""
             try:
-                reply = _agent_turn(state, prompt, prompt)
+                reply = _agent_turn(state, prompt, prompt, context_for_provider=context)
             except RuntimeError as exc:
                 # The user's answer stays recorded; the chat shows the
                 # failure and the next render carries the error banner.
+                # The context goes back in play too: a failed ack turn
+                # extracted nothing, so persisting the spent state here
+                # would drop the only copy of the resume.
+                if context:
+                    state.pending_context = context
                 state.error = str(exc)
                 save_state(state)
                 raise
             state.error = None
             state.messages.append({"role": _ROLE_ASSISTANT, "content": reply})
-            _after_reply(state, reply)
+            if not _after_reply(state, reply, allow_review=False) and context:
+                # Same retention rule as send_message: a draftless turn
+                # keeps the pending resume in play for the next one.
+                state.pending_context = context
         save_state(state)
         return state
 
@@ -1297,14 +1526,37 @@ def set_agent_led(enabled: bool) -> InterviewState:
             directive = _AGENT_LED_DIRECTIVE.format(fields=remaining or "anything the profile still needs")
         else:
             directive = _BACK_TO_CHOICES_DIRECTIVE
+        # The pending resume rides along (context_for_provider): the
+        # transcript only carries the upload's filename/size note, so
+        # without it the provider could emit a fenced draft from the
+        # directive alone — and clearing the context then would
+        # permanently lose the only copy of the resume (Codex P2 on
+        # ece4654). With the context supplied, a consuming draft has
+        # actually earned the spend. The Claude CLI gets the context
+        # embedded in its prompt text (the resumed session has no other
+        # channel for content attached since the kickoff — Codex P2 on
+        # f679e54).
+        context = state.pending_context
+        prompt_for_claude = directive
+        if context:
+            prompt_for_claude = f"{context}\n\nDirective: {directive}"
         try:
-            reply = _agent_turn(state, directive, directive, directive=directive)
+            reply = _agent_turn(state, directive, prompt_for_claude, directive=directive,
+                                context_for_provider=context)
         except RuntimeError as exc:
             state.error = str(exc)
             save_state(state)
             raise
         state.messages.append({"role": _ROLE_ASSISTANT, "content": reply})
-        _after_reply(state, reply)
+        # The switch turn is directive-driven — any draft it emits
+        # paraphrases the agenda, never the user's own words, so it
+        # finishes like the kickoff (allow_review=False). When the
+        # draftless kickoff left pending resume context in play, the
+        # draft is also document-informed: its gated claims are
+        # stripped (_strip_gated_claims) and the agenda is kept for the
+        # bridge instead of jumping to review (Codex P1 on 31060ea).
+        if _after_reply(state, reply, allow_review=False) and context:
+            state.pending_context = ""
         save_state(state)
         return state
 
@@ -1339,10 +1591,15 @@ def add_resume(text: str | None = None, pdf_bytes: bytes | None = None,
     resume.txt, so the interview and the whole downstream pipeline read
     it like any text resume; when nothing readable comes out (scanned or
     encrypted), the note asks for the text instead — nothing invented.
+
+    Accepted in INTAKE as well as INTERVIEW: the intake step collects
+    the resume before any question is asked (resume-first, spec
+    art_ti3XJuNr) — the pending context rides the interview's kickoff
+    turn, whose reply extracts the draft the prefill bridge consumes.
     """
     with _STATE_LOCK:
         state = load_state()
-        if state is None or state.phase != INTERVIEW:
+        if state is None or state.phase not in (INTAKE, INTERVIEW):
             raise OnboardingError("the interview is not active")
         if pdf_bytes is not None:
             config.RESUME_PDF_PATH.write_bytes(pdf_bytes)

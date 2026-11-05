@@ -188,16 +188,17 @@ def test_registry_covers_the_spec_table():
     assert permit.free_text_kind is None
     assert permit.depends_on == {"work_authorized": "yes"}
 
-    # The country question precedes the work-auth pair and gates it
-    # (exact-choice, fail-closed): "Not sure yet" is deliberately absent
-    # from the allowlist, deferring those questions to the review step.
+    # The country question precedes the work-auth pair and gates it:
+    # any decided country opens the pair (typed values like "Australia"
+    # and extracted ones alike), while the explicit "Not sure yet"
+    # choice defers those questions to the review step.
     country = onboarding.QUESTIONS["country"]
     assert country.choices and country.allow_free_text
     assert country.free_text_kind is None
     assert country.maps_to == "personal.country"
-    allowed_countries = ",".join(c.value for c in country.choices if c.value != "Not sure yet")
     for gated in ("work_authorized", "sponsorship"):
-        assert onboarding.QUESTIONS[gated].depends_on == {"country": allowed_countries}
+        assert onboarding.QUESTIONS[gated].depends_on == {"country": onboarding.GATED_COUNTRY_GATE}
+        assert "Not sure yet" in onboarding.GATED_COUNTRY_GATE  # undecided still defers
 
 
 # ---------------------------------------------------------------------------
@@ -520,6 +521,31 @@ def test_agent_mode_directive_reaches_backends_but_not_the_transcript(app_dir, f
     assert "switched back to the guided questions" in directive
     state = onboarding.load_state()
     assert not any("switched back to the guided" in m["content"] for m in state.messages)
+
+
+def test_agent_led_switch_passes_resume_to_claude(portal_client, fake_claude, monkeypatch):
+    """The Claude CLI gets the pending resume embedded in its prompt
+    text: the resumed session has no other channel for content
+    attached since the kickoff, so a mode-switch draft would otherwise
+    spend a resume Claude never saw (Codex P2 on f679e54)."""
+    client, _ = portal_client
+    patch_gates(monkeypatch)
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+
+    onboarding.start_intake()
+    onboarding.add_resume(text="MARKER-RESUME-7788")
+    client.post("/onboarding/start", data={"mode": "claude"})
+    assert onboarding.load_state().pending_context  # draftless kickoff
+
+    onboarding.set_agent_led(True)
+    prompts = [json.loads(line)["prompt"] for line in fake_claude.read_text().splitlines()]
+    switch_prompts = [p for p in prompts if "agent-led questions" in p]
+    assert switch_prompts and all("MARKER-RESUME-7788" in p for p in switch_prompts)
+    state = onboarding.load_state()
+    assert state.mode == onboarding.MODE_AGENT
+    assert state.phase == onboarding.INTERVIEW
+    assert state.profile_draft in (None, {})  # no draft from the fake's ack
+    assert state.pending_context  # nothing consumed: the resume stays in play
 
 
 # ---------------------------------------------------------------------------

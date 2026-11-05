@@ -55,29 +55,12 @@
 {% endif %}
 {% endmacro %}
 
-{# Versioned shell: every push of this partial carries the state sequence it
-   was rendered from. The wrapper's SSE guard (onboarding_surface.html) drops
-   pushes older than what the DOM already shows — a push rendered mid-POST
-   can otherwise arrive after the POST's own fresher swap and replace new
-   content with stale, freezing the flow mid-question. #}
-<div class="chat-shell" data-chat-seq="{{ chat_seq }}">
-
-{% if error %}<p class="alert error">{{ error }}</p>{% endif %}
-{% if login_error %}<p class="alert error">{{ login_error }}</p>{% endif %}
-
-<ol class="onboard-steps">
-  <li class="{{ 'done' if (ready.can_start_claude or provider_ready) else 'active' }}">Agent account</li>
-  <li class="{{ 'done' if state and state.phase in ('review', 'done') else ('active' if state and state.phase == 'interview' else '') }}">Interview</li>
-  <li class="{{ 'done' if state and state.phase == 'done' else ('active' if state and state.phase == 'review' else '') }}">Review profile</li>
-  <li>Find jobs</li>
-</ol>
-
-{% if state is none %}
-  {# ---- No interview yet: gate or choice ---- #}
-  {# The button becomes a waiting state while a sign-in is in flight; the
-     SSE channel (already polling claude_status in its signature) flips
-     this surface to the ready card the moment the sign-in completes. #}
-  {% set card_link = none if login_started else login_url %}
+{# The start-choice cards: sign-in wait, claude start, provider fallback,
+   or the agent-account prompt. Shared by the no-state gate surface and the
+   intake screen (which keeps them below the resume upload as the skip
+   path), so the backend choice logic lives in exactly one place. #}
+{% macro start_choices(ready, login_url, login_started) %}
+{% set card_link = none if login_started else login_url %}
   {% if login_started and ready.claude and ready.claude.state == "signed_out" %}
     <section class="panel">
       <p><strong>Waiting for you to finish the Claude sign-in…</strong>
@@ -126,6 +109,52 @@
       {{ signin_link(card_link) }}
     </section>
   {% endif %}
+{% endmacro %}
+
+{# Versioned shell: every push of this partial carries the state sequence it
+   was rendered from. The wrapper's SSE guard (onboarding_surface.html) drops
+   pushes older than what the DOM already shows — a push rendered mid-POST
+   can otherwise arrive after the POST's own fresher swap and replace new
+   content with stale, freezing the flow mid-question. #}
+<div class="chat-shell" data-chat-seq="{{ chat_seq }}">
+
+{% if error %}<p class="alert error">{{ error }}</p>{% endif %}
+{% if login_error %}<p class="alert error">{{ login_error }}</p>{% endif %}
+
+<ol class="onboard-steps">
+  <li class="{{ 'done' if (ready.can_start_claude or provider_ready) else 'active' }}">Agent account</li>
+  <li class="{{ 'done' if state and state.phase in ('review', 'done') else ('active' if state and state.phase == 'interview' else '') }}">Interview</li>
+  <li class="{{ 'done' if state and state.phase == 'done' else ('active' if state and state.phase == 'review' else '') }}">Review profile</li>
+  <li>Find jobs</li>
+</ol>
+
+{% if state is none %}
+  {# ---- No interview yet: gate or choice ---- #}
+  {# The button becomes a waiting state while a sign-in is in flight; the
+     SSE channel (already polling claude_status in its signature) flips
+     this surface to the ready card the moment the sign-in completes. #}
+  {{ start_choices(ready, login_url, login_started) }}
+
+{% elif state.phase == "intake" %}
+  {# ---- Intake: resume upload before any question (resume-first) ---- #}
+  <section class="panel">
+    <h2>Start with your resume</h2>
+    <p>Upload or paste your resume first — the interview reads it and asks only
+       what it can't already see. Work-authorization questions are always asked
+       directly, never inferred from a document.</p>
+    {% if state.messages %}
+      <p class="dim">✓ {{ state.messages[-1].content }}</p>
+    {% endif %}
+    <form hx-post="/onboarding/resume" hx-target="#onboarding-surface"
+          hx-swap="outerHTML" enctype="multipart/form-data" class="resume-form">
+      <input type="file" name="resume_file" accept=".txt,.md,.pdf">
+      <textarea name="resume_text" rows="4" placeholder="…or paste your resume text"></textarea>
+      <button>Save resume</button>
+    </form>
+  </section>
+  {# Starting the interview is the skip path (no resume) and the transition
+     out of intake once one is saved — the backend-choice cards stay below. #}
+  {{ start_choices(ready, login_url, login_started) }}
 
 {% elif state.phase == "interview" %}
   {# ---- Interview: the active question (or agent-led chat) + transcript ---- #}
@@ -234,6 +263,14 @@
           {% if spec.choices %}
             <select id="answer-{{ spec.id }}" name="answer_{{ spec.id }}">
               <option value="" {{ 'selected' if not row.value }}>— not answered —</option>
+              {# An effective value off the option list — an extracted
+                 "BSc" or "Australia", or the user's own typed answer —
+                 renders as its own selected option: it displays here and
+                 submits itself on save, instead of the browser silently
+                 submitting the blank option over it. #}
+              {% if row.value and row.value not in spec.choices | map(attribute='value') | list %}
+                <option value="{{ row.value }}" selected>{{ row.value }}</option>
+              {% endif %}
               {% for c in spec.choices %}
                 <option value="{{ c.value }}" {{ 'selected' if c.value == row.value }}>{{ c.label }}</option>
               {% endfor %}
