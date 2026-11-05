@@ -227,8 +227,11 @@ def test_chip_survives_verb_post(portal_client, seeded_profile, start_spy):
                     data={"url": "https://jobs.example/new1", "chip": "new"},
                     headers=HX)
     assert r.status_code == 200
-    # Response re-renders the SAME chip view (empty now, chips row intact).
-    assert "chip=new" in r.text
+    # Response re-renders the SAME chip view (empty now): the chip-filtered
+    # board shows the no-match state, and verb forms inside the board carry
+    # the chip as a hidden field so the next verb stays in the same view.
+    assert "No jobs match this filter." in r.text
+    assert '<input type="hidden" name="chip" value="new">' in r.text
 
 
 # ---------------------------------------------------------------------------
