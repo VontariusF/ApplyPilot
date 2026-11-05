@@ -1,0 +1,264 @@
+"""Reliability fixes 3 and 5 (spec art_ti3XJuNr): the apply no-op guard and
+apply_status writer coordination.
+
+Fix 3 — Apply on an in_progress job must fail honestly: the route refuses
+with a 409 and a plain-language message, starts no run, and the card renders
+a disabled state instead of a verb that cannot work.
+
+Fix 5 — the worker's mark_result and a manual mark must not silently
+overwrite each other: the later writer wins only over matching state, and a
+mismatch is surfaced (apply_conflict note, conflict badge) instead of
+clobbered.
+"""
+
+from datetime import datetime, timezone
+
+import pytest
+
+from applypilot import database
+from applypilot.apply import launcher
+from applypilot.database import get_connection, init_db
+
+HX = {"HX-Request": "true"}
+
+
+@pytest.fixture()
+def start_spy(portal_client, monkeypatch):
+    """Replace runner.start_run (the real spawn) with a recording fake."""
+    from applypilot.portal import runner
+
+    calls: list[tuple[str, dict]] = []
+
+    def fake_start(kind, params, **kwargs):
+        calls.append((kind, dict(params)))
+        return {"id": f"fake-{len(calls)}", "kind": kind, "status": "running"}
+
+    monkeypatch.setattr(runner, "start_run", fake_start)
+    return calls
+
+
+def seed_job(**overrides) -> str:
+    conn = init_db()
+    url = overrides.pop("url", "https://jobs.example/posting-1")
+    row = {
+        "url": url, "title": "Pwidget Engineer", "site": "ExampleBoard",
+        "location": "Remote", "description": "short desc",
+        "full_description": "full description text", "fit_score": 9,
+        "salary": "", "apply_status": None,
+        "discovered_at": datetime.now(timezone.utc).isoformat(),
+        "is_remote": 1,
+    }
+    row.update(overrides)
+    cols = ", ".join(row)
+    marks = ", ".join("?" for _ in row)
+    conn.execute(f"INSERT OR REPLACE INTO jobs ({cols}) VALUES ({marks})",
+                 tuple(row.values()))
+    conn.commit()
+    return url
+
+
+def job_row(url) -> dict:
+    row = get_connection().execute(
+        "SELECT * FROM jobs WHERE url = ?", (url,)).fetchone()
+    return dict(row)
+
+
+# ---------------------------------------------------------------------------
+# Fix 3 — Apply now refuses in_progress jobs
+# ---------------------------------------------------------------------------
+
+
+def test_apply_now_on_in_progress_job_returns_409(portal_client, seeded_profile,
+                                                  start_spy):
+    client, _ = portal_client
+    url = seed_job(tailored_resume_path="/x/resume.txt",
+                   apply_status="in_progress")
+    r = client.post("/jobs/apply-now", data={"url": url}, headers=HX)
+    assert r.status_code == 409
+    # Plain language: what is wrong and what happens next.
+    assert "right now" in r.text
+    assert "updates when it finishes" in r.text
+    # No run was started — the old behavior spawned a doomed no-op run.
+    assert start_spy == []
+
+
+def test_apply_now_on_in_progress_job_non_htmx_refuses(portal_client,
+                                                       seeded_profile,
+                                                       start_spy):
+    client, _ = portal_client
+    url = seed_job(tailored_resume_path="/x/resume.txt",
+                   apply_status="in_progress")
+    r = client.post("/jobs/apply-now", data={"url": url}, follow_redirects=False)
+    assert r.status_code == 409
+    assert "right now" in r.text
+    assert start_spy == []
+
+
+def test_board_card_renders_disabled_apply_for_in_progress_job(
+        portal_client, seeded_profile):
+    client, _ = portal_client
+    seed_job(tailored_resume_path="/x/resume.txt",
+             apply_status="in_progress")
+    board = client.get("/jobs")
+    # The disabled state, not a working Apply verb.
+    assert "Application in progress…" in board.text
+    assert "A run owns this job" in board.text
+    assert "Confirm &amp; apply" not in board.text
+
+
+# ---------------------------------------------------------------------------
+# Fix 5 — writer coordination
+# ---------------------------------------------------------------------------
+
+
+def test_worker_applied_after_manual_applied_supersedes(app_dir):
+    """Worker result matches the manual mark: the user's record stands."""
+    database.init_db()
+    url = seed_job(tailored_resume_path="/x/resume.txt",
+                   apply_status="applied",
+                   applied_at="2026-01-01T00:00:00+00:00",
+                   apply_task_id="manual-applied")
+    outcome = launcher.mark_result(url, "applied", duration_ms=1234,
+                                   task_id="task-1",
+                                   resume_version_id=7)
+    assert outcome == "superseded"
+    row = job_row(url)
+    # The manual record was not clobbered.
+    assert row["apply_status"] == "applied"
+    assert row["applied_at"] == "2026-01-01T00:00:00+00:00"
+    assert row["applied_resume_version_id"] is None  # user's snapshot intact
+    # The coordination bookkeeping is cleared for the next run.
+    assert row["apply_task_id"] is None
+    assert row["agent_id"] is None
+
+
+def test_worker_failed_after_manual_failed_supersedes(app_dir):
+    database.init_db()
+    url = seed_job(tailored_resume_path="/x/resume.txt",
+                   apply_status="failed", apply_error="manual",
+                   apply_attempts=99, apply_task_id="manual-failed")
+    outcome = launcher.mark_result(url, "failed", error="engine died")
+    assert outcome == "superseded"
+    row = job_row(url)
+    assert row["apply_status"] == "failed"
+    assert row["apply_error"] == "manual"  # the user's reason stands
+    assert row["apply_attempts"] == 99     # no extra burn from the worker
+    assert row["apply_task_id"] is None
+
+
+def test_worker_applied_after_manual_failed_records_conflict(app_dir):
+    """Mismatch: the run says applied, the user said failed — no clobber."""
+    database.init_db()
+    url = seed_job(tailored_resume_path="/x/resume.txt",
+                   apply_status="failed", apply_error="manual",
+                   applied_at=None, apply_task_id="manual-failed")
+    outcome = launcher.mark_result(url, "applied", duration_ms=500,
+                                   task_id="task-2")
+    assert outcome == "conflict"
+    row = job_row(url)
+    # The manual record (including its state) is intact...
+    assert row["apply_status"] == "failed"
+    assert row["applied_at"] is None
+    # ...and the worker's outcome is visible, not swallowed.
+    assert row["apply_conflict"] is not None
+    assert "applied" in row["apply_conflict"]
+    assert "failed" in row["apply_conflict"]
+
+
+def test_worker_failed_after_manual_applied_records_conflict(app_dir):
+    database.init_db()
+    url = seed_job(tailored_resume_path="/x/resume.txt",
+                   apply_status="applied",
+                   applied_at="2026-01-01T00:00:00+00:00",
+                   apply_task_id="manual-applied")
+    outcome = launcher.mark_result(url, "failed", error="captcha wall",
+                                   permanent=True)
+    assert outcome == "conflict"
+    row = job_row(url)
+    assert row["apply_status"] == "applied"
+    assert row["applied_at"] == "2026-01-01T00:00:00+00:00"
+    assert row["apply_attempts"] == 1  # surfaced, not the 99 ban
+    assert "failed" in row["apply_conflict"]
+    assert "captcha wall" in row["apply_conflict"]
+
+
+def test_worker_result_without_manual_mark_writes_normally(app_dir):
+    """No coordination involved: the plain worker path is unchanged."""
+    database.init_db()
+    url = seed_job(tailored_resume_path="/x/resume.txt",
+                   apply_status="in_progress", apply_attempts=0)
+    outcome = launcher.mark_result(url, "applied", duration_ms=100,
+                                   task_id="task-3", resume_version_id=3)
+    assert outcome == "recorded"
+    row = job_row(url)
+    assert row["apply_status"] == "applied"
+    assert row["applied_at"] is not None
+    assert row["apply_task_id"] == "task-3"
+    assert row["applied_resume_version_id"] == 3
+
+    # And a plain failed result still increments attempts.
+    outcome = launcher.mark_result(url, "failed", error="timeout")
+    assert outcome == "recorded"
+    row = job_row(url)
+    assert row["apply_status"] == "failed"
+    assert row["apply_attempts"] == 1
+    assert row["apply_error"] == "timeout"
+
+
+def test_manual_mark_on_in_progress_job_raises(app_dir):
+    """The manual writer refuses a job a run currently owns."""
+    database.init_db()
+    url = seed_job(tailored_resume_path="/x/resume.txt",
+                   apply_status="in_progress", agent_id="droid-worker-1")
+    with pytest.raises(launcher.ManualMarkConflict):
+        launcher.mark_job(url, "applied")
+    with pytest.raises(launcher.ManualMarkConflict):
+        launcher.mark_job(url, "failed", reason="manual")
+    # Nothing was written.
+    assert job_row(url)["apply_status"] == "in_progress"
+
+
+def test_manual_mark_route_returns_409_on_owned_job(portal_client,
+                                                    seeded_profile):
+    client, _ = portal_client
+    url = seed_job(tailored_resume_path="/x/resume.txt",
+                   apply_status="in_progress")
+    r = client.post("/jobs/mark", data={"url": url, "status": "applied"},
+                    follow_redirects=False)
+    assert r.status_code == 409
+    assert "right now" in r.text
+    assert job_row(url)["apply_status"] == "in_progress"
+
+
+def test_detail_page_disables_marks_and_shows_conflict(portal_client,
+                                                       seeded_profile):
+    client, _ = portal_client
+    url = seed_job(tailored_resume_path="/x/resume.txt",
+                   apply_status="in_progress",
+                   apply_conflict="Run reported 'applied' after you marked "
+                                  "it failed — kept your mark: engine died")
+    detail = client.get("/jobs/detail", params={"url": url})
+    assert detail.status_code == 200
+    # The conflict surfaces in the UI...
+    assert "kept your mark" in detail.text
+    # ...and the mark buttons are disabled while the run owns the job.
+    assert "disabled" in detail.text
+
+
+def test_supersede_paths_clear_conflict_note(app_dir):
+    """A later normal worker result clears a stale conflict note."""
+    database.init_db()
+    url = seed_job(tailored_resume_path="/x/resume.txt",
+                   apply_status="in_progress",
+                   apply_conflict="stale note from an earlier clash")
+    launcher.mark_result(url, "failed", error="timeout")
+    assert job_row(url)["apply_conflict"] is None
+
+
+def test_reset_failed_clears_the_manual_marker(app_dir):
+    """Reset clears the marker so a fresh run starts with clean bookkeeping."""
+    database.init_db()
+    url = seed_job(tailored_resume_path="/x/resume.txt",
+                   apply_status="failed", apply_task_id="manual-failed")
+    launcher.reset_failed()
+    assert job_row(url)["apply_task_id"] is None

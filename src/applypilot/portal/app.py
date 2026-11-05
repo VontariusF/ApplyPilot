@@ -25,7 +25,7 @@ from markupsafe import escape
 from sse_starlette.sse import EventSourceResponse
 
 from applypilot import config, database, engine_auth, onboarding
-from applypilot.apply.launcher import mark_job, reset_failed
+from applypilot.apply.launcher import ManualMarkConflict, mark_job, reset_failed
 from applypilot.llm import ModelListError, list_models
 from applypilot.portal import auth, queries, runner
 from applypilot.portal import automation as automation_mod
@@ -259,7 +259,12 @@ def create_app() -> FastAPI:
         reason = str(form.get("reason", "") or "") or None
         if status not in ("applied", "failed") or not url:
             return PlainTextResponse("invalid mark request", status_code=400)
-        mark_job(url, status, reason)
+        try:
+            mark_job(url, status, reason)
+        except ManualMarkConflict as e:
+            # Writer coordination (fix 5): a run owns this job. Say so instead
+            # of silently overwriting the run's state.
+            return PlainTextResponse(str(e), status_code=409)
         return RedirectResponse(f"/jobs/detail?url={quote(url, safe='')}",
                                 status_code=303)
 
@@ -319,6 +324,18 @@ def create_app() -> FastAPI:
         job = queries.job_detail(url)
         if job is None:
             return PlainTextResponse("job not found", status_code=404)
+        # Writer coordination (fix 3): a run owns this job (apply_status is
+        # in_progress until the worker records its result). Starting another
+        # run would exit 'Queue empty' having done nothing — refuse honestly.
+        if job.get("apply_status") == "in_progress":
+            message = ("A run is applying to this job right now — the card "
+                       "updates when it finishes.")
+            if hx:
+                return _render(request, "partials/jobs_board.html",
+                               toast_message=message, toast_kind="error",
+                               status_code=409,
+                               **_jobs_board_context(view))
+            return PlainTextResponse(message, status_code=409)
         if not job.get("tailored_resume_path"):
             message = "This job has no tailored documents yet — run Tailor now first."
             if hx:
