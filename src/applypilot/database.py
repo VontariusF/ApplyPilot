@@ -102,6 +102,7 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
       - Scoring:    fit_score, score_reasoning, scored_at
       - Tailoring:  tailored_resume_path, tailored_at, tailor_attempts
       - Cover:      cover_letter_path, cover_letter_at, cover_attempts
+      - PDF:        pdf_generated_at, pdf_attempts
       - Apply:      applied_at, apply_status, apply_error, apply_attempts,
                    agent_id, last_attempted_at, apply_duration_ms, apply_task_id,
                    verification_confidence
@@ -156,6 +157,13 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             cover_letter_path     TEXT,
             cover_letter_at       TEXT,
             cover_attempts        INTEGER DEFAULT 0,
+
+            -- PDF conversion stage (scoring/pdf.py). Tracks whether the
+            -- tailored resume's PDF has been generated, so the streaming
+            -- pipeline's pending count reads state batch_convert actually
+            -- settles instead of re-counting unchanged .txt paths forever.
+            pdf_generated_at      TEXT,
+            pdf_attempts          INTEGER DEFAULT 0,
 
             -- Application stage
             applied_at            TEXT,
@@ -260,6 +268,9 @@ _ALL_COLUMNS: dict[str, str] = {
     "cover_letter_path": "TEXT",
     "cover_letter_at": "TEXT",
     "cover_attempts": "INTEGER DEFAULT 0",
+    # PDF conversion (scoring/pdf.py)
+    "pdf_generated_at": "TEXT",
+    "pdf_attempts": "INTEGER DEFAULT 0",
     # Application
     "applied_at": "TEXT",
     "apply_status": "TEXT",
