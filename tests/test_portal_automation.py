@@ -37,6 +37,11 @@ def seed_job(**overrides) -> str:
     return url
 
 
+def seed_eligible_job(**overrides) -> str:
+    """A job the apply worker would actually pick up (tailored, unapplied)."""
+    return seed_job(tailored_resume_path="/tmp/tailored-resume.txt", **overrides)
+
+
 def seed_applied(n: int) -> None:
     """n applications recorded right now (today's UTC calendar day)."""
     conn = get_connection()
@@ -219,12 +224,45 @@ def test_scheduler_fires_daily_schedule_once_per_day(portal_env, start_spy):
 
 
 def test_scheduler_fires_auto_apply(portal_env, start_spy):
+    seed_eligible_job()
     automation.update({"auto_apply_enabled": True,
                        "presets": {"apply_matches": {"daily_cap": 5}}})
     outcome = automation.run_tick()
     assert [s["kind"] for s in outcome["started"]] == ["apply"]
     kind, params = start_spy[0]
     assert params["limit"] == "5"  # full cap available
+
+
+def test_scheduler_skips_apply_when_queue_empty(portal_env, start_spy):
+    """Zero eligible jobs: log the nothing-to-apply outcome instead of
+    launching a run that would exit 'Queue empty' — the ~60s tick must
+    not flood Runs history with empty apply runs."""
+    automation.update({"auto_apply_enabled": True,
+                       "presets": {"apply_matches": {"daily_cap": 5}}})
+    outcome = automation.run_tick()
+    assert outcome["started"] == []
+    assert outcome["skipped"] == ["nothing to apply to"]
+    assert start_spy == []
+
+
+def test_scheduler_empty_queue_guard_matches_worker_eligibility(
+        portal_env, start_spy):
+    """The guard mirrors the worker's acquire predicate: a job that fails
+    it (below preset min_score) is not 'work available', but a failed-
+    status job the worker would retry still counts."""
+    automation.update({"auto_apply_enabled": True,
+                       "presets": {"apply_matches": {"daily_cap": 5,
+                                                    "min_score": 8}}})
+    # Below the preset's min_score: not eligible — no run.
+    seed_eligible_job(url="https://jobs.example/low", fit_score=7)
+    outcome = automation.run_tick()
+    assert outcome["started"] == []
+    assert outcome["skipped"] == ["nothing to apply to"]
+    # A failed apply the worker would retry IS eligible — run starts.
+    seed_eligible_job(url="https://jobs.example/retry", fit_score=9,
+                      apply_status="failed")
+    outcome = automation.run_tick()
+    assert [s["kind"] for s in outcome["started"]] == ["apply"]
 
 
 def test_scheduler_never_double_starts_while_a_run_is_active(portal_env, start_spy):
@@ -271,6 +309,7 @@ def test_cap_pauses_auto_apply_with_reason(portal_env, start_spy):
 
 
 def test_cap_pause_ends_the_next_day(portal_env, start_spy):
+    seed_eligible_job()
     cfg = automation.update({"auto_apply_enabled": True,
                              "presets": {"apply_matches": {"daily_cap": 5}}})
     yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
