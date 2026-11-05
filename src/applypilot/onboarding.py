@@ -863,7 +863,10 @@ def draft_to_answers(profile_draft: dict | None, answers: dict[str, str]) -> dic
     The fabrication guard is absolute here: gated fields (work
     authorization, sponsorship) are never prefilled from extraction — a
     resume claiming eligibility is a claim to confirm, not an answer to
-    record. Extraction also never overwrites a recorded answer: questions
+    record. A pure-choice question (choices without allow_free_text)
+    bridges only values its listed choices can represent — an extracted
+    "6" for a banded years question stays unanswered so the wizard asks
+    it. Extraction also never overwrites a recorded answer: questions
     already in `answers` are skipped, so the user's click always wins.
     """
     if not isinstance(profile_draft, dict) or not profile_draft:
@@ -892,8 +895,16 @@ def draft_to_answers(profile_draft: dict | None, answers: dict[str, str]) -> dic
             text = ", ".join(str(v).strip() for v in value if str(v).strip())
         else:
             text = str(value).strip() if value is not None else ""
-        if text:
-            filled[spec.id] = text
+        if not text:
+            continue
+        if spec.choices and not spec.allow_free_text and not any(c.value == text for c in spec.choices):
+            # A pure-choice question cannot represent this value (an
+            # extracted "6" for a banded years question): leave it
+            # unanswered so the wizard asks it with its listed choices,
+            # instead of planting an answer review can neither show nor
+            # keep.
+            continue
+        filled[spec.id] = text
     return filled
 
 
@@ -968,9 +979,11 @@ def update_answers(updates: dict[str, str]) -> InterviewState:
     """Save review-form edits back into the answers map (phase stays REVIEW).
 
     The review form shows the same widget set the wizard rendered, so the
-    validation mirrors record_answer: choice questions accept only their
-    listed values (an empty selection clears the answer and stays
-    flagged), typed text only where allow_free_text. Unknown field names
+    validation mirrors record_answer: choice questions accept their listed
+    values — plus any off-list value where allow_free_text (the wizard
+    accepts typed answers too, so an extracted "BSc" saves) — an empty
+    selection clears the answer and stays flagged, and typed text only
+    where allow_free_text. Unknown field names
     are ignored — never stored. No agent turn runs: editing at review is
     a quiet portal-side correction. The draft re-normalizes from the
     merged answers, and answers win over anything the agent extracted,
@@ -987,8 +1000,12 @@ def update_answers(updates: dict[str, str]) -> InterviewState:
                 continue
             value = (value or "").strip()
             if spec.choices:
-                if value and not any(c.value == value for c in spec.choices):
+                if (value and not any(c.value == value for c in spec.choices)
+                        and not spec.allow_free_text):
                     raise OnboardingError("that question takes one of the listed choices")
+                # allow_free_text choice questions take off-list values
+                # (the wizard accepts typed answers too) — an extracted
+                # "BSc" or "Australia" renders selected and saves as-is.
                 state.answers[spec.id] = value
             elif spec.allow_free_text:
                 state.answers[spec.id] = value
@@ -1291,7 +1308,12 @@ def send_message(text: str) -> InterviewState:
             raise
         state.error = None
         state.messages.append({"role": _ROLE_ASSISTANT, "content": reply})
-        if not _after_reply(state, reply) and context:
+        # A turn that consumed pending resume context is document-informed:
+        # its extraction is treated like the kickoff's (gated claims
+        # stripped, agenda kept for the bridge), not like a paraphrase of
+        # the user's own words. Pure chat turns keep the draft-to-review
+        # finish.
+        if not _after_reply(state, reply, allow_review=not context) and context:
             # No draft this turn: keep the pending context (the resume) in
             # play for the next one — a spent context that extracted nothing
             # would leave later turns with no access to the resume text.

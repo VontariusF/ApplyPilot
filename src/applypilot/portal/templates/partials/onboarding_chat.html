@@ -263,6 +263,14 @@
           {% if spec.choices %}
             <select id="answer-{{ spec.id }}" name="answer_{{ spec.id }}">
               <option value="" {{ 'selected' if not row.value }}>— not answered —</option>
+              {# An effective value off the option list — an extracted
+                 "BSc" or "Australia", or the user's own typed answer —
+                 renders as its own selected option: it displays here and
+                 submits itself on save, instead of the browser silently
+                 submitting the blank option over it. #}
+              {% if row.value and row.value not in spec.choices | map(attribute='value') | list %}
+                <option value="{{ row.value }}" selected>{{ row.value }}</option>
+              {% endif %}
               {% for c in spec.choices %}
                 <option value="{{ c.value }}" {{ 'selected' if c.value == row.value }}>{{ c.label }}</option>
               {% endfor %}

@@ -8,6 +8,7 @@ never prefilled from extraction, and a recorded answer always beats it.
 """
 
 import json
+import re
 
 from applypilot import config, onboarding
 
@@ -59,14 +60,16 @@ def seeded_state(answers: dict[str, str] | None = None) -> onboarding.InterviewS
 
 def test_gap_count_drops_to_the_residual_questions():
     """With a full extraction, the agenda asks only what extraction may
-    not answer: the gated pair plus currency (normalize_profile's "USD"
+    not answer: the gated pair, currency (normalize_profile's "USD"
     default is indistinguishable from extraction, so currency never
-    bridges)."""
+    bridges), and experience_years (the draft's raw "6" cannot represent
+    a listed band, so the wizard asks the banded question)."""
     state = seeded_state()
     open_ids = [q.id for q in onboarding.remaining_questions(state)]
     assert open_ids == [
-        "work_authorized", "sponsorship", "currency", "skills_tools",
-        "linkedin_url", "github_url", "website_url", "portfolio_url",
+        "experience_years", "work_authorized", "sponsorship", "currency",
+        "skills_tools", "linkedin_url", "github_url", "website_url",
+        "portfolio_url",
     ]
 
 
@@ -111,6 +114,21 @@ def test_bridge_prefills_only_on_extraction_evidence():
 
     assert onboarding.draft_to_answers(None, {}) == {}
     assert onboarding.draft_to_answers({}, {}) == {}
+
+
+def test_bridge_only_plants_representable_choice_values():
+    """A pure-choice question bridges only values its listed choices can
+    represent: the draft's raw "6" never plants itself as the banded
+    years answer (review could neither show nor keep it — Codex P2 on
+    58ba3be), while an allow_free_text question bridges its off-list
+    text ("BSc") because the wizard accepts typed answers too."""
+    offlist = {**RAW_DRAFT, "_applypilot_profile": {
+        **RAW_DRAFT["_applypilot_profile"],
+        "experience": {**RAW_DRAFT["_applypilot_profile"]["experience"],
+                       "education_level": "BSc"}}}
+    filled = onboarding.draft_to_answers(offlist, {})
+    assert "experience_years" not in filled  # unrepresentable: wizard asks
+    assert filled["education"] == "BSc"  # free-text choice: bridges as typed
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +269,33 @@ def test_kickoff_extraction_never_records_gated_claims(portal_client, fake_llm, 
     assert "sponsorship" in [q.id for q in onboarding.remaining_questions(state)]
 
 
+def test_resume_backed_chat_extraction_never_records_gated_claims(portal_client, fake_llm, monkeypatch):
+    """A chat turn that consumed the pending resume context is
+    document-informed like the kickoff: its draft may not jump to review
+    and its gated work-auth claims are stripped (Codex P1 on 58ba3be) —
+    otherwise the retained resume could confirm authorization and
+    sponsorship into the profile without the user ever answering."""
+    client, _ = portal_client
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    fake_llm.respond("Hello! Tell me about your background.")  # draftless kickoff
+
+    onboarding.start_intake()
+    client.post("/onboarding/resume", data={"resume_text": "MARKER-RESUME-7788"})
+    client.post("/onboarding/start", data={"mode": "llm"})
+    assert onboarding.load_state().pending_context  # resume in play
+
+    fake_llm.respond(DRAFT_REPLY)  # claims Yes / No / Citizen from the resume
+    client.post("/onboarding/send", data={"text": "that's everything"})
+    state = onboarding.load_state()
+    assert state.phase == onboarding.INTERVIEW  # the agenda is not the agent's to finish
+    assert state.pending_context == ""  # spent: the extraction landed
+    auth = state.profile_draft["work_authorization"]
+    assert auth["legally_authorized_to_work"] == ""  # claim stripped
+    assert auth["require_sponsorship"] == ""  # claim stripped
+    assert auth["work_permit_type"] == "Citizen"  # not gated: survives
+    assert "work_authorized" not in state.answers
+
+
 # ---------------------------------------------------------------------------
 # The intake phase: upload before any question, gaps-only after start
 
@@ -274,13 +319,17 @@ def test_intake_resume_then_start_walks_gaps_only(portal_client, fake_llm, monke
     assert state.pending_context == ""
     assert state.profile_draft["personal"]["full_name"] == "Jane Doe"
 
-    # The wizard's first question is a gap, not an already-extracted field.
+    # The wizard's first question is a gap, not an already-extracted field:
+    # the draft's raw "6" cannot represent a listed band, so the banded
+    # years question stays asked (ahead of the gated pair, in spec order).
     page = client.get("/onboarding/chat")
-    assert _qid(page.text) == "work_authorized"
-    rendered = _walk(client, {"work_authorized": "yes", "sponsorship": "no", "currency": "USD"})
+    assert _qid(page.text) == "experience_years"
+    rendered = _walk(client, {"experience_years": "6–10", "work_authorized": "yes",
+                              "sponsorship": "no", "currency": "USD"})
     assert rendered == [
-        "work_authorized", "sponsorship", "currency", "skills_tools",
-        "linkedin_url", "github_url", "website_url", "portfolio_url",
+        "experience_years", "work_authorized", "sponsorship", "currency",
+        "skills_tools", "linkedin_url", "github_url", "website_url",
+        "portfolio_url",
     ]
     state = onboarding.load_state()
     assert state.phase == onboarding.REVIEW
@@ -319,3 +368,32 @@ def test_review_fields_show_effective_draft_values():
     answered.phase = onboarding.REVIEW
     rows = {r["spec"].id: r["value"] for r in onboarding.review_fields(answered)}
     assert rows["full_name"] == "Jane Q. Public"  # recorded beats extraction
+
+
+def test_review_select_shows_and_keeps_offlist_prefills(portal_client, fake_llm, monkeypatch):
+    """A choice question whose effective value is off the option list
+    (an extracted "BSc") renders that value as its own selected option —
+    the browser used to display and submit the blank option over it,
+    so saving wiped the prefill (Codex P2 on 58ba3be). The save accepts
+    the off-list value for a free-text-allowed question, while a
+    pure-choice question still rejects junk."""
+    client, _ = portal_client
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    draft = {**RAW_DRAFT, "_applypilot_profile": {
+        **RAW_DRAFT["_applypilot_profile"],
+        "experience": {**RAW_DRAFT["_applypilot_profile"]["experience"],
+                       "education_level": "BSc"}}}
+    profile, meta = onboarding.normalize_profile(draft, {})
+    onboarding.save_state(onboarding.InterviewState(
+        profile_draft={**profile, "_applypilot_search": meta}, phase=onboarding.REVIEW))
+
+    page = client.get("/onboarding/chat").text
+    select = re.search(r'<select id="answer-education".*?</select>', page, re.S)
+    assert select
+    assert '<option value="BSc" selected>' in select.group(0)  # displayed, selectable
+
+    page = client.post("/onboarding/review", data={"answer_education": "BSc"}).text
+    assert onboarding.load_state().answers["education"] == "BSc"  # kept, not wiped
+
+    page = client.post("/onboarding/review", data={"answer_work_authorized": "hacked"}).text
+    assert "alert error" in page  # pure-choice junk still rejected
