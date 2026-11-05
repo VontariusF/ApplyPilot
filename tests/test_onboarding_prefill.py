@@ -506,3 +506,115 @@ def test_review_select_shows_and_keeps_offlist_prefills(portal_client, fake_llm,
 
     page = client.post("/onboarding/review", data={"answer_work_authorized": "hacked"}).text
     assert "alert error" in page  # pure-choice junk still rejected
+
+
+# ---------------------------------------------------------------------------
+# The chip surface: prefilled answers as editable rows (spec art_ti3XJuNr,
+# part 4 — the interview and review render what the resume bridged)
+
+
+def _interview_with_draft(client, fake_llm, monkeypatch):
+    """A live interview whose kickoff extracted the rich draft."""
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    fake_llm.respond(DRAFT_REPLY)  # the kickoff turn's extraction reply
+    onboarding.start_intake()
+    client.post("/onboarding/resume", data={"resume_text": "resume"})
+    client.post("/onboarding/start", data={"mode": "llm"})
+
+
+def test_prefilled_answers_list_the_bridged_rows():
+    """Chip rows mirror the bridge: every bridged question with its
+    extracted value; a recorded (or cleared) answer drops its chip, and
+    gated questions never appear (the fabrication guard is absolute)."""
+    state = seeded_state()
+    chips = {c["spec"].id: c["value"] for c in onboarding.prefilled_answers(state)}
+    assert chips["full_name"] == "Jane Doe"
+    assert chips["email"] == "jane@example.com"
+    assert "work_authorized" not in chips and "sponsorship" not in chips
+
+    state.answers["full_name"] = "Jane Q. Public"
+    chips = {c["spec"].id: c["value"] for c in onboarding.prefilled_answers(state)}
+    assert "full_name" not in chips  # the recorded answer retired its chip
+
+
+def test_review_rows_flag_resume_sourced_values():
+    """Review rows carry from_resume only when the shown value is a
+    bridged extraction — a recorded answer (even one overwriting a
+    prefill) renders with no badge."""
+    prefilled = seeded_state()
+    prefilled.phase = onboarding.REVIEW
+    rows = {r["spec"].id: r for r in onboarding.review_fields(prefilled)}
+    assert rows["full_name"]["from_resume"] is True
+    assert rows["education"]["from_resume"] is True
+
+    answered = seeded_state({"full_name": "Jane Q. Public"})
+    answered.phase = onboarding.REVIEW
+    rows = {r["spec"].id: r for r in onboarding.review_fields(answered)}
+    assert rows["full_name"]["from_resume"] is False
+    assert rows["full_name"]["value"] == "Jane Q. Public"  # recorded wins
+
+
+def test_chip_edit_records_an_answer_that_beats_extraction(portal_client, fake_llm, monkeypatch):
+    """Editing a chip through the answer route records the value (which
+    beats the extraction everywhere) and retires the chip; the resume's
+    value shows in the editor first, so the save confirms or corrects it."""
+    client, _ = portal_client
+    _interview_with_draft(client, fake_llm, monkeypatch)
+
+    page = client.get("/onboarding/chat").text
+    assert 'data-chip-for="full_name"' in page
+    assert "Jane Doe" in page  # the resume's value shows before editing
+
+    fake_llm.respond("Noted.")  # the ack turn for the chip edit
+    client.post("/onboarding/answer", data={"question_id": "full_name", "free_text": "Jane Q. Public"})
+    state = onboarding.load_state()
+    assert state.answers["full_name"] == "Jane Q. Public"  # recorded answer
+
+    page = client.get("/onboarding/chat").text
+    assert 'data-chip-for="full_name"' not in page  # chip retired
+
+    profile, _ = onboarding.normalize_profile(state.profile_draft, state.answers)
+    assert profile["personal"]["full_name"] == "Jane Q. Public"  # beats extraction
+
+
+def test_clear_prefill_removes_the_value_and_records_empty(portal_client, fake_llm, monkeypatch):
+    """Clearing a chip removes the resume's value at the draft (it must
+    not resurrect at confirm: _answers_to_draft gives every non-empty
+    extraction priority over an empty recorded answer), records the
+    question as intentionally empty, flags it for review, and runs no
+    agent turn — a removal has nothing to acknowledge."""
+    client, _ = portal_client
+    _interview_with_draft(client, fake_llm, monkeypatch)
+    calls_before = len(fake_llm.calls)
+
+    client.post("/onboarding/clear", data={"question_id": "full_name"})
+    state = onboarding.load_state()
+    assert state.answers["full_name"] == ""  # recorded intentionally empty
+    assert "full_name" not in state.profile_draft["personal"]  # removed at source
+    assert len(fake_llm.calls) == calls_before  # no ack turn
+
+    # The cleared question is not re-asked (skip semantics) and the
+    # review screen lists the field as add-later.
+    assert "full_name" not in [q.id for q in onboarding.remaining_questions(state)]
+    state.phase = onboarding.REVIEW
+    row = next(r for r in onboarding.review_fields(state) if r["spec"].id == "full_name")
+    assert row["value"] == "" and row["needs_answer"] is True and row["from_resume"] is False
+
+    # And confirm-time normalize never resurrects the cleared value.
+    profile, _ = onboarding.normalize_profile(state.profile_draft, state.answers)
+    assert profile["personal"]["full_name"] == ""
+
+
+def test_clear_prefill_rejects_questions_without_a_resume_value(portal_client, fake_llm, monkeypatch):
+    """Only resume-sourced chips clear: a gated question (never bridged)
+    and a bogus id both render the error banner, and the state is intact."""
+    client, _ = portal_client
+    _interview_with_draft(client, fake_llm, monkeypatch)
+
+    page = client.post("/onboarding/clear", data={"question_id": "work_authorized"}).text
+    assert "nothing from your resume to clear" in page
+    page = client.post("/onboarding/clear", data={"question_id": "nonsense"}).text
+    assert "unknown question" in page
+    state = onboarding.load_state()
+    assert state.phase == onboarding.INTERVIEW
+    assert state.answers.get("work_authorized") is None
