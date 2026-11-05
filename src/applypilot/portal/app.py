@@ -827,6 +827,19 @@ def create_app() -> FastAPI:
         return _render(request, "partials/onboarding_surface.html",
                        **_onboarding_context(error=error))
 
+    @app.post("/onboarding/clear")
+    async def onboarding_clear(request: Request):
+        """Clear one resume-sourced chip: the extracted value leaves the
+        draft, the field returns to the review screen as add-later."""
+        form = await request.form()
+        error = ""
+        try:
+            await asyncio.to_thread(onboarding.clear_prefill, str(form.get("question_id", "")))
+        except onboarding.OnboardingError as exc:
+            error = str(exc)
+        return _render(request, "partials/onboarding_surface.html",
+                       **_onboarding_context(error=error))
+
     @app.post("/onboarding/agent-mode")
     async def onboarding_agent_mode(request: Request):
         """'Let the agent ask' ↔ back to guided buttons (session mode)."""
@@ -1389,6 +1402,11 @@ def _onboarding_context(error: str = "", login_error: str = "", login: int = 0,
         "missing": onboarding.missing_review_fields(state.profile_draft) if in_review else [],
         "review_fields": onboarding.review_fields(state) if in_review else [],
         "question": question,
+        # Resume-sourced chips (spec art_ti3XJuNr): what extraction already
+        # answered, shown editable in the interview; and the gaps still
+        # open, as needs-answer chips. Empty outside the guided interview.
+        "prefilled_answers": onboarding.prefilled_answers(state) if in_interview and not agent_led else [],
+        "remaining_gaps": onboarding.remaining_questions(state) if in_interview and not agent_led else [],
         "agent_led": agent_led,
         "error": error,
         "login_error": login_error,

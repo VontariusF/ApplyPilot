@@ -1009,6 +1009,9 @@ def review_fields(state: InterviewState) -> list[dict]:
         rows.append({
             "spec": spec,
             "value": effective.get(spec.id, ""),
+            # The effective value is a bridged extraction, not a recorded
+            # answer — the review row earns its "from your resume" badge.
+            "from_resume": spec.id in prefilled,
             "needs_answer": spec.maps_to in _REVIEW_FLAGGED_PATHS and not draft_value(spec.maps_to),
         })
     return rows
@@ -1419,6 +1422,16 @@ def remaining_questions(state: InterviewState) -> list[QuestionSpec]:
     return open_specs
 
 
+def prefilled_answers(state: InterviewState) -> list[dict]:
+    """Chip rows for the interview surface: every question the extraction
+    draft answers that the user has not recorded (or cleared) themselves.
+    draft_to_answers already excludes recorded answers, so a chip survives
+    exactly until the user edits it into a recorded answer or clears it."""
+    prefilled = draft_to_answers(state.profile_draft, state.answers)
+    return [{"spec": spec, "value": prefilled[spec.id]}
+            for spec in QUESTION_SPECS if spec.id in prefilled]
+
+
 def _depends_met(spec: QuestionSpec, answers: dict[str, str]) -> bool:
     """True when every depends_on parent's answer satisfies its gate
     ("a,b" = either exact value; "*" = any nonempty answer; "!x" = an
@@ -1526,6 +1539,52 @@ def record_answer(question_id: str, value: str = "", free_text: str = "",
             state.error = None
             state.messages.append({"role": _ROLE_ASSISTANT, "content": reply})
             _after_reply(state, reply, allow_review=False)
+        save_state(state)
+        return state
+
+
+def _draft_remove_value(draft: dict, path: str) -> None:
+    """Drop one mapped path from a raw-shaped draft (mutates in place).
+
+    Clearing a resume chip must remove the value at the source, not just
+    record an empty answer: _answers_to_draft intentionally lets a
+    non-empty extraction own every field an empty recorded answer doesn't
+    write, so a bare empty answer would resurrect the resume's value the
+    next time normalize_profile merges the draft."""
+    section, field = path.split(".", 1)
+    if path.startswith("search."):
+        meta = draft.get("_applypilot_search")
+        if isinstance(meta, dict):
+            meta.pop(field, None)
+    else:
+        section_data = draft.get(section)
+        if isinstance(section_data, dict):
+            section_data.pop(field, None)
+
+
+def clear_prefill(question_id: str) -> InterviewState:
+    """Drop one resume-sourced chip: the extracted value leaves the draft
+    and the question records as intentionally empty.
+
+    Clearing is the user saying the extraction is wrong, so the value is
+    removed at the source (see _draft_remove_value) — the review screen
+    lists the field as add-later and confirm writes it empty. Recording
+    the empty answer also keeps remaining_questions from re-asking it.
+    No agent turn runs: a removal has nothing to acknowledge, so the
+    transcript note carries the change instead."""
+    with _STATE_LOCK:
+        state = load_state()
+        if state is None or state.phase != INTERVIEW:
+            raise OnboardingError("the interview is not active")
+        spec = QUESTIONS.get(question_id)
+        if spec is None:
+            raise OnboardingError("unknown question")
+        if not spec.maps_to or question_id not in draft_to_answers(state.profile_draft, state.answers):
+            raise OnboardingError("nothing from your resume to clear there")
+        _draft_remove_value(state.profile_draft, spec.maps_to)
+        state.answers[spec.id] = ""
+        _note(state, f"Cleared \"{spec.prompt}\" — the resume's value was removed; "
+                     f"the review screen lists it as add-later.")
         save_state(state)
         return state
 

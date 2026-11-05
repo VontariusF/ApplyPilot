@@ -20,19 +20,71 @@
 {% endmacro %}
 
 {# The typed widget for a question's "something else" answer, shaped by
-   free_text_kind (None | "date" | "number" | "password" | "multiline"). #}
-{% macro free_text_widget(question) %}
+   free_text_kind (None | "date" | "number" | "password" | "multiline").
+   `value` prefills the field — the chip editor reuses the widget to show
+   the resume's extracted value for editing. #}
+{% macro free_text_widget(question, value="") %}
   {% if question.free_text_kind == "multiline" %}
-    <textarea name="free_text" rows="3" placeholder="One per line"></textarea>
+    <textarea name="free_text" rows="3" placeholder="One per line">{{ value }}</textarea>
   {% elif question.free_text_kind == "number" %}
-    <input type="number" name="free_text" placeholder="A number">
+    <input type="number" name="free_text" placeholder="A number" value="{{ value }}">
   {% elif question.free_text_kind == "date" %}
-    <input type="date" name="free_text">
+    <input type="date" name="free_text" value="{{ value }}">
   {% elif question.free_text_kind == "password" %}
     <input type="password" name="free_text" autocomplete="off" placeholder="Type your answer">
   {% else %}
-    <input type="text" name="free_text" placeholder="Type your answer">
+    <input type="text" name="free_text" placeholder="Type your answer" value="{{ value }}">
   {% endif %}
+{% endmacro %}
+
+{# The resume's answers, shown as editable chips beside the question card.
+   Each chip opens into its own editor: choice questions get the same
+   select the review form uses (an off-list extraction renders as its own
+   selected option, so saving keeps it), free-text questions reuse the
+   typed widget prefilled with the extracted value — and Clear removes
+   the resume's value entirely. What the user saves or types is a
+   recorded answer, which always beats the extraction. #}
+{% macro prefill_chips(prefilled_answers) %}
+{% if prefilled_answers %}
+<section class="panel prefill-panel">
+  <h2>From your resume</h2>
+  <p class="dim">The agent read these from your resume. Open one to change or
+     clear it — what you pick or type always wins.</p>
+  <div class="prefill-chips">
+    {% for row in prefilled_answers %}
+      {% set spec = row.spec %}
+      <details class="prefill-chip" data-chip-for="{{ spec.id }}">
+        <summary><span class="chip from-resume">{{ spec.prompt }}</span>
+          <strong>{{ row.value }}</strong></summary>
+        <div class="prefill-edit">
+          <form class="chat-composer" hx-post="/onboarding/answer" hx-target="#onboarding-surface"
+                hx-swap="outerHTML" hx-indicator="#chat-busy">
+            <input type="hidden" name="question_id" value="{{ spec.id }}">
+            {% if spec.choices %}
+              <select name="value">
+                {% if row.value and row.value not in spec.choices | map(attribute='value') | list %}
+                  <option value="{{ row.value }}" selected>{{ row.value }}</option>
+                {% endif %}
+                {% for c in spec.choices %}
+                  <option value="{{ c.value }}" {{ 'selected' if c.value == row.value }}>{{ c.label }}</option>
+                {% endfor %}
+              </select>
+            {% else %}
+              {{ free_text_widget(spec, row.value) }}
+            {% endif %}
+            <button>Save answer</button>
+          </form>
+          <form class="inline-form" hx-post="/onboarding/clear" hx-target="#onboarding-surface"
+                hx-swap="outerHTML" hx-indicator="#chat-busy">
+            <input type="hidden" name="question_id" value="{{ spec.id }}">
+            <button class="secondary">Clear — leave it empty</button>
+          </form>
+        </div>
+      </details>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
 {% endmacro %}
 
 {# The typed-answer form. Questions WITH choices keep the box collapsed
@@ -61,6 +113,8 @@
    path), so the backend choice logic lives in exactly one place. #}
 {% macro start_choices(ready, login_url, login_started) %}
 {% set card_link = none if login_started else login_url %}
+  <span id="start-busy" class="htmx-indicator dim" role="status">Opening the interview —
+     with a resume saved, the agent reads it first; this can take a moment.</span>
   {% if login_started and ready.claude and ready.claude.state == "signed_out" %}
     <section class="panel">
       <p><strong>Waiting for you to finish the Claude sign-in…</strong>
@@ -72,7 +126,8 @@
     <section class="panel">
       <h2>Interview agent ready</h2>
       <p>The interview runs on your signed-in Claude account — no API key needed.</p>
-      <form hx-post="/onboarding/start" hx-target="#onboarding-surface" hx-swap="outerHTML">
+      <form hx-post="/onboarding/start" hx-target="#onboarding-surface" hx-swap="outerHTML"
+            hx-indicator="#start-busy">
         <input type="hidden" name="mode" value="claude">
         <button>Start the interview</button>
       </form>
@@ -87,7 +142,8 @@
           <input type="hidden" name="next" value="/onboarding">
           <button>Sign in with Claude</button>
         </form>
-        <form hx-post="/onboarding/start" hx-target="#onboarding-surface" hx-swap="outerHTML" class="inline-form">
+        <form hx-post="/onboarding/start" hx-target="#onboarding-surface" hx-swap="outerHTML"
+              hx-indicator="#start-busy" class="inline-form">
           <input type="hidden" name="mode" value="llm">
           <button class="secondary">Use the configured provider instead</button>
         </form>
@@ -146,11 +202,16 @@
       <p class="dim">✓ {{ state.messages[-1].content }}</p>
     {% endif %}
     <form hx-post="/onboarding/resume" hx-target="#onboarding-surface"
-          hx-swap="outerHTML" enctype="multipart/form-data" class="resume-form">
+          hx-swap="outerHTML" enctype="multipart/form-data" class="resume-form"
+          hx-indicator="#intake-busy">
       <input type="file" name="resume_file" accept=".txt,.md,.pdf">
       <textarea name="resume_text" rows="4" placeholder="…or paste your resume text"></textarea>
       <button>Save resume</button>
+      <span id="intake-busy" class="htmx-indicator dim" role="status">Reading your resume —
+         this page updates when it's saved, and the interview reads it before asking anything.</span>
     </form>
+    <p class="dim">In a hurry? Skip the resume — starting without one just means
+       answering every question yourself, one at a time.</p>
   </section>
   {# Starting the interview is the skip path (no resume) and the transition
      out of intake once one is saved — the backend-choice cards stay below. #}
@@ -167,6 +228,15 @@
          the user's turn. #}
       <div class="question-card" data-question-id="{{ question.id }}">
         <p class="hint question-progress">{{ state.answers | length }} answered — skipping is fine, review lists anything empty.</p>
+        {% if remaining_gaps | length > 1 %}
+          {# The open agenda, in the review surface's chip pattern: what's
+             still ahead, with this question marked. #}
+          <div class="needs-answer-chips" aria-label="Still to answer">
+            {% for spec in remaining_gaps %}
+              <span class="chip needs-answer{{ ' current' if spec.id == question.id }}">{{ spec.prompt }}</span>
+            {% endfor %}
+          </div>
+        {% endif %}
         <h3>{{ question.prompt }}</h3>
         {% if question.choices %}
           <div class="choice-grid">
@@ -226,6 +296,7 @@
       </div>
     {% endif %}
     <span id="chat-busy" class="htmx-indicator dim">The agent is thinking…</span>
+    {{ prefill_chips(prefilled_answers) }}
     <details class="resume-upload">
       <summary>Attach a resume (txt/md/pdf file or paste — we read PDFs for you)</summary>
       <form hx-post="/onboarding/resume" hx-target="#onboarding-surface" hx-swap="outerHTML"
@@ -259,7 +330,12 @@
       {% for row in review_fields %}
         {% set spec = row.spec %}
         <div class="review-field{{ ' needs-answer' if row.needs_answer }}">
-          <label for="answer-{{ spec.id }}">{{ spec.prompt }}</label>
+          <label for="answer-{{ spec.id }}">{{ spec.prompt }}
+            {# A value the resume supplied (not one the user recorded) —
+               named at the source, since an extraction can be wrong in
+               ways a recorded answer never is. #}
+            {% if row.from_resume %}<span class="chip from-resume">from your resume</span>{% endif %}
+          </label>
           {% if spec.choices %}
             <select id="answer-{{ spec.id }}" name="answer_{{ spec.id }}">
               <option value="" {{ 'selected' if not row.value }}>— not answered —</option>
