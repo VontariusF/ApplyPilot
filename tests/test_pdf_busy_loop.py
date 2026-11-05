@@ -16,6 +16,7 @@ These tests pin the contract on both halves of the fix:
 """
 
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -170,6 +171,75 @@ def test_pdf_columns_migrate_existing_databases(isolated_db):
     columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
     assert "pdf_generated_at" in columns
     assert "pdf_attempts" in columns
+
+
+def test_reset_job_tailoring_clears_pdf_bookkeeping(isolated_db, tmp_path):
+    """Re-tailoring a job must re-enqueue it for PDF conversion.
+
+    A regenerated resume is a different document: the stale
+    pdf_generated_at/pdf_attempts of the previous one must not keep the
+    new resume out of the pdf stage's pending count — pre-fix, a failed
+    render of the new resume was never retried.
+    """
+    txt = _make_tailored_pair(tmp_path)
+    _seed_tailored_job("https://example.com/job-1", str(txt))
+    conn = database.get_connection()
+    conn.execute(
+        "UPDATE jobs SET pdf_generated_at = ?, pdf_attempts = 2 "
+        "WHERE url = ?",
+        ("2026-01-01T00:00:00Z", "https://example.com/job-1"),
+    )
+    conn.commit()
+
+    assert database.reset_job_tailoring(conn, "https://example.com/job-1")
+
+    row = conn.execute(
+        "SELECT tailored_resume_path, pdf_generated_at, pdf_attempts "
+        "FROM jobs WHERE url = ?",
+        ("https://example.com/job-1",),
+    ).fetchone()
+    assert row["tailored_resume_path"] is None
+    assert row["pdf_generated_at"] is None, (
+        "reset must clear the old PDF timestamp so the new resume re-pends"
+    )
+    assert row["pdf_attempts"] == 0
+
+
+def test_reconciliation_respects_remaining_limit(isolated_db, tmp_path, monkeypatch):
+    """batch_convert's total renders per call must stay within `limit`.
+
+    The reconciliation pass converts DB-backed sources whose PDFs are
+    missing, so unbounded it could render far more than the API's limit
+    reported. Budget the reconciliation by the remaining quota; excess
+    rows stay pending for the next pass.
+    """
+    tailored = tmp_path / "tailored"
+    tailored.mkdir()
+    rendered: list[str] = []
+
+    def _fake_convert(txt_path):
+        txt = Path(txt_path)
+        txt.with_suffix(".pdf").write_bytes(b"%PDF-1.4 fake")
+        rendered.append(txt.name)
+
+    for i in range(4):
+        txt = tailored / f"resume_{i}.txt"
+        txt.write_text(f"Jane Doe\nTITLE\nEngineer\nSUMMARY\ntext {i}", encoding="utf-8")
+        _seed_tailored_job(f"https://example.com/job-{i}", str(txt))
+    monkeypatch.setattr(pdf_mod, "TAILORED_DIR", tailored)
+    monkeypatch.setattr(pdf_mod, "convert_to_pdf", _fake_convert)
+
+    converted = pdf_mod.batch_convert(limit=2)
+
+    assert converted == 2
+    assert rendered == ["resume_0.txt", "resume_1.txt"], (
+        "reconciliation must not render beyond the remaining quota"
+    )
+    assert pipeline._count_pending("pdf") == 2
+
+    # Next pass converts the rest — the work converges across passes.
+    assert pdf_mod.batch_convert(limit=2) == 2
+    assert pipeline._count_pending("pdf") == 0
 
 
 if __name__ == "__main__":

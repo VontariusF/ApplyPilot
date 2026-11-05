@@ -407,7 +407,7 @@ def _record_pdf_failure(text_path: Path) -> None:
     conn.commit()
 
 
-def _settle_job_pdf_states() -> int:
+def _settle_job_pdf_states(convert_budget: int | None = None) -> int:
     """Reconcile the jobs table's PDF state with the filesystem.
 
     The streaming pipeline counts pending pdf work from the jobs table
@@ -424,6 +424,13 @@ def _settle_job_pdf_states() -> int:
         ages out of the pending count under the same attempt cap the
         tailor and cover stages use.
 
+    Args:
+        convert_budget: Maximum number of renders this reconciliation may
+            attempt (None = unbounded). Bookkeeping-only updates — marking
+            an existing PDF generated, burning an attempt for a vanished
+            source — always run; only renders consume budget. Rows beyond
+            the budget simply stay pending for the next pass.
+
     Returns:
         Number of rows settled as generated this pass.
     """
@@ -436,41 +443,49 @@ def _settle_job_pdf_states() -> int:
         "AND tailored_resume_path LIKE '%.txt' "
         "AND pdf_generated_at IS NULL"
     ).fetchall()
-    settled = 0
 
-    def _mark_generated(url: str) -> None:
-        conn.execute(
-            "UPDATE jobs SET pdf_generated_at = ? WHERE url = ?",
-            (_utc_now(), url),
-        )
-
+    # Pass 1 — classify rows and do all filesystem work BEFORE any DB
+    # write: an open SQLite write transaction held across a Chromium
+    # render would block other stages' writes for the render's duration.
+    generated: list[str] = []
+    failed: list[str] = []
+    conversions: list[tuple[str, Path]] = []
     for row in rows:
         txt = Path(row["tailored_resume_path"])
         pdf = txt.with_suffix(".pdf")
         if pdf.exists():
-            _mark_generated(row["url"])
-            settled += 1
+            generated.append(row["url"])
         elif txt.exists():
-            try:
-                convert_to_pdf(txt)
-            except Exception as e:
-                log.error("PDF conversion failed for %s: %s", txt.name, e)
-                conn.execute(
-                    "UPDATE jobs SET pdf_attempts = "
-                    "COALESCE(pdf_attempts, 0) + 1 WHERE url = ?",
-                    (row["url"],),
-                )
-            else:
-                _mark_generated(row["url"])
-                settled += 1
+            if convert_budget is not None and len(conversions) >= convert_budget:
+                continue  # over quota — stays pending for the next pass
+            conversions.append((row["url"], txt))
         else:
-            conn.execute(
-                "UPDATE jobs SET pdf_attempts = COALESCE(pdf_attempts, 0) + 1 "
-                "WHERE url = ?",
-                (row["url"],),
-            )
+            failed.append(row["url"])  # source vanished — burn an attempt
+
+    for url, txt in conversions:
+        try:
+            convert_to_pdf(txt)
+        except Exception as e:
+            log.error("PDF conversion failed for %s: %s", txt.name, e)
+            failed.append(url)
+        else:
+            generated.append(url)
+
+    # Pass 2 — one short write transaction with no renders inside it.
+    now = _utc_now()
+    for url in generated:
+        conn.execute(
+            "UPDATE jobs SET pdf_generated_at = ? WHERE url = ?",
+            (now, url),
+        )
+    for url in failed:
+        conn.execute(
+            "UPDATE jobs SET pdf_attempts = COALESCE(pdf_attempts, 0) + 1 "
+            "WHERE url = ?",
+            (url,),
+        )
     conn.commit()
-    return settled
+    return len(generated)
 
 
 def batch_convert(limit: int = 50) -> int:
@@ -532,8 +547,10 @@ def batch_convert(limit: int = 50) -> int:
     # pending count converges (rows whose PDF exists or whose source is
     # gone must not pend forever). Runs on every exit path — including
     # when nothing needed converting, which is exactly the stale-
-    # accounting state that used to busy-loop the pdf stage.
-    settled = _settle_job_pdf_states()
+    # accounting state that used to busy-loop the pdf stage. The
+    # reconciliation's render quota is whatever is left of this call's
+    # limit, so batch_convert never renders more than `limit` PDFs total.
+    settled = _settle_job_pdf_states(convert_budget=limit - converted)
     if settled:
         log.info("Settled %d job(s) with PDFs already on disk.", settled)
     return converted

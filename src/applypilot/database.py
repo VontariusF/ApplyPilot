@@ -733,10 +733,14 @@ def reset_job_tailoring(conn: sqlite3.Connection, url: str,
 
     Keeps fit_score and full_description (the tailor stage needs both) and
     resets the attempt counters so a previously-exhausted job can try again.
-    Existing files and version rows stay on disk — history is never deleted.
+    Also clears the PDF bookkeeping: the new resume is a different document,
+    so the stale pdf_generated_at/pdf_attempts of the previous one must not
+    keep it out of the pdf stage's pending count. Existing files and version
+    rows stay on disk — history is never deleted.
     Returns True when the job exists.
     """
-    sets = ["tailored_resume_path = NULL", "tailored_at = NULL", "tailor_attempts = 0"]
+    sets = ["tailored_resume_path = NULL", "tailored_at = NULL", "tailor_attempts = 0",
+            "pdf_generated_at = NULL", "pdf_attempts = 0"]
     params: list = []
     if include_cover:
         sets += ["cover_letter_path = NULL", "cover_letter_at = NULL", "cover_attempts = 0"]
