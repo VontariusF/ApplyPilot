@@ -564,9 +564,11 @@ def batch_convert(limit: int = 50) -> int:
             break
 
     converted = 0
+    attempted = 0
     if to_convert:
         log.info("Converting %d files to PDF...", len(to_convert))
         for f in to_convert:
+            attempted += 1  # a failed render spends the Chromium budget too
             try:
                 convert_to_pdf(f)
                 converted += 1
@@ -583,8 +585,9 @@ def batch_convert(limit: int = 50) -> int:
     # when nothing needed converting, which is exactly the stale-
     # accounting state that used to busy-loop the pdf stage. The
     # reconciliation's render quota is whatever is left of this call's
-    # limit, so batch_convert never renders more than `limit` PDFs total.
-    settled = _settle_job_pdf_states(convert_budget=limit - converted)
+    # limit, counting failed renders — a poison file must not get a
+    # second Chromium call through the reconciliation pass.
+    settled = _settle_job_pdf_states(convert_budget=limit - attempted)
     if settled:
         log.info("Settled %d job(s) with PDFs already on disk.", settled)
     return converted

@@ -359,5 +359,40 @@ def test_exhausted_rows_not_rerendered(isolated_db, tmp_path, monkeypatch):
     assert pipeline._count_pending("pdf") == 0
 
 
+def test_failed_renders_charge_the_conversion_budget(isolated_db, tmp_path, monkeypatch):
+    """batch_convert(limit=N) must not invoke Chromium more than N times.
+
+    A failed render still spends the budget: pre-fix, the failed main-loop
+    render left the reconciliation's full quota intact and it re-rendered
+    the same poison file — two Chromium calls and two burned attempts per
+    pass for one file.
+    """
+    tailored = tmp_path / "tailored"
+    tailored.mkdir()
+    txt = tailored / "resume_poison.txt"
+    txt.write_text("Jane Doe\nTITLE\nEngineer\nSUMMARY\npoison", encoding="utf-8")
+    _seed_tailored_job("https://example.com/job-1", str(txt))
+    monkeypatch.setattr(pdf_mod, "TAILORED_DIR", tailored)
+
+    calls = {"n": 0}
+
+    def _always_fails(txt_path):
+        calls["n"] += 1
+        raise RuntimeError("chromium boom")
+
+    monkeypatch.setattr(pdf_mod, "convert_to_pdf", _always_fails)
+
+    assert pdf_mod.batch_convert(limit=1) == 0
+    assert calls["n"] == 1, "one failed render must consume the whole budget"
+    conn = database.get_connection()
+    row = conn.execute(
+        "SELECT pdf_attempts FROM jobs WHERE url = ?",
+        ("https://example.com/job-1",),
+    ).fetchone()
+    assert row["pdf_attempts"] == 1, (
+        "the reconciliation must not re-render and re-burn the same file"
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__])
