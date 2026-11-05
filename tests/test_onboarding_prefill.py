@@ -210,12 +210,12 @@ def test_spent_context_echo_still_strips_gated_claims(portal_client, fake_llm, m
 
 
 def test_guided_answer_keeps_the_resume_in_play(portal_client, fake_llm, monkeypatch):
-    """A guided-answer ack is a pure answer-acknowledgement turn (spec
-    art_ti3XJuNr H3): the pending resume context is never prepended to it
-    — it attaches to the next question-asking turn instead, so one button
-    click can neither hijack the ack onto an unrelated topic nor spend
-    the only copy of the resume. The ack still grounds the agent on the
-    exact question and answer (H1), via an unrecorded directive."""
+    """A guided-answer ack delivers the still-unspent pending resume as
+    grounding only (spec art_ti3XJuNr H1): it can never spend it — ack
+    turns consider no fenced block — and a draftless kickoff leaves pure
+    guided mode no other turn that would re-offer the resume. The ack
+    still grounds the agent on the exact question and answer, via an
+    unrecorded directive."""
     client, _ = portal_client
     monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
     fake_llm.respond("Hello! Tell me about your background.")  # kickoff: no draft
@@ -231,11 +231,11 @@ def test_guided_answer_keeps_the_resume_in_play(portal_client, fake_llm, monkeyp
                 data={"question_id": "full_name", "free_text": "Jane Q. Public"})
     state = onboarding.load_state()
     assert state.answers["full_name"] == "Jane Q. Public"
-    assert "MARKER-RESUME-7788" in state.pending_context  # ack turn: untouched
-    # The provider never saw the resume on the ack turn — and it did get
-    # the grounded directive naming the question and the submitted value.
+    assert "MARKER-RESUME-7788" in state.pending_context  # delivered, not spent
+    # The ack turn re-offered the resume as grounding — and still got the
+    # grounded directive naming the question and the submitted value.
     ack_request = fake_llm.calls[-1]
-    assert not any("MARKER-RESUME-7788" in m["content"] for m in ack_request)
+    assert any("MARKER-RESUME-7788" in m["content"] for m in ack_request)
     assert "What's your full name?" in ack_request[-1]["content"]
     assert "Jane Q. Public" in ack_request[-1]["content"]
 
@@ -296,7 +296,10 @@ def test_kickoff_extraction_never_records_gated_claims(portal_client, fake_llm, 
     assert auth["require_sponsorship"] == ""  # claim stripped
     assert auth["work_permit_type"] == "Citizen"  # not gated: survives
 
-    # The user confirms at the wizard — the recorded answer lands.
+    # The user confirms at the wizard — the recorded answer lands. The
+    # bridged draft leaves experience_years as the current question (the
+    # draft's "6" matches no listed band), so the walk reaches it first.
+    onboarding.record_answer("experience_years", value="3–5")
     onboarding.record_answer("work_authorized", "yes")
     state = onboarding.load_state()
     assert state.answers["work_authorized"] == "yes"
@@ -618,3 +621,19 @@ def test_clear_prefill_rejects_questions_without_a_resume_value(portal_client, f
     state = onboarding.load_state()
     assert state.phase == onboarding.INTERVIEW
     assert state.answers.get("work_authorized") is None
+
+
+def test_salary_bridge_normalizes_currency_formatted_numbers(app_dir):
+    """The salary widget is a number input: an extracted "$120,000" would
+    render blank and then fail to save. The bridge maps a value that is a
+    plain number once currency symbols and separators are removed;
+    anything else ("competitive", "120k") stays unbridged so the wizard
+    asks with its own widget (sweep art_kvtM7h6B)."""
+    def draft(expectation):
+        return {"_applypilot_profile": {"compensation": {"salary_expectation": expectation}}}
+
+    assert onboarding.draft_to_answers(draft("$120,000"), {})["salary_band"] == "120000"
+    assert onboarding.draft_to_answers(draft("£90,000"), {})["salary_band"] == "90000"
+    assert onboarding.draft_to_answers(draft("90000"), {})["salary_band"] == "90000"
+    assert "salary_band" not in onboarding.draft_to_answers(draft("competitive"), {})
+    assert "salary_band" not in onboarding.draft_to_answers(draft("120k"), {})

@@ -465,15 +465,15 @@ def test_guided_ack_reaches_both_backends(app_dir, fake_llm):
     transcript) — the bare choice label in the transcript is not what the
     agent answers from."""
     onboarding.start_interview("llm")
-    onboarding.record_answer("work_authorized", value="yes")
+    onboarding.record_answer("full_name", free_text="Jane Q. Public")
     request = fake_llm.calls[-1]
     directive = request[-1]
     assert directive["role"] == "user"
     assert directive["content"] == onboarding.answer_ack_prompt(
-        onboarding.QUESTIONS["work_authorized"], "Yes")
+        onboarding.QUESTIONS["full_name"], "Jane Q. Public")
     assert "What's your highest" not in directive["content"]  # no other question
     # The transcript still records only what the user sees.
-    assert any(m["role"] == "user" and m["content"] == "Yes" for m in request)
+    assert any(m["role"] == "user" and m["content"] == "Jane Q. Public" for m in request)
 
 
 def test_claude_backend_ack_carries_the_question(
@@ -484,10 +484,10 @@ def test_claude_backend_ack_carries_the_question(
     monkeypatch.setenv("FAKE_CLAUDE_LOG", str(prompt_log))
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "wizard")
     onboarding.start_interview("claude")
-    onboarding.record_answer("work_authorized", value="yes")
+    onboarding.record_answer("full_name", free_text="Jane Q. Public")
     turns = [json.loads(line) for line in prompt_log.read_text().splitlines()]
     assert onboarding.answer_ack_prompt(
-        onboarding.QUESTIONS["work_authorized"], "Yes") in turns[1]["prompt"]
+        onboarding.QUESTIONS["full_name"], "Jane Q. Public") in turns[1]["prompt"]
     assert turns[1]["resume"] == "fake-session-1"  # session continuity held
 
 
@@ -499,7 +499,7 @@ def test_claude_backend_session_opening_carries_the_system_prompt(
     monkeypatch.setenv("FAKE_CLAUDE_LOG", str(prompt_log))
     monkeypatch.setenv("FAKE_CLAUDE_MODE", "wizard")
     onboarding.start_interview("claude")
-    onboarding.record_answer("work_authorized", value="yes")
+    onboarding.record_answer("full_name", free_text="Jane Q. Public")
     turns = [json.loads(line) for line in prompt_log.read_text().splitlines()]
     assert onboarding.SYSTEM_PROMPT in turns[0]["prompt"]
     assert onboarding.SYSTEM_PROMPT not in turns[1]["prompt"]
@@ -507,23 +507,24 @@ def test_claude_backend_session_opening_carries_the_system_prompt(
 
 def test_ack_turn_never_spends_the_pending_resume(app_dir, fake_llm):
     """H3: pending_context is consumed exactly once, on the
-    question-asking turn that first follows the upload — an answer
-    acknowledgement neither delivers it nor spends it."""
+    question-asking turn that first follows the upload. A draftless turn
+    retains it; an answer ack still delivers it as grounding (a draftless
+    kickoff leaves pure guided mode no other turn that re-offers the
+    resume) but never spends it — ack turns extract nothing."""
     onboarding.start_interview("llm")
     onboarding.add_resume(text="MARKER-RESUME-7788")
     # First turn after the upload: the resume rides the request...
     onboarding.send_message("I also like hiking")  # draftless: retained
     assert "MARKER-RESUME-7788" in onboarding.load_state().pending_context
     assert any("MARKER-RESUME-7788" in m["content"] for m in fake_llm.calls[-1])
-    # ...an answer ack is not such a turn: no delivery, no spend.
-    onboarding.record_answer("work_authorized", value="yes")
+    # ...an answer ack re-delivers it as grounding, but does not spend it.
+    onboarding.record_answer("full_name", free_text="Jane Q. Public")
     state = onboarding.load_state()
     assert "MARKER-RESUME-7788" in state.pending_context
-    assert not any("MARKER-RESUME-7788" in m["content"] for m in fake_llm.calls[-1])
+    assert any("MARKER-RESUME-7788" in m["content"] for m in fake_llm.calls[-1])
     # ...and the next question-asking turn delivers it exactly once: this
     # one extracts a draft, so the spend sticks.
-    fake_llm.replies = ["Hello from the provider.", "Hello from the provider.",
-                        _draft_reply()]
+    fake_llm.replies = ["Hello from the provider."] * 3 + [_draft_reply()]
     onboarding.send_message("that's everything")
     assert onboarding.load_state().pending_context == ""
     assert any("MARKER-RESUME-7788" in m["content"] for m in fake_llm.calls[-1])
@@ -559,3 +560,127 @@ def test_redo_clears_state_and_restarts(app_dir, fake_claude, signed_in):
     assert state.backend == "claude"
     assert state.claude_session_id == "fake-session-1"  # fresh kickoff ran
     assert config.PROFILE_PATH.read_text() == profile_before  # profile untouched
+
+
+# ---------------------------------------------------------------------------
+# State integrity: band grounding, draft merge, ack stripping, redo guard
+
+
+RICH_DRAFT = {
+    "personal": {"email": "resume@example.com"},
+    "experience": {"current_title": "Staff Engineer", "years_of_experience_total": "6"},
+    "resume_facts": {"preserved_companies": ["Acme Corp"], "real_metrics": ["cut latency 40%"]},
+    "skills_boundary": {"programming_languages": ["Python", "Go"]},
+}
+
+
+def test_record_answer_validates_against_the_rendered_bands(app_dir, fake_llm):
+    """The wizard renders salary bands from the effective answer set
+    (recorded answers over the bridged draft); record_answer and its ack
+    must validate against the same resolved choices. With experience
+    bridged from the resume instead of recorded, the recorded-only map
+    derives a mid-level band table and rejected three of the four
+    rendered buttons (sweep art_kvtM7h6B)."""
+    onboarding.save_state(onboarding.InterviewState(
+        phase=onboarding.INTERVIEW, backend="llm",
+        answers={"full_name": "Jane Q. Public", "education": "Master's",
+                 "work_style": "remote", "country": "United States",
+                 "work_authorized": "yes", "sponsorship": "no",
+                 "permit_type": "Citizen", "currency": "GBP",
+                 "start_date": "Immediately", "target_roles": "Data Engineer"},
+        profile_draft={"experience": {"years_of_experience_total": "6–10"}}))
+    state = onboarding.load_state()
+    rendered = onboarding.resolved_choices(
+        onboarding.QUESTIONS["salary_band"], onboarding.effective_answers(state))
+    assert [c.value for c in rendered] == ["70000", "90000", "110000", "140000"]
+
+    # The button the user clicked records, and the ack names the bands the
+    # surface showed — not the mid-level table the recorded-only map derived.
+    onboarding.record_answer("salary_band", value="110000")
+    ack = fake_llm.calls[-1][-1]["content"]
+    assert "£110k – £140k" in ack
+    assert "£40k – £55k" not in ack
+    assert onboarding.load_state().answers["salary_band"] == "110000"
+
+
+def test_later_sparse_fenced_block_fills_without_erasing(app_dir, fake_llm):
+    """A later fenced-JSON reply merges into the draft the interview
+    holds: new values fill empty fields, never erase extracted ones.
+    The resume's extraction is not re-derivable once the pending context
+    is spent, so a sparser echo (or an injected block) used to wipe the
+    draft wholesale — and with it the point of the resume-first flow
+    (sweep art_kvtM7h6B)."""
+    onboarding.save_state(onboarding.InterviewState(
+        phase=onboarding.INTERVIEW, backend="llm", profile_draft=RICH_DRAFT))
+    fake_llm.replies = [
+        'Sure.\n```json\n{"_applypilot_profile": '
+        '{"compensation": {"salary_expectation": "90000"}}}\n```']
+
+    onboarding.send_message("set my salary to 90000")
+    state = onboarding.load_state()
+    draft = state.profile_draft
+    assert draft["personal"]["email"] == "resume@example.com"  # kept
+    assert draft["experience"]["current_title"] == "Staff Engineer"  # kept
+    assert draft["resume_facts"]["preserved_companies"] == ["Acme Corp"]  # kept
+    assert draft["skills_boundary"]["programming_languages"] == ["Python", "Go"]  # kept
+    assert draft["compensation"]["salary_expectation"] == "90000"  # filled
+    assert state.phase == onboarding.REVIEW  # a chat turn still finishes the flow
+
+
+def test_ack_turn_ignores_fenced_blocks(app_dir, fake_llm):
+    """Acknowledgement turns extract nothing: their prompt asks for a
+    two-sentence ack and carries the user's free text verbatim, so a
+    fenced block there is an unprompted — or injected — regeneration
+    (sweep art_kvtM7h6B). The reply stays in the transcript as seen; it
+    just may not touch the draft. The pending resume context survives an
+    ack turn too, staying in play for a document-informed one."""
+    onboarding.save_state(onboarding.InterviewState(
+        phase=onboarding.INTERVIEW, backend="llm",
+        answers={"full_name": "Jane Q. Public"},
+        profile_draft=RICH_DRAFT,
+        pending_context="RESUME TEXT: ..."))
+    fake_llm.replies = [
+        'Noted.\n```json\n{"_applypilot_profile": '
+        '{"compensation": {"salary_expectation": "95000"}}}\n```']
+
+    onboarding.record_answer("education", value="Master's")
+    state = onboarding.load_state()
+    draft = state.profile_draft
+    assert draft["experience"]["current_title"] == "Staff Engineer"  # untouched
+    assert not draft.get("compensation", {}).get("salary_expectation")  # nothing fabricated
+    assert state.phase == onboarding.INTERVIEW  # no review jump either
+    assert state.pending_context == "RESUME TEXT: ..."  # context unspent
+    assert any(m["role"] == "assistant" and "```json" in m["content"]
+               for m in state.messages)  # the transcript keeps the reply as seen
+
+
+def test_parse_claude_turn_survives_braces_inside_strings():
+    """A result echoing a brace (resume text, chat JSON) desynced the
+    brace scan and demoted the whole envelope to raw text. The complete
+    stdout is parsed as JSON first, and the banner fallback tracks string
+    state while scanning (sweep art_W1q8u5XY)."""
+    envelope = json.dumps({"type": "result", "result": "echo } done",
+                           "session_id": "s-9", "is_error": False})
+    assert onboarding.parse_claude_turn(envelope) == ("echo } done", "s-9", False)
+
+    bannered = "booting claude…\n" + envelope
+    assert onboarding.parse_claude_turn(bannered) == ("echo } done", "s-9", False)
+
+    raw = "claude: internal error (no envelope)"
+    assert onboarding.parse_claude_turn(raw) == (raw, None, False)
+
+
+def test_redo_refuses_to_wipe_state_without_a_backend(app_dir, monkeypatch):
+    """redo_interview checks readiness BEFORE clearing (sweep
+    art_W1q8u5XY): with the Claude account signed out and no provider
+    configured, starting over used to wipe the store and then fail — an
+    error over an empty interview with no path forward."""
+    monkeypatch.setattr(engine_auth, "claude_status", lambda *a, **k: SIGNED_OUT)
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: False)
+    onboarding.save_state(onboarding.InterviewState(
+        phase=onboarding.INTERVIEW, backend="claude"))
+
+    with pytest.raises(onboarding.OnboardingError):
+        onboarding.redo_interview()
+    assert onboarding.load_state() is not None  # the state survived
+    assert onboarding.load_state().phase == onboarding.INTERVIEW

@@ -306,15 +306,18 @@ def test_legacy_mid_interview_store_still_completes(portal_client, fake_llm, mon
     monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
     _start(client)
 
-    # The old order asked the gating pair and preferences before identity.
+    # The old order asked the gating pair and preferences before identity:
+    # those answers were recorded when the questions were current under
+    # the legacy registry, so seed them directly (the service now guards
+    # the current question — the point is that remaining_questions is
+    # computed, never persisted).
     legacy_ids = ["work_authorized", "sponsorship", "permit_type", "work_style",
                   "currency", "salary_band", "start_date", "education", "experience_years"]
+    state = onboarding.load_state()
     for qid in legacy_ids:
         raw = FULL_WALK[qid]
-        if raw.startswith("free:"):
-            _answer(client, qid, free=raw[5:])
-        else:
-            _answer(client, qid, value=raw)
+        state.answers[qid] = raw[5:] if raw.startswith("free:") else raw
+    onboarding.save_state(state)
 
     # The reorder resequences only what's left: identity, then country.
     rendered = _walk(client, FULL_WALK)
@@ -328,15 +331,22 @@ def test_free_text_kinds_route_correctly(portal_client, fake_llm, monkeypatch):
     client, _ = portal_client
     monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
     _start(client)
+    _answer(client, "full_name", free="Test Person")
+    _answer(client, "education", value="Bachelor's")  # walk to the first choices-only question
 
     # A choices-only question refuses free text; nothing is recorded.
-    page = _answer(client, "work_authorized", free="I think so, yes")
+    page = _answer(client, "experience_years", free="I think so, yes")
     assert "takes one of the listed choices" in page
-    assert onboarding.load_state().answers == {}
+    assert onboarding.load_state().answers == {"full_name": "Test Person", "education": "Bachelor's"}
 
+    # The rest, in registry order (a partial _walk would skip the tail).
+    _answer(client, "experience_years", value="3–5")
+    _answer(client, "work_style", value="remote")
+    _answer(client, "country", value="United States")
     _answer(client, "work_authorized", value="yes")
     _answer(client, "sponsorship", value="no")
     _answer(client, "permit_type", free="EAD holder, awaiting green card")
+    _answer(client, "currency", value="USD")
     _answer(client, "salary_band", free="133000")
     _answer(client, "start_date", free="2027-03-01")
     _answer(client, "target_roles", free="Data Engineer\nAnalytics Engineer")
@@ -434,8 +444,11 @@ def test_agent_json_cannot_override_recorded_answers(app_dir, fake_claude, monke
     the recorded answers say no / not sure — the answers stay authoritative."""
     patch_gates(monkeypatch)
     onboarding.start_interview("claude")
-    onboarding.record_answer("work_authorized", value="no")
-    onboarding.record_answer("sponsorship", value="not_sure")
+    # Seed the recorded answers directly: the point is the authority of
+    # already-recorded answers over a later fenced block, not the route.
+    state = onboarding.load_state()
+    state.answers.update({"work_authorized": "no", "sponsorship": "not_sure"})
+    onboarding.save_state(state)
     onboarding.send_message("AGENT_JSON_FALLBACK please complete my profile")
     state = onboarding.load_state()
     assert state.phase == onboarding.REVIEW  # the agent's block completed the draft
@@ -462,12 +475,12 @@ def test_record_answer_requires_an_active_interview_and_a_listed_choice(app_dir,
 def test_answers_and_mode_persist_in_onboarding_state(app_dir, fake_llm, monkeypatch):
     monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
     onboarding.start_interview("llm")
-    onboarding.record_answer("work_authorized", value="yes")
+    onboarding.record_answer("full_name", free_text="Jane Q. Public")
     persisted = json.loads(config.ONBOARDING_STATE_PATH.read_text(encoding="utf-8"))
-    assert persisted["answers"] == {"work_authorized": "yes"}
+    assert persisted["answers"] == {"full_name": "Jane Q. Public"}
     assert persisted["mode"] == onboarding.MODE_CHOICES
     reloaded = onboarding.load_state()
-    assert reloaded.answers == {"work_authorized": "yes"}
+    assert reloaded.answers == {"full_name": "Jane Q. Public"}
     assert reloaded.mode == onboarding.MODE_CHOICES
 
 
@@ -479,7 +492,7 @@ def test_agent_mode_hands_the_agenda_back_and_resumes(portal_client, fake_llm, m
     client, _ = portal_client
     monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
     _start(client)
-    _answer(client, "work_authorized", value="yes")
+    _answer(client, "full_name", free="Jane Q. Public")
 
     page = client.post("/onboarding/agent-mode", data={"enabled": "1"})
     assert page.status_code == 200
@@ -492,16 +505,16 @@ def test_agent_mode_hands_the_agenda_back_and_resumes(portal_client, fake_llm, m
     page = client.post("/onboarding/send", data={"text": "I have a Master's degree"})
     assert page.status_code == 200
     state = onboarding.load_state()
-    assert state.answers == {"work_authorized": "yes"}
+    assert state.answers == {"full_name": "Jane Q. Public"}
     assert any(m["role"] == "user" and m["content"] == "I have a Master's degree" for m in state.messages)
 
     # Back to buttons: the agenda resumes at the NEXT unanswered question
-    # (identity first under the reordered registry).
+    # (education first — full_name is already answered).
     page = client.post("/onboarding/agent-mode", data={"enabled": "0"})
     assert page.status_code == 200
     state = onboarding.load_state()
     assert state.mode == onboarding.MODE_CHOICES
-    assert _qid(page.text) == "full_name"
+    assert _qid(page.text) == "education"
 
 
 def test_agent_mode_directive_reaches_backends_but_not_the_transcript(app_dir, fake_llm, monkeypatch):
@@ -713,7 +726,7 @@ def test_state_version_stamps_every_render(portal_client, fake_llm, monkeypatch)
     page = client.get("/onboarding/chat").text
     assert f'data-chat-seq="{first.seq}"' in page
 
-    _answer(client, "work_authorized", value="yes")
+    _answer(client, "full_name", free="Jane Q. Public")
     second = onboarding.load_state()
     assert second.seq > first.seq  # every save bumps
     page = client.get("/onboarding/chat").text
@@ -834,3 +847,139 @@ def test_review_cleared_answer_stays_empty_through_confirm(portal_client, fake_l
     client.post("/onboarding/confirm")
     profile = json.loads(config.PROFILE_PATH.read_text())
     assert profile["work_authorization"]["legally_authorized_to_work"] == ""
+
+
+# ---------------------------------------------------------------------------
+# State integrity: review clears, the agent-led dead end, answer guards
+
+
+def test_review_clearing_a_bridged_answer_removes_the_draft_value(app_dir):
+    """Clearing a non-gated answer at review removes the draft's value at
+    the source — the same semantics clear_prefill applies mid-walk. The
+    overlay intentionally skips empty non-gated answers (a skipped field
+    stays open for the agent to fill), so a bare empty answer would let
+    the resume's extraction resurrect on the re-normalize: the review
+    screen renders the field empty while profile.json ships the value the
+    user deleted. Regression for the P1 in sweep art_W1q8u5XY."""
+    onboarding.save_state(onboarding.InterviewState(
+        phase=onboarding.REVIEW, backend="llm",
+        profile_draft={"personal": {"email": "resume@example.com"},
+                       "_applypilot_search": {"remote": True}}))
+
+    onboarding.update_answers({"email": "", "work_style": ""})
+    state = onboarding.load_state()
+    assert state.answers == {"email": "", "work_style": ""}
+    assert state.profile_draft["personal"]["email"] == ""  # cleared, not resurrected
+    assert state.profile_draft["_applypilot_search"]["remote"] is False
+
+    onboarding.confirm_profile()
+    profile = json.loads(config.PROFILE_PATH.read_text())
+    assert profile["personal"]["email"] == ""
+    # The cleared remote flag lands in searches.yaml as a non-zero radius.
+    assert "distance: 0" not in config.SEARCH_CONFIG_PATH.read_text()
+
+
+def test_returning_to_guided_mode_with_an_empty_agenda_lands_on_review(app_dir, fake_llm, monkeypatch):
+    """The agenda-complete dead end (sweep art_W1q8u5XY): keep editing
+    returns to INTERVIEW with every question answered, and the surface
+    renders by `question is None` — it shows the agent-led composer whose
+    only button ("Back to guided questions") no-ops on the already-guided
+    mode. That switch is the exit: with nothing left to ask, the
+    agenda-complete transition record_answer runs on its last answer
+    fires here too, and the flow completes through confirm."""
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    onboarding.start_interview("llm")
+    for qid, raw in FULL_WALK.items():
+        if raw is None:
+            onboarding.record_answer(qid, skip=True)
+        elif raw.startswith("free:"):
+            onboarding.record_answer(qid, free_text=raw[5:])
+        else:
+            onboarding.record_answer(qid, value=raw)
+    assert onboarding.load_state().phase == onboarding.REVIEW
+
+    # Dead-end state: answers complete, phase INTERVIEW, mode already guided.
+    onboarding.keep_editing()
+    state = onboarding.load_state()
+    assert state.phase == onboarding.INTERVIEW
+    assert onboarding.remaining_questions(state) == []
+    onboarding.set_agent_led(False)  # the surface's only button: idempotent branch
+    assert onboarding.load_state().phase == onboarding.REVIEW
+
+    # Same state with the mode left on agent-led: the flip branch.
+    onboarding.keep_editing()
+    onboarding.set_agent_led(True)
+    state = onboarding.load_state()
+    assert state.mode == onboarding.MODE_AGENT
+    assert state.phase == onboarding.INTERVIEW
+    onboarding.set_agent_led(False)  # the flip: empty agenda -> review
+    assert onboarding.load_state().phase == onboarding.REVIEW
+    onboarding.confirm_profile()  # the flow completes
+
+
+def test_record_answer_guards_order_and_duplicate_submits(app_dir, fake_llm, monkeypatch):
+    """The registry's gates hold at the service layer too, not just the UI:
+    only the question the wizard is showing records (or one the extraction
+    prefilled — the chip editor), so a stale tab or a crafted POST cannot
+    answer the work-auth pair before the country that gates it. A repeat
+    of an already-recorded answer is an idempotent no-op (sweep
+    art_W1q8u5XY: the double-click guard is client-side only)."""
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    onboarding.start_interview("llm")
+    # The gating case: the work-auth pair cannot be answered while the
+    # country that gates it is still open.
+    with pytest.raises(onboarding.OnboardingError):
+        onboarding.record_answer("work_authorized", value="yes")
+    # Out-of-order: the walk's question order is enforced.
+    with pytest.raises(onboarding.OnboardingError):
+        onboarding.record_answer("country", value="United States")
+    assert onboarding.load_state().answers == {}
+
+    onboarding.record_answer("full_name", free_text="Jane Q. Public")
+    # Same question + same value: idempotent success, nothing re-records.
+    state = onboarding.record_answer("full_name", free_text="Jane Q. Public")
+    assert state.answers == {"full_name": "Jane Q. Public"}
+    # Same question + a different value is not a no-op: recorded answers
+    # change on the review screen, not by re-asking the wizard.
+    with pytest.raises(onboarding.OnboardingError):
+        onboarding.record_answer("full_name", free_text="Different Name")
+
+    # A prefilled question records from the chip editor even though it is
+    # not the current one (the bridge skips it, so it is never asked).
+    onboarding.save_state(onboarding.InterviewState(
+        phase=onboarding.INTERVIEW, backend="llm",
+        answers={"full_name": "Jane Q. Public"},
+        profile_draft={"_applypilot_profile": {"personal": {"email": "resume@example.com"}}}))
+    state = onboarding.record_answer("email", free_text="resume@example.com")
+    assert state.answers["email"] == "resume@example.com"
+
+
+def test_double_submit_of_the_final_answer_is_idempotent(portal_client, fake_llm, monkeypatch):
+    """A double-POST around agenda completion: the second request lands on
+    the REVIEW phase with the same recorded value and succeeds as a no-op
+    — it used to render the error banner "the interview is not active"
+    even though the first request recorded the answer fine."""
+    client, _ = portal_client
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    _start(client)
+    # Answer everything but the last question (service level); the route
+    # POSTs the final skip twice.
+    for qid, raw in FULL_WALK.items():
+        if qid == "portfolio_url":
+            continue
+        if raw is None:
+            onboarding.record_answer(qid, skip=True)
+        elif raw.startswith("free:"):
+            onboarding.record_answer(qid, free_text=raw[5:])
+        else:
+            onboarding.record_answer(qid, value=raw)
+    assert onboarding.load_state().phase == onboarding.INTERVIEW
+
+    page = client.post("/onboarding/answer", data={"question_id": "portfolio_url", "skip": "1"})
+    assert page.status_code == 200
+    assert onboarding.load_state().phase == onboarding.REVIEW
+
+    page = client.post("/onboarding/answer", data={"question_id": "portfolio_url", "skip": "1"})
+    assert page.status_code == 200
+    assert "the interview is not active" not in page.text
+    assert onboarding.load_state().phase == onboarding.REVIEW
