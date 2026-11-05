@@ -18,7 +18,10 @@ pytestmark = pytest.mark.e2e
 
 # Per-question plan. Choices answer by the hidden value the button
 # submits; "free:" entries are typed into the per-kind widget; None
-# entries are skipped (their review chips are the point).
+# entries are skipped (their review chips are the point); "last-choice:"
+# entries click the final rendered choice button — for questions whose
+# choices derive at runtime (salary bands follow the captured currency
+# and experience level), so no literal here can rot when they re-derive.
 WALK = {
     "full_name": "free:Test Person",
     "education": "Bachelor's",
@@ -29,7 +32,7 @@ WALK = {
     "sponsorship": "no",
     "permit_type": "Citizen",
     "currency": "USD",
-    "salary_band": "120000",
+    "salary_band": "last-choice:",  # the open-ended top band, whatever the floors are
     "start_date": "Immediately",
     "target_roles": "free:Data Engineer\nAnalytics Engineer",
     "location": "free:Austin, TX",
@@ -72,6 +75,13 @@ async def _answer_current(page, plan):
         # The typed path: the per-kind widget inside the question card.
         await card.locator("input[name='free_text'], textarea[name='free_text']").fill(step[5:])
         await card.locator("button:has-text('Save answer')").click()
+    elif isinstance(step, str) and step.startswith("last-choice:"):
+        # Derived-choice questions (salary bands follow the captured
+        # currency and experience level): click the LAST rendered choice —
+        # the open-ended top band. PR #44 re-derived the floors and the
+        # old hardcoded value clicked nothing; deriving from the rendered
+        # buttons cannot rot the same way.
+        await card.locator(".choice-grid form button").last.click()
     else:
         # The button path: click the choice whose hidden value matches.
         # Value in double quotes: labels like Bachelor's survive.
