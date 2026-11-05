@@ -93,12 +93,17 @@ def portal_server(portal_env, seeded_profile, fake_llm, monkeypatch):
 
 @pytest.fixture()
 def harmless_runs(monkeypatch):
-    """Presets spawn real subprocesses that exit immediately (no stage work).
+    """Presets spawn real subprocesses that outlive a Start click but do no
+    stage work.
 
     The route-level pattern (tests/test_portal_pages.py) applied to the
     serving app: the registry row, streaming, and lifecycle stay real —
-    only the child is swapped for `python -c "pass"`, so a Start click in
-    the browser can never run discovery or apply stages.
+    only the child is swapped for `python -c "import time; time.sleep(3)"`,
+    so a Start click in the browser can never run discovery or apply
+    stages. The child must outlive the click's render, though: a child
+    that exits instantly (`pass`) lets the runner flip the card back to
+    idle within one 50ms poll — before the browser's wait for the Stop
+    button observes the running state — a race that flakes under load.
     """
     import sys
 
@@ -107,7 +112,9 @@ def harmless_runs(monkeypatch):
     original = runner.start_run
 
     def fake_start(kind, params, command=None, emit_jsonl=None):
-        return original(kind, params, command=[sys.executable, "-c", "pass"],
+        return original(kind, params,
+                        command=[sys.executable, "-c",
+                                 "import time; time.sleep(3)"],
                         emit_jsonl=False)
 
     monkeypatch.setattr(runner, "start_run", fake_start)
