@@ -313,6 +313,9 @@ def test_agent_led_switch_never_records_gated_claims(portal_client, fake_llm, mo
 
     fake_llm.respond(DRAFT_REPLY)  # the switch turn echoes the resume
     onboarding.set_agent_led(True)
+    sent = fake_llm.calls[-1]
+    assert sent[0]["role"] == "system"  # stays first
+    assert sent[1]["role"] == "user" and "MARKER-RESUME-7788" in sent[1]["content"]
     state = onboarding.load_state()
     assert state.mode == onboarding.MODE_AGENT
     assert state.phase == onboarding.INTERVIEW  # the agenda is not the agent's to finish
@@ -320,7 +323,29 @@ def test_agent_led_switch_never_records_gated_claims(portal_client, fake_llm, mo
     assert auth["legally_authorized_to_work"] == ""  # claim stripped
     assert auth["require_sponsorship"] == ""  # claim stripped
     assert auth["work_permit_type"] == "Citizen"  # not gated: survives
-    assert state.pending_context == ""  # spent: the extraction landed
+    assert state.pending_context == ""  # spent: the extraction consumed the supplied resume
+
+
+def test_agent_led_switch_without_a_draft_keeps_the_resume(portal_client, fake_llm, monkeypatch):
+    """Without a draft, the switch turn consumed nothing: the pending
+    resume context survives for the agent-led turns that follow —
+    spending it on a directive-only turn would permanently lose the
+    only copy of the resume (Codex P2 on ece4654)."""
+    client, _ = portal_client
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    fake_llm.respond("Hello! Tell me about your background.")  # draftless kickoff
+
+    onboarding.start_intake()
+    client.post("/onboarding/resume", data={"resume_text": "MARKER-RESUME-7788"})
+    client.post("/onboarding/start", data={"mode": "llm"})
+
+    fake_llm.respond("Got it — ask me anything.")
+    onboarding.set_agent_led(True)
+    state = onboarding.load_state()
+    assert state.mode == onboarding.MODE_AGENT
+    assert state.phase == onboarding.INTERVIEW
+    assert state.profile_draft in (None, {})  # nothing was extracted
+    assert state.pending_context  # the resume stays in play
 
 
 def test_resume_context_rides_after_the_system_message(portal_client, fake_llm, monkeypatch):

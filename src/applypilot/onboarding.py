@@ -1514,8 +1514,17 @@ def set_agent_led(enabled: bool) -> InterviewState:
             directive = _AGENT_LED_DIRECTIVE.format(fields=remaining or "anything the profile still needs")
         else:
             directive = _BACK_TO_CHOICES_DIRECTIVE
+        # The pending resume rides along (context_for_provider): the
+        # transcript only carries the upload's filename/size note, so
+        # without it the provider could emit a fenced draft from the
+        # directive alone — and clearing the context then would
+        # permanently lose the only copy of the resume (Codex P2 on
+        # ece4654). With the context supplied, a consuming draft has
+        # actually earned the spend.
+        context = state.pending_context
         try:
-            reply = _agent_turn(state, directive, directive, directive=directive)
+            reply = _agent_turn(state, directive, directive, directive=directive,
+                                context_for_provider=context)
         except RuntimeError as exc:
             state.error = str(exc)
             save_state(state)
@@ -1523,14 +1532,12 @@ def set_agent_led(enabled: bool) -> InterviewState:
         state.messages.append({"role": _ROLE_ASSISTANT, "content": reply})
         # The switch turn is directive-driven — any draft it emits
         # paraphrases the agenda, never the user's own words, so it
-        # finishes like the kickoff (allow_review=False). With pending
-        # resume context still in play (a draftless kickoff left the
-        # resume with the resumed session), the draft is also
-        # document-informed: its gated claims are stripped
-        # (_strip_gated_claims) and the agenda is kept for the bridge
-        # instead of jumping to review (Codex P1 on 31060ea). The
-        # context is spent only when a draft consumed it.
-        if _after_reply(state, reply, allow_review=False) and state.pending_context:
+        # finishes like the kickoff (allow_review=False). When the
+        # draftless kickoff left pending resume context in play, the
+        # draft is also document-informed: its gated claims are
+        # stripped (_strip_gated_claims) and the agenda is kept for the
+        # bridge instead of jumping to review (Codex P1 on 31060ea).
+        if _after_reply(state, reply, allow_review=False) and context:
             state.pending_context = ""
         save_state(state)
         return state
