@@ -491,6 +491,20 @@ def test_claude_backend_ack_carries_the_question(
     assert turns[1]["resume"] == "fake-session-1"  # session continuity held
 
 
+def test_claude_backend_session_opening_carries_the_system_prompt(
+        app_dir, fake_claude, signed_in, monkeypatch, tmp_path):
+    """H2: print mode has no system-role channel — the shared SYSTEM_PROMPT
+    rides the session-opening prompt and does not repeat on resumed turns."""
+    prompt_log = tmp_path / "prompts.log"
+    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(prompt_log))
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "wizard")
+    onboarding.start_interview("claude")
+    onboarding.record_answer("work_authorized", value="yes")
+    turns = [json.loads(line) for line in prompt_log.read_text().splitlines()]
+    assert onboarding.SYSTEM_PROMPT in turns[0]["prompt"]
+    assert onboarding.SYSTEM_PROMPT not in turns[1]["prompt"]
+
+
 # ---------------------------------------------------------------------------
 # Review phase transitions
 # ---------------------------------------------------------------------------

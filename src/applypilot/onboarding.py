@@ -557,11 +557,24 @@ class ClaudePrintBackend:
 
     name = "claude"
 
+    @staticmethod
+    def _with_system_prompt(text: str, resume: bool) -> str:
+        """Shared prompt entry point for both backends (spec art_ti3XJuNr):
+        a session-opening `claude -p` turn carries the same SYSTEM_PROMPT
+        the provider backend sends as its system role — print mode has no
+        system-role channel, so it rides the first prompt; a resumed
+        session already carries it from turn 1."""
+        if resume:
+            return text
+        return f"{SYSTEM_PROMPT}\n\n---\n\n{text}"
+
     def kickoff(self, state: InterviewState, prompt: str | None = None) -> str:
-        return self._run(state, prompt or KICKOFF_PROMPT, resume=False)
+        return self._run(state, self._with_system_prompt(prompt or KICKOFF_PROMPT, resume=False),
+                         resume=False)
 
     def send(self, state: InterviewState, user_text: str) -> str:
-        return self._run(state, user_text, resume=state.claude_session_id is not None)
+        resume = state.claude_session_id is not None
+        return self._run(state, self._with_system_prompt(user_text, resume), resume=resume)
 
     def _run(self, state: InterviewState, prompt: str, resume: bool) -> str:
         binary = _claude_binary()
