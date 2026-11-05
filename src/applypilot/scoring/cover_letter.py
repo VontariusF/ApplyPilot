@@ -19,7 +19,7 @@ from applypilot.database import (
     next_document_version,
     record_document_version,
 )
-from applypilot.llm import get_client
+from applypilot.llm import get_client, is_infra_error
 from applypilot.scoring import docs
 from applypilot.scoring.validator import (
     BANNED_WORDS,
@@ -309,12 +309,20 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
             result = {
                 "url": job["url"], "title": job["title"], "site": job["site"],
                 "path": None, "pdf_path": None, "error": str(e), "version_id": None,
+                # P1-1: infra failures (provider down/timeout/5xx) must not
+                # burn the job's attempt budget — classified here, exempted
+                # in the persist loop below.
+                "error_class": "infra" if is_infra_error(e) else "content",
             }
             error_count += 1
             results.append(result)
             log.error("%d/%d [ERROR] %s -- %s", completed, len(jobs), (job.get("title") or "untitled")[:40], e)
 
-    # Persist to DB: increment attempt counter for ALL, save path only for successes
+    # Persist to DB: increment attempt counter for content-level failures,
+    # save path only for successes. P1-1: infra-classified errors (provider
+    # down, timed out, 5xx) do not burn the attempt budget — the job stays
+    # fully retryable when the provider recovers, instead of one outage
+    # exhausting every queued job's attempts.
     now = datetime.now(timezone.utc).isoformat()
     saved = 0
     for r in results:
@@ -325,6 +333,8 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
                 (r["path"], now, r["url"]),
             )
             saved += 1
+        elif r.get("error_class") == "infra":
+            continue  # provider-down: stay fully retryable, no attempt burned
         else:
             conn.execute(
                 "UPDATE jobs SET cover_attempts=COALESCE(cover_attempts,0)+1 WHERE url=?",

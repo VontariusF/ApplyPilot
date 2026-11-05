@@ -178,6 +178,16 @@ def _ai_checks() -> list[Check]:
                 f"{detail}",
                 Fix("Open provider settings", "/settings"),
             )
+        elif probe_state == "slow":
+            # Slow is not down: the endpoint outlasted the probe's bounds
+            # but real runs allow more (reliability sweep P2-6). A FAIL
+            # here would contradict runs that succeed against the same
+            # endpoint.
+            provider = Check(
+                "provider", "AI provider", WARN,
+                f"{detail}",
+                Fix("Open provider settings", "/settings"),
+            )
         else:
             provider = Check(
                 "provider", "AI provider", FAIL,

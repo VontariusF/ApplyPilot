@@ -713,6 +713,21 @@ def count_apply_eligible(min_score: int = 7) -> int:
     return row[0]
 
 
+def job_apply_in_progress(url: str) -> bool:
+    """True when an apply run currently holds this job's lock (P2-4).
+
+    One predicate for every route that would mutate or delete documents an
+    active apply run is using (apply-now, regenerate, tailor-now): the
+    worker's lock is `apply_status = 'in_progress'` until mark_result
+    records its outcome.
+    """
+    conn = get_connection()
+    return conn.execute(
+        "SELECT 1 FROM jobs WHERE url = ? AND apply_status = 'in_progress'",
+        (url,),
+    ).fetchone() is not None
+
+
 def set_job_dismissed(conn: sqlite3.Connection | None = None, url: str = "",
                       dismissed: bool = True) -> bool:
     """Dismiss/undismiss a job on the board (spec Jobs panel).

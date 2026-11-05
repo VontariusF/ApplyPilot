@@ -172,6 +172,26 @@ def test_provider_check_warns_when_responses_are_unusable(
     assert checks["provider"].fix == sc.Fix("Open provider settings", "/settings")
 
 
+def test_provider_check_warns_when_provider_is_slow_but_working(
+        app_dir, capable_machine, signed_in_everywhere, monkeypatch):
+    """P2-5: a provider that answers too slowly for the probe but within
+    the run timeout is red-checking the system as broken. A slow verdict
+    warns — naming the mismatch — instead of failing with the
+    mistyped-URL message."""
+    _write_setup(app_dir)
+    detail = ("The provider answered the test request, but too slowly for "
+              "this check (over 5 s, then over 30 s on one retry). Real "
+              "runs allow up to 120 s per request, so the endpoint may "
+              "still work — check the model name in provider settings if "
+              "runs are failing.")
+    monkeypatch.setattr(llm, "probe_provider", lambda: ("slow", detail))
+    checks = {c.id: c for c in sc.run_checks()}
+    assert checks["provider"].state == sc.WARN
+    assert "may still work" in checks["provider"].meaning
+    assert "may be down" not in checks["provider"].meaning
+    assert checks["provider"].fix == sc.Fix("Open provider settings", "/settings")
+
+
 # ---------------------------------------------------------------------------
 # Fix affordances route to the page that can act
 # ---------------------------------------------------------------------------

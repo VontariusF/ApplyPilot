@@ -275,6 +275,12 @@ def create_app() -> FastAPI:
         if not url:
             return PlainTextResponse("invalid regenerate request", status_code=400)
         include_cover = str(form.get("include_cover", "")).strip() in ("1", "on", "true")
+        # P2-4: an active apply run owns this job's documents — resetting
+        # tailoring now would unlink the very PDF that run is about to
+        # upload. Same refusal as /jobs/apply-now.
+        if database.job_apply_in_progress(url):
+            return PlainTextResponse(
+                automation_mod.APPLY_IN_PROGRESS_MESSAGE, status_code=409)
         database.reset_job_tailoring(database.get_connection(), url, include_cover=include_cover)
         return RedirectResponse(f"/jobs/detail?url={quote(url, safe='')}",
                                 status_code=303)
@@ -328,8 +334,7 @@ def create_app() -> FastAPI:
         # in_progress until the worker records its result). Starting another
         # run would exit 'Queue empty' having done nothing — refuse honestly.
         if job.get("apply_status") == "in_progress":
-            message = ("A run is applying to this job right now — the card "
-                       "updates when it finishes.")
+            message = automation_mod.APPLY_IN_PROGRESS_MESSAGE
             if hx:
                 return _render(request, "partials/jobs_board.html",
                                toast_message=message, toast_kind="error",
@@ -508,7 +513,8 @@ def create_app() -> FastAPI:
     @app.get("/runs", response_class=HTMLResponse)
     async def runs_page(request: Request):
         return _render(request, "runs.html", runs=runner.list_runs(),
-                       error=request.query_params.get("error"))
+                       error=request.query_params.get("error"),
+                       scheduler_skip=automation_mod.load()["state"].get("scheduler_skip"))
 
     @app.post("/runs/start")
     async def runs_start(request: Request):

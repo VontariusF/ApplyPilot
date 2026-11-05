@@ -23,6 +23,7 @@ from rich.table import Table
 
 from applypilot.config import load_env, ensure_dirs
 from applypilot.database import init_db, get_connection, get_stats
+from applypilot.scoring.pdf import PDF_MAX_ATTEMPTS
 
 log = logging.getLogger(__name__)
 console = Console()
@@ -175,11 +176,17 @@ def _run_cover(min_score: int = 7, validation_mode: str = "normal",
         return {"status": f"error: {e}"}
 
 
-def _run_pdf() -> dict:
-    """Stage: PDF conversion — convert tailored resumes and cover letters to PDF."""
+def _run_pdf(url: str | None = None) -> dict:
+    """Stage: PDF conversion — convert tailored resumes and cover letters to PDF.
+
+    With `url` (single-job runs), only that job's document converts: a
+    one-job run must not spend its pass rendering up to 50 unrelated
+    pending jobs through Chromium (P3-3).
+    """
     try:
         from applypilot.scoring.pdf import batch_convert
-        batch_convert()
+
+        batch_convert(url=url)
         return {"status": "ok"}
     except Exception as e:
         log.error("PDF conversion failed: %s", e)
@@ -270,7 +277,7 @@ _PENDING_SQL: dict[str, str] = {
         "SELECT COUNT(*) FROM jobs WHERE tailored_resume_path IS NOT NULL "
         "AND tailored_resume_path LIKE '%.txt' "
         "AND pdf_generated_at IS NULL "
-        "AND COALESCE(pdf_attempts, 0) < 5"
+        f"AND COALESCE(pdf_attempts, 0) < {PDF_MAX_ATTEMPTS}"
     ),
 }
 
@@ -321,6 +328,8 @@ def _run_stage_streaming(
         kwargs["min_score"] = min_score
         kwargs["validation_mode"] = validation_mode
         kwargs["url"] = url
+    if stage == "pdf":
+        kwargs["url"] = url
     if stage == "discover":
         kwargs["results_per_site"] = results_per_site
     if stage in ("discover", "enrich"):
@@ -353,8 +362,6 @@ def _run_stage_streaming(
         if pending > 0:
             try:
                 runner(**kwargs)
-                consecutive_errors = 0
-                passes += 1
             except Exception as e:
                 log.error("Stage '%s' error (pass %d): %s", stage, passes, e)
                 passes += 1
@@ -375,6 +382,39 @@ def _run_stage_streaming(
                     })
                     return
             else:
+                # P1-1: the tailor/cover runners convert per-job failures into
+                # per-job error results and return normally — a provider that
+                # fails every request settles nothing while never raising, so
+                # B6 (which counts only raising passes) never fires while the
+                # queue's attempt budget burns at ~1 pass/sec. A pass that
+                # returned without settling anything therefore counts toward
+                # the same consecutive-error cap. Scoped to tailor/cover: the
+                # pdf stage legitimately leaves rows pending between budgeted
+                # passes while its reconciliation catches up.
+                if stage in ("tailor", "cover") and _count_pending(stage, min_score) >= pending:
+                    consecutive_errors += 1
+                    last_error = (
+                        f"pass settled nothing while {pending} job(s) stayed "
+                        "pending — every request may be failing (provider down "
+                        "or misconfigured?)")
+                    log.error(
+                        "Stage '%s' settled nothing (pass %d): %d job(s) still pending",
+                        stage, passes, pending,
+                    )
+                    if consecutive_errors >= _MAX_ERROR_PASSES:
+                        log.error(
+                            "Stage '%s' failed %d consecutive passes: %s",
+                            stage, consecutive_errors, last_error,
+                        )
+                        tracker.mark_done(stage, {
+                            "status": f"error: {last_error}",
+                            "passes": passes,
+                            "consecutive_errors": consecutive_errors,
+                        })
+                        return
+                else:
+                    consecutive_errors = 0
+                passes += 1
                 # Yield the CPU between passes even when work remains, so a
                 # runner that cannot settle its pending count (yet) cannot
                 # busy-loop. Breaking on stop keeps shutdown responsive.
@@ -426,6 +466,8 @@ def _run_sequential(ordered: list[str], min_score: int, workers: int = 1,
             if name in ("tailor", "cover"):
                 kwargs["min_score"] = min_score
                 kwargs["validation_mode"] = validation_mode
+                kwargs["url"] = url
+            if name == "pdf":
                 kwargs["url"] = url
             if name == "discover":
                 kwargs["results_per_site"] = results_per_site

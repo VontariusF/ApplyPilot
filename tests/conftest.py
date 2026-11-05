@@ -23,6 +23,21 @@ import pytest
 os.environ.setdefault("APPLYPILOT_DIR", tempfile.mkdtemp(prefix="applypilot-test-"))
 
 from applypilot import config, database  # noqa: E402  (after the env redirect)
+from applypilot.portal import automation  # noqa: E402  (after the env redirect)
+
+
+@pytest.fixture(autouse=True)
+def _scheduler_probe_reachable(monkeypatch):
+    """Scheduled starts must not make real provider requests in tests.
+
+    run_tick gates every scheduled start on the cached provider probe
+    (P1-1); the default here is a reachable provider so scheduler tests
+    exercise their start paths. Tests of the gate itself re-point
+    automation._provider_probe at the real function (see
+    test_portal_automation._REAL_PROBE_GATE).
+    """
+    monkeypatch.setattr(
+        automation, "_provider_probe", lambda: ("reachable", ""))
 
 
 @pytest.fixture

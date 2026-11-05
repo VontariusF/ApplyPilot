@@ -33,17 +33,25 @@ class ProbeFakeClient:
 
     def __init__(self, *, compat=None, native=None):
         self.api_key = SECRET
-        self.compat = compat
+        # compat may be a single spec or an ordered list consumed one per
+        # probe call (the slow-retry path calls twice: fast bound, slow bound).
+        self.compat = list(compat) if isinstance(compat, list) else [compat]
         self.native = native
         self.native_called = False
         self.timeouts = []
+        self._compat_calls = 0
 
     def _chat_compat(self, messages, temperature=0.0, max_tokens=1,
                      timeout=None):
         assert max_tokens == 1, "probe must request a 1-token completion"
-        assert timeout == llm.PROBE_TIMEOUT_SECONDS, "probe must stay bounded"
+        assert timeout in (llm.PROBE_TIMEOUT_SECONDS,
+                           llm.PROBE_SLOW_RETRY_SECONDS), "probe must stay bounded"
         self.timeouts.append(timeout)
-        return self._run("compat", self.compat)
+        spec = (self.compat[self._compat_calls]
+                if self._compat_calls < len(self.compat)
+                else self.compat[-1])
+        self._compat_calls += 1
+        return self._run("compat", spec)
 
     def _chat_native_gemini(self, messages, temperature=0.0, max_tokens=1,
                             timeout=None):
@@ -89,11 +97,27 @@ def test_probe_unreachable_endpoint_is_plain_language(probed):
     assert "Could not reach the provider endpoint" in detail
 
 
-def test_probe_timeout_names_the_bound(probed):
-    probed(ProbeFakeClient(compat=httpx.ReadTimeout("timed out")))
+def test_probe_double_timeout_is_slow_not_unreachable(probed):
+    """A slow-but-working provider is a warning, not the mistyped-URL FAIL
+    (reliability sweep P2-5): a timeout at the fast bound is retried once at
+    the slow bound before the check gives up."""
+    probed_client = probed(ProbeFakeClient(compat=httpx.ReadTimeout("timed out")))
     state, detail = llm.probe_provider()
-    assert state == "unreachable"
-    assert "did not answer within 5 seconds" in detail
+    assert state == "slow"
+    assert f"did not answer within {llm.PROBE_SLOW_RETRY_SECONDS:g} seconds" in detail
+    assert f"real runs wait up to {int(llm._TIMEOUT)} seconds" in detail
+    assert len(probed_client.timeouts) == 2  # fast bound, then the slow retry
+
+
+def test_probe_slow_then_answer_is_reachable_with_a_slow_note(probed):
+    """First bound times out, second succeeds: reachable, but the detail
+    says the endpoint answered slowly so users can tell runs may lag."""
+    probed(ProbeFakeClient(
+        compat=[httpx.ReadTimeout("timed out"), None]))
+    state, detail = llm.probe_provider()
+    assert state == "reachable"
+    assert "slowly" in detail
+    assert "runs can still succeed" in detail
 
 
 @pytest.mark.parametrize("status,fragment", [

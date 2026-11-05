@@ -115,6 +115,11 @@ def build_apply_command(params: dict) -> list[str]:
         argv += ["--url", url]
     if params.get("limit", "").strip():
         argv += ["--limit", str(_int_param(params, "limit", 1, 0, 500))]
+    if params.get("daily_cap", "").strip():
+        # P2-2: the run re-checks the live daily count before every job, so
+        # the cap holds against applications made by any path mid-run — not
+        # just the snapshot taken when the run started.
+        argv += ["--daily-cap", str(_int_param(params, "daily_cap", 0, 1, 100))]
     if params.get("dry_run"):
         argv.append("--dry-run")
     if params.get("headless"):

@@ -16,6 +16,11 @@ import pytest
 from applypilot.database import get_connection, init_db
 from applypilot.portal import automation, runner
 
+# The autouse conftest fixture replaces automation._provider_probe with a
+# constant for every test; this is the real gate, captured at collection
+# time, for the one test that exercises the cache itself.
+_REAL_PROBE_GATE = automation._provider_probe
+
 
 def seed_job(**overrides) -> str:
     conn = init_db()
@@ -428,3 +433,148 @@ def test_one_job_apply_run_targets_the_url(portal_env):
 def test_one_job_apply_run_rejects_bad_urls(portal_env):
     with pytest.raises(runner.ParamError, match=r"http\(s\) URL"):
         runner.build_apply_command({"url": "javascript:alert(1)"})
+
+
+# ---------------------------------------------------------------------------
+# P1-1 — the scheduler gates scheduled starts on a (cached) provider probe
+# ---------------------------------------------------------------------------
+
+
+def test_scheduler_skips_when_provider_unreachable(portal_env, start_spy,
+                                                   monkeypatch):
+    """A scheduled start against a dead provider used to burn every queued
+    job's attempt budget through silent per-job errors. The tick now skips
+    and records the plain-language reason for the Runs page."""
+    automation.update({"schedule_enabled": True})
+    detail = "the provider rejected the test request (HTTP 401) — the API key was refused."
+    monkeypatch.setattr(automation, "_provider_probe",
+                        lambda: ("unreachable", detail))
+
+    outcome = automation.run_tick()
+
+    assert outcome["started"] == []
+    assert outcome["skipped"], "the skip must be visible in the outcome"
+    assert "Provider unreachable" in outcome["skipped"][0]
+    assert detail in outcome["skipped"][0]
+    assert start_spy == []  # nothing was spawned
+    assert "Provider unreachable" in automation.load()["state"]["scheduler_skip"]
+
+
+def test_scheduler_clears_the_pause_when_provider_recovers(portal_env,
+                                                           start_spy,
+                                                           monkeypatch):
+    """The next healthy tick clears the recorded skip reason and proceeds."""
+    automation.update({"schedule_enabled": True})
+    monkeypatch.setattr(automation, "_provider_probe",
+                        lambda: ("unreachable", "down"))
+    assert automation.run_tick()["started"] == []
+
+    monkeypatch.setattr(automation, "_provider_probe",
+                        lambda: ("reachable", ""))
+    outcome = automation.run_tick()
+
+    assert outcome["started"], "the scheduled run fires again"
+    assert automation.load()["state"]["scheduler_skip"] is None
+
+
+def test_probe_cache_reuses_the_real_verdict(portal_env, monkeypatch):
+    """The real _provider_probe caches llm.probe_provider's verdict for the
+    TTL: two calls, one underlying probe — run_tick fires every ~30s and
+    must not absorb the probe's bounds once per tick."""
+    calls = {"n": 0}
+
+    def _probe():
+        calls["n"] += 1
+        return ("reachable", "The provider answered a test request.")
+
+    monkeypatch.setattr("applypilot.llm.probe_provider", _probe)
+    monkeypatch.setattr(automation, "_provider_probe", _REAL_PROBE_GATE)
+    automation.reset_probe_cache()
+    try:
+        first = automation._provider_probe()
+        second = automation._provider_probe()
+        assert first == second == ("reachable",
+                                   "The provider answered a test request.")
+        assert calls["n"] == 1
+    finally:
+        automation.reset_probe_cache()
+
+
+# ---------------------------------------------------------------------------
+# P2-2 — manual preset starts go through the guarded path
+# ---------------------------------------------------------------------------
+
+
+def test_start_preset_refuses_while_a_run_is_active(portal_env, start_spy):
+    """A second click used to spawn a concurrent run whose limit was
+    computed from the same cap snapshot — together the runs could apply up
+    to twice the cap. The guard refuses in plain language instead."""
+    insert_registry_row("r-active", "pipeline", status="running")
+
+    with pytest.raises(runner.ParamError, match="already active"):
+        automation.start_preset("find_jobs")
+    assert start_spy == []  # no spawn was even attempted
+
+
+def test_start_preset_apply_refuses_while_a_run_is_active(portal_env,
+                                                          start_spy):
+    # The apply path reads the live cap (count_applications_on) before the
+    # guard; production reaches start_preset through the app factory, which
+    # has already initialized the store.
+    init_db()
+    insert_registry_row("r-active", "apply", status="running")
+
+    with pytest.raises(runner.ParamError, match="already active"):
+        automation.start_preset("apply_matches")
+    assert start_spy == []
+
+
+def test_start_preset_apply_carries_the_daily_cap(portal_env, start_spy):
+    """The spawned run re-checks the live count before every job, so the
+    cap holds against applications recorded mid-run by any path."""
+    init_db()
+    automation.start_preset("apply_matches")
+
+    kind, params = start_spy[0]
+    assert kind == "apply"
+    assert params["daily_cap"] == "10"  # the configured default cap
+    assert int(params["limit"]) <= 10
+
+
+# ---------------------------------------------------------------------------
+# P2-4 — tailor-now refuses a job an apply run currently owns
+# ---------------------------------------------------------------------------
+
+
+def test_tailor_now_refuses_while_apply_in_progress(portal_env, start_spy):
+    """Resetting tailoring mid-run would unlink the very PDF that run is
+    about to upload. Same refusal as /jobs/apply-now."""
+    url = seed_job(apply_status="in_progress",
+                   tailored_resume_path="/x/resume.txt")
+
+    with pytest.raises(runner.ParamError,
+                       match="applying to this job right now"):
+        automation.start_single_job_tailor(url)
+
+    assert start_spy == []  # no run started
+    # The documents were not reset.
+    conn = get_connection()
+    row = conn.execute("SELECT tailored_resume_path FROM jobs WHERE url = ?",
+                       (url,)).fetchone()
+    assert row["tailored_resume_path"] == "/x/resume.txt"
+
+
+def test_tailor_now_route_surfaces_the_refusal(portal_env, portal_client,
+                                               start_spy):
+    """The route renders the plain-language message as a toast (the same
+    path a ParamError from the job lookup already takes)."""
+    client, _ = portal_client
+    url = seed_job(apply_status="in_progress",
+                   tailored_resume_path="/x/resume.txt")
+
+    response = client.post("/jobs/tailor-now", data={"url": url},
+                           headers={"HX-Request": "true"})
+
+    assert response.status_code == 200
+    assert "applying to this job right now" in response.text
+    assert start_spy == []

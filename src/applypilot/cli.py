@@ -256,6 +256,12 @@ def apply(
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview actions without submitting."),
     headless: bool = typer.Option(False, "--headless", help="Run browsers in headless mode."),
     url: Optional[str] = typer.Option(None, "--url", help="Apply to a specific job URL."),
+    daily_cap: Optional[int] = typer.Option(
+        None, "--daily-cap",
+        help=("Max applications per UTC day this run must respect. The count is "
+              "re-checked live before every job, so applications from any path "
+              "count. Omit for no cap."),
+    ),
     gen: bool = typer.Option(False, "--gen", help="Generate prompt file for manual debugging instead of running."),
     mark_applied: Optional[str] = typer.Option(None, "--mark-applied", help="Manually mark a job URL as applied."),
     mark_failed: Optional[str] = typer.Option(None, "--mark-failed", help="Manually mark a job URL as failed (provide URL)."),
@@ -372,6 +378,7 @@ def apply(
         continuous=continuous,
         workers=workers,
         engine=engine_name,
+        daily_cap=daily_cap,
     )
 
 

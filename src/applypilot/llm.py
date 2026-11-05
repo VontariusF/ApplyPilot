@@ -533,6 +533,31 @@ class _GeminiCompatForbidden(Exception):
 
 
 # ---------------------------------------------------------------------------
+# Error classification
+# ---------------------------------------------------------------------------
+
+def is_infra_error(exc: BaseException) -> bool:
+    """True when `exc` is a transport-class failure a provider recovery outlives.
+
+    Connection errors, timeouts, and HTTP 5xx are provider-side problems:
+    the request never produced a content-level verdict (reliability sweep
+    P1-1). Per-job attempt budgets must not burn on them — otherwise one
+    outage converts every queued job's full attempt budget into "failed"
+    before the provider comes back. Everything else — malformed 200s,
+    validation failures, 4xx refusals — is content-level: retrying with a
+    fresh budget cannot help, so the normal burn applies.
+    """
+    if isinstance(exc, httpx.TimeoutException):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= 500
+    if isinstance(exc, httpx.HTTPError):
+        # ConnectError and friends: the request never landed at all.
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Singleton
 # ---------------------------------------------------------------------------
 
@@ -566,6 +591,12 @@ def get_client() -> LLMClient:
 # renders this inline and must never hang on a dead endpoint.
 PROBE_TIMEOUT_SECONDS: float = 5.0
 
+# Second, longer bound for the probe's single retry: a slow-but-working
+# endpoint (a cold local model loading, a free-tier queue) answers past
+# the check's fast bound but under what real runs allow. Retrying once
+# before reporting keeps that case out of the dead-endpoint FAIL.
+PROBE_SLOW_RETRY_SECONDS: float = 30.0
+
 # A 1-token completion is the cheapest request that exercises the exact
 # path a real apply run takes (same endpoint, same auth, same parsing).
 _PROBE_MAX_TOKENS = 1
@@ -592,14 +623,17 @@ def probe_provider(timeout: float = PROBE_TIMEOUT_SECONDS) -> tuple[str, str]:
     Returns:
         (state, detail): state is "reachable" (the endpoint answered and
         the response parsed), "degraded" (it answered but the response
-        was unusable — real runs may still fail), or "unreachable".
+        was unusable — real runs may still fail), "slow" (it did not
+        answer within the retry bound, but real runs wait longer — a
+        warning, not an outage), or "unreachable".
         detail is one plain-language sentence. It may name HTTP status
         codes and endpoint hosts but never echoes credential values —
         request headers are never included in any error text, and
         response bodies are never quoted back.
 
-    Bounded: a single request per attempt with a per-request timeout, no
-    chat()'s retry/sleep loop — the System Check page renders this inline.
+    Bounded: one request per attempt (at most two) with a per-request
+    timeout, no chat()'s retry/sleep loop — the System Check page
+    renders this inline.
     """
     try:
         client = get_client()
@@ -609,53 +643,71 @@ def probe_provider(timeout: float = PROBE_TIMEOUT_SECONDS) -> tuple[str, str]:
 
     messages = [{"role": "user", "content": "Reply with the single word: ok"}]
 
-    try:
+    def _attempt(bound: float) -> None:
         try:
             client._chat_compat(messages, temperature=0.0,
-                                max_tokens=_PROBE_MAX_TOKENS, timeout=timeout)
+                                max_tokens=_PROBE_MAX_TOKENS, timeout=bound)
         except _GeminiCompatForbidden:
             # Exactly what chat() does on a Gemini compat 403: switch to
             # the native API. Reachability follows whichever path works.
             client._chat_native_gemini(messages, temperature=0.0,
                                        max_tokens=_PROBE_MAX_TOKENS,
-                                       timeout=timeout)
-    except httpx.TimeoutException:
-        return "unreachable", (
-            f"The provider did not answer within {timeout:g} seconds — "
-            "the endpoint may be down or the URL mistyped.")
-    except httpx.HTTPStatusError as exc:
-        code = exc.response.status_code
-        if code in (401, 403):
+                                       timeout=bound)
+
+    # Two bounds: the check's fast bound first, then one longer attempt.
+    # A timeout at the fast bound is not evidence the endpoint is down —
+    # reporting the mistyped-URL FAIL for a merely slow provider sent
+    # users chasing the wrong problem while scheduled runs succeeded.
+    for attempt, bound in enumerate((timeout, PROBE_SLOW_RETRY_SECONDS)):
+        try:
+            _attempt(bound)
+        except httpx.TimeoutException:
+            if attempt == 0:
+                continue
+            return "slow", (
+                f"The provider did not answer within {bound:g} seconds, but "
+                f"real runs wait up to {int(_TIMEOUT)} seconds — the endpoint "
+                "may be slow rather than down. If runs also fail, check the "
+                "endpoint URL and model in provider settings.")
+        except httpx.HTTPStatusError as exc:
+            code = exc.response.status_code
+            if code in (401, 403):
+                return "unreachable", (
+                    f"The provider rejected the test request (HTTP {code}) — "
+                    "the API key was refused. Check it in provider settings.")
+            if code == 404:
+                return "unreachable", (
+                    "The provider answered, but the endpoint or model was not "
+                    "found (HTTP 404) — the URL or model name looks wrong.")
+            if code == 429:
+                return "unreachable", (
+                    "The provider is reachable but refused the test request "
+                    "(HTTP 429) — out of quota or rate-limited right now.")
             return "unreachable", (
-                f"The provider rejected the test request (HTTP {code}) — "
-                "the API key was refused. Check it in provider settings.")
-        if code == 404:
+                f"The provider rejected the test request (HTTP {code}). "
+                "Check the endpoint URL and model in provider settings.")
+        except httpx.HTTPError as exc:
+            # ConnectError / protocol errors: message names the host and OS
+            # errno — never headers or credentials.
+            detail = str(exc).strip() or exc.__class__.__name__
             return "unreachable", (
-                "The provider answered, but the endpoint or model was not "
-                "found (HTTP 404) — the URL or model name looks wrong.")
-        if code == 429:
-            return "unreachable", (
-                "The provider is reachable but refused the test request "
-                "(HTTP 429) — out of quota or rate-limited right now.")
-        return "unreachable", (
-            f"The provider rejected the test request (HTTP {code}). "
-            "Check the endpoint URL and model in provider settings.")
-    except httpx.HTTPError as exc:
-        # ConnectError / protocol errors: message names the host and OS
-        # errno — never headers or credentials.
-        detail = str(exc).strip() or exc.__class__.__name__
-        return "unreachable", (
-            f"Could not reach the provider endpoint — {detail}. "
-            "Check the endpoint URL in provider settings.")
-    except (LLMParseError, KeyError, ValueError, IndexError, TypeError):
-        # An HTTP 200 with a body the parser disliked (missing or empty
-        # choices, non-text content): the endpoint is alive and answering
-        # — degraded, not dead. Real runs may still fail parsing.
-        return "degraded", (
-            "The provider answered the test request, but the response was "
-            "not usable — real runs may still fail. Check the model name "
-            "in provider settings.")
-    return "reachable", "The provider answered a test request."
+                f"Could not reach the provider endpoint — {detail}. "
+                "Check the endpoint URL in provider settings.")
+        except (LLMParseError, KeyError, ValueError, IndexError, TypeError):
+            # An HTTP 200 with a body the parser disliked (missing or empty
+            # choices, non-text content): the endpoint is alive and answering
+            # — degraded, not dead. Real runs may still fail parsing.
+            return "degraded", (
+                "The provider answered the test request, but the response was "
+                "not usable — real runs may still fail. Check the model name "
+                "in provider settings.")
+        if attempt == 0:
+            return "reachable", "The provider answered a test request."
+        return "reachable", (
+            f"The provider answered a test request — slowly (over "
+            f"{timeout:g} seconds). Real runs wait up to {int(_TIMEOUT)} "
+            "seconds, so runs can still succeed.")
+    raise AssertionError("unreachable: probe loop must return on every path")
 
 
 def reset_client() -> None:

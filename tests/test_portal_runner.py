@@ -53,6 +53,19 @@ def test_apply_command_shape(portal_env):
     assert "--continuous" not in argv
 
 
+def test_apply_command_carries_the_daily_cap(portal_env):
+    """P2-2: the worker re-checks the live application count before every
+    submission, so the daily cap survives applications recorded mid-run by
+    any other path. The flag rides along only when a cap is passed."""
+    argv = runner.build_apply_command({
+        "limit": "5", "workers": "2", "min_score": "6", "daily_cap": "10",
+    })
+    assert "--daily-cap" in argv and "10" in argv
+
+    plain = runner.build_apply_command({"limit": "5", "workers": "2"})
+    assert "--daily-cap" not in plain
+
+
 def test_invalid_params_rejected(portal_env):
     with pytest.raises(runner.ParamError, match="unknown stage"):
         runner.build_pipeline_command({"stages": "bogus"})
