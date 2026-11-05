@@ -12,7 +12,11 @@
     // rendered from (data-chat-seq). A push rendered mid-POST — the answer
     // is saved before the agent ack — can arrive after the POST's own
     // fresher swap and would replace new content with stale, freezing the
-    // flow mid-question. Drop any push older than what the DOM shows.
+    // flow mid-question. Drop any push not newer than what the DOM shows:
+    // a same-seq push renders identical state, so skipping it costs nothing
+    // — and it protects in-flight user input (a half-typed free-text field)
+    // from the reconnect's initial-sync re-render, which would otherwise
+    // clobber the form mid-answer and swallow the submitted value.
     window.__apChatSeq = Math.max(window.__apChatSeq || 0, {{ chat_seq }});
     if (window.__apChatSeqGuard) return;
     window.__apChatSeqGuard = true;
@@ -21,7 +25,7 @@
       var m = /data-chat-seq="(\d+)"/.exec(data);
       if (!m) return;
       var incoming = parseInt(m[1], 10);
-      if (incoming < window.__apChatSeq) evt.preventDefault();
+      if (incoming <= window.__apChatSeq) evt.preventDefault();
       else window.__apChatSeq = incoming;
     });
     document.body.addEventListener("htmx:afterSwap", function (evt) {

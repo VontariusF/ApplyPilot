@@ -113,6 +113,15 @@ class FakeLLMClient:
     def ask(self, prompt, **kwargs):
         return self.chat([{"role": "user", "content": prompt}], **kwargs)
 
+    def _chat_compat(self, messages, temperature=0.0, max_tokens=4096,
+                     timeout=None):
+        # Same provider boundary as chat(), named for the OpenAI-compat
+        # endpoint — llm.probe_provider() reaches through it to time the
+        # reachability check, so the fake must answer it too (raises
+        # httpx errors to simulate an unreachable endpoint).
+        return self.chat(messages, temperature=temperature,
+                         max_tokens=max_tokens)
+
     def respond(self, *responses):
         """Queue replies for upcoming chat() calls (FIFO)."""
         self.responses.extend(responses)

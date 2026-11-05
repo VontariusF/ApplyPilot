@@ -146,11 +146,17 @@ def create_app() -> FastAPI:
     # headers are refused outright (DNS-rebinding defense). The token is
     # accepted only from the cookie or a header — never the query string,
     # which access logs and browser history record verbatim (F9).
+    # APPLIPILOT_PORTAL_DISABLE_AUTH (P2-4) opts the TOKEN check out — the
+    # deployed Mac launchd unit runs that way. The host-check above runs
+    # regardless: an opted-out portal must never become a LAN-reachable
+    # unauthenticated store reader if the bind ever widens.
     # ------------------------------------------------------------------
     @app.middleware("http")
     async def auth_guard(request: Request, call_next):
         if not auth.host_is_allowed(request.headers.get("host")):
             return PlainTextResponse("forbidden: portal is localhost-only", status_code=400)
+        if auth.auth_disabled():
+            return await call_next(request)
         provided = auth.extract_token(
             request.cookies.get(auth.COOKIE_NAME),
             request.headers.get("x-portal-token")
@@ -716,12 +722,12 @@ def create_app() -> FastAPI:
     @app.get("/engine", response_class=HTMLResponse)
     async def engine_page(request: Request, t0: float | None = None,
                           login: int = 0, login_error: str = ""):
-        ctx = _engine_gate_context(t0, bool(login))
+        ctx = await _engine_gate_context(t0, bool(login))
         return _render(request, "engine.html", login_error=login_error, **ctx)
 
     @app.get("/engine/status", response_class=HTMLResponse)
     async def engine_status(request: Request, t0: float | None = None, login: int = 0):
-        ctx = _engine_gate_context(t0, bool(login))
+        ctx = await _engine_gate_context(t0, bool(login))
         return _render(request, "partials/engine_gates.html", **ctx)
 
     @app.post("/engine/login")
@@ -778,17 +784,20 @@ def create_app() -> FastAPI:
         # onboarding surface keeps no timeout state (the SSE channel flips
         # the gate the moment claude_status() does).
         return _render(request, "onboarding.html",
-                       **_onboarding_context(error=error, login_error=login_error,
+                       **await _onboarding_context(error=error, login_error=login_error,
                                              login=login, t0=t0))
 
     @app.get("/onboarding/chat", response_class=HTMLResponse)
     async def onboarding_chat(request: Request, error: str = ""):
         return _render(request, "partials/onboarding_surface.html",
-                       **_onboarding_context(error=error))
+                       **await _onboarding_context(error=error))
 
     @app.get("/onboarding/stream")
     async def onboarding_stream():
-        baseline = _chat_signature()  # snap at connect; pushes are change-only
+        # Snap the signature at connect. The stream's FIRST event re-syncs
+        # the page to the present — covering changes that landed while no
+        # stream listened — later events are change-only.
+        baseline = await _chat_signature()
         return EventSourceResponse(_stream_chat(baseline))
 
     @app.post("/onboarding/start")
@@ -801,7 +810,7 @@ def create_app() -> FastAPI:
         except onboarding.OnboardingError as exc:
             error = str(exc)
         return _render(request, "partials/onboarding_surface.html",
-                       **_onboarding_context(error=error))
+                       **await _onboarding_context(error=error))
 
     @app.post("/onboarding/send")
     async def onboarding_send(request: Request):
@@ -813,7 +822,7 @@ def create_app() -> FastAPI:
         except onboarding.OnboardingError as exc:
             error = str(exc)
         return _render(request, "partials/onboarding_surface.html",
-                       **_onboarding_context(error=error))
+                       **await _onboarding_context(error=error))
 
     @app.post("/onboarding/answer")
     async def onboarding_answer(request: Request):
@@ -831,7 +840,7 @@ def create_app() -> FastAPI:
         except onboarding.OnboardingError as exc:
             error = str(exc)
         return _render(request, "partials/onboarding_surface.html",
-                       **_onboarding_context(error=error))
+                       **await _onboarding_context(error=error))
 
     @app.post("/onboarding/clear")
     async def onboarding_clear(request: Request):
@@ -844,7 +853,7 @@ def create_app() -> FastAPI:
         except onboarding.OnboardingError as exc:
             error = str(exc)
         return _render(request, "partials/onboarding_surface.html",
-                       **_onboarding_context(error=error))
+                       **await _onboarding_context(error=error))
 
     @app.post("/onboarding/agent-mode")
     async def onboarding_agent_mode(request: Request):
@@ -857,7 +866,7 @@ def create_app() -> FastAPI:
         except onboarding.OnboardingError as exc:
             error = str(exc)
         return _render(request, "partials/onboarding_surface.html",
-                       **_onboarding_context(error=error))
+                       **await _onboarding_context(error=error))
 
     @app.post("/onboarding/resume")
     async def onboarding_resume(request: Request):
@@ -887,7 +896,7 @@ def create_app() -> FastAPI:
         except onboarding.OnboardingError as exc:
             error = str(exc)
         return _render(request, "partials/onboarding_surface.html",
-                       **_onboarding_context(error=error))
+                       **await _onboarding_context(error=error))
 
     @app.post("/onboarding/review")
     async def onboarding_review(request: Request):
@@ -901,7 +910,7 @@ def create_app() -> FastAPI:
         except onboarding.OnboardingError as exc:
             error = str(exc)
         return _render(request, "partials/onboarding_surface.html",
-                       **_onboarding_context(error=error))
+                       **await _onboarding_context(error=error))
 
     @app.post("/onboarding/confirm")
     async def onboarding_confirm(request: Request):
@@ -911,7 +920,7 @@ def create_app() -> FastAPI:
         except onboarding.OnboardingError as exc:
             error = str(exc)
         return _render(request, "partials/onboarding_surface.html",
-                       **_onboarding_context(error=error))
+                       **await _onboarding_context(error=error))
 
     @app.post("/onboarding/find-jobs")
     async def onboarding_find_jobs():
@@ -930,9 +939,9 @@ def create_app() -> FastAPI:
             await asyncio.to_thread(onboarding.keep_editing)
         except onboarding.OnboardingError as exc:
             return _render(request, "partials/onboarding_surface.html",
-                           **_onboarding_context(error=str(exc)))
+                           **await _onboarding_context(error=str(exc)))
         return _render(request, "partials/onboarding_surface.html",
-                       **_onboarding_context())
+                       **await _onboarding_context())
 
     @app.post("/onboarding/redo")
     async def onboarding_redo(request: Request):
@@ -942,7 +951,7 @@ def create_app() -> FastAPI:
         except onboarding.OnboardingError as exc:
             error = str(exc)
         return _render(request, "partials/onboarding_surface.html",
-                       **_onboarding_context(error=error))
+                       **await _onboarding_context(error=error))
 
     # ------------------------------------------------------------------
     # System Check — the zero-terminal diagnostic surface (replaces the
@@ -1345,13 +1354,18 @@ def _active_stream_run() -> dict | None:
     return running[0]
 
 
-def _engine_gate_context(t0: float | None, login_started: bool) -> dict:
+async def _engine_gate_context(t0: float | None, login_started: bool) -> dict:
     """Shared context for the agent sign-in cards (page render and polls).
 
     `t0` is the epoch the current polling window started; it rides through
     every poll URL so the timeout is judged against one consistent start.
     """
-    claude = engine_auth.claude_status()
+    # The Claude probe spawns `claude auth status` (10s timeout) — it must
+    # never run on the event loop, where one hung CLI would stall the whole
+    # portal. The TTL-cached probe shares one subprocess across the
+    # engine page's 2s poll, the onboarding surfaces, and the chat stream
+    # (P1-1); droid_status is a which()+env check and stays inline.
+    claude = await asyncio.to_thread(engine_auth.claude_status_cached)
     droid = engine_auth.droid_status()
     login = engine_auth.active_login()
     now = time.time()
@@ -1373,17 +1387,18 @@ def _engine_gate_context(t0: float | None, login_started: bool) -> dict:
     }
 
 
-def _onboarding_context(error: str = "", login_error: str = "", login: int = 0,
-                        t0: float | None = None) -> dict:
+async def _onboarding_context(error: str = "", login_error: str = "",
+                              login: int = 0, t0: float | None = None) -> dict:
     """Shared context for the onboarding chat partial (page, posts, SSE).
 
-    `login_error`/`login`/`t0` are the engine-login outcome params — the
+    Async so the gate probe runs off the event loop (P1-1). `login_error`/
+    `login`/`t0` are the engine-login outcome params — the
     same contract every gate page parses. SSE re-renders omit them: the
     waiting hint then survives only until the signature changes, and the
     only in-wait signature change is the sign-in flip itself, which swaps
     the gate card for the ready card anyway.
     """
-    ready = onboarding.readiness()
+    ready = await asyncio.to_thread(onboarding.readiness)
     state = onboarding.load_state()
     # Resume-first entry (spec art_ti3XJuNr): the first surface a ready
     # user sees opens intake — the resume upload — instead of jumping
@@ -1424,10 +1439,10 @@ def _onboarding_context(error: str = "", login_error: str = "", login: int = 0,
     }
 
 
-def _chat_html() -> str:
+async def _chat_html() -> str:
     """Render the chat partial for the SSE stream (no request context)."""
     return templates.get_template("partials/onboarding_chat.html").render(
-        **_onboarding_context())
+        **await _onboarding_context())
 
 
 # ---------------------------------------------------------------------------
@@ -1572,8 +1587,12 @@ async def _stream_progress(last: tuple) -> AsyncIterator[dict]:
     yield {"event": "end", "data": "closed"}
 
 
-def _chat_signature() -> tuple:
-    """Cheap fingerprint of the chat surface inputs (state, gate, provider)."""
+async def _chat_signature() -> tuple:
+    """Cheap fingerprint of the chat surface inputs (state, gate, provider).
+
+    Async: the gate probe may spawn a subprocess, so it runs in a worker
+    thread (P1-1) — the SSE generators await this every poll tick.
+    """
     state = onboarding.load_state()
     if state is None:
         file_sig = None
@@ -1583,8 +1602,8 @@ def _chat_signature() -> tuple:
         except OSError:
             mtime = None
         file_sig = (mtime, state.seq, state.phase, len(state.messages))
-    return (file_sig, onboarding.provider_ready(),
-            engine_auth.claude_status().state)
+    claude_state = (await asyncio.to_thread(engine_auth.claude_status_cached)).state
+    return (file_sig, onboarding.provider_ready(), claude_state)
 
 
 async def _stream_chat(last: tuple) -> AsyncIterator[dict]:
@@ -1592,20 +1611,23 @@ async def _stream_chat(last: tuple) -> AsyncIterator[dict]:
 
     The signature watches both the state file (new messages, phase) and
     the gate (sign-in flip, provider config) so a signed-in flip swaps the
-    gate card for the interview without a manual reload. The route snaps
-    the baseline at connect time and the page renders the current surface
-    server-side, so the stream only pushes on CHANGE — reconnects after
-    the idle close stay swap-free (identical content would otherwise
-    replace the DOM out from under an in-flight click). Idle-closes a few
-    seconds after the last change; the next POST re-anchors the DOM.
+    gate card for the interview without a manual reload. The FIRST event
+    re-syncs a reconnecting page (see _stream_cards): a reconnect's fresh
+    baseline already contains whatever changed while no stream listened
+    (the ~8s idle close), so change-only pushes would swallow it. The
+    identical-content push this costs on a no-change connect is dropped
+    by the page's data-chat-seq guard (same-seq pushes render identical
+    state, and dropping them protects in-flight user input). Idle-closes
+    a few seconds after the last change; the next POST re-anchors the DOM.
     """
+    yield {"event": "chat", "data": await _chat_html()}  # initial sync (P2-2)
     idle = 0
     while idle < CHAT_IDLE_POLLS_BEFORE_CLOSE:
         await asyncio.sleep(CHAT_POLL_SECONDS)
-        sig = _chat_signature()
+        sig = await _chat_signature()
         if sig != last:
             last, idle = sig, 0
-            yield {"event": "chat", "data": _chat_html()}
+            yield {"event": "chat", "data": await _chat_html()}
         else:
             idle += 1
     yield {"event": "end", "data": "closed"}

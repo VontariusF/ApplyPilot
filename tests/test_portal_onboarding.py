@@ -265,33 +265,67 @@ def test_stream_pushes_partial_on_state_change(portal_client, monkeypatch,
     monkeypatch.setattr(portal_app, "CHAT_POLL_SECONDS", 0.05)
 
     async def drive():
-        agen = portal_app._stream_chat(portal_app._chat_signature())
+        baseline = await portal_app._chat_signature()
+        agen = portal_app._stream_chat(baseline)
         try:
-            # The page renders the current surface server-side; the stream
-            # pushes only on change. Flip the state, expect exactly one push.
+            # First event: the initial sync (P2-2) — the pre-flip surface.
+            first = await agen.__anext__()
+            # From here the stream pushes on change. Flip the state, expect
+            # the kickoff surface as the next event.
             onboarding.start_interview("claude")
-            event = await agen.__anext__()
+            second = await agen.__anext__()
         finally:
             await agen.aclose()
-        return event
+        return first, second
 
-    event = asyncio.run(drive())
-    assert event["event"] == "chat"
-    assert "Tell me about your background" in event["data"]  # kickoff ran
+    first, second = asyncio.run(drive())
+    assert first["event"] == "chat"
+    assert "Tell me about your background" not in first["data"]
+    assert second["event"] == "chat"
+    assert "Tell me about your background" in second["data"]  # kickoff ran
 
 
-def test_stream_closes_after_idle_without_pushes(portal_client, monkeypatch,
-                                                 fake_claude):
-    """No changes -> zero chat events (no swap churn on reconnect)."""
+def test_stream_initial_sync_then_quiet_without_changes(portal_client, monkeypatch,
+                                                        fake_claude):
+    """Connect: one initial-sync event, then quiet — zero further pushes
+    while nothing changes. (The first event re-syncs a reconnecting page;
+    on a no-change connect it is an identical-content swap, the accepted
+    cost the page's data-chat-seq guard renders a no-op.)"""
     client, _ = portal_client
     patch_gates(monkeypatch, claude=SIGNED_IN)
     monkeypatch.setattr(portal_app, "CHAT_POLL_SECONDS", 0.01)
 
     async def drive():
-        agen = portal_app._stream_chat(portal_app._chat_signature())
+        baseline = await portal_app._chat_signature()
+        agen = portal_app._stream_chat(baseline)
         events = [e async for e in agen]  # runs to the idle close
         return events
 
     onboarding.start_interview("claude")  # stable before the stream starts
     events = asyncio.run(drive())
-    assert events == [{"event": "end", "data": "closed"}]
+    assert [e["event"] for e in events] == ["chat", "end"]
+
+
+def test_stream_initial_sync_covers_reconnect_gap(portal_client, monkeypatch,
+                                                  fake_claude):
+    """A reconnect's baseline already contains whatever changed while no
+    stream listened (the ~8s idle close) — the first event must re-sync
+    the page to the present anyway (P2-2), or that change is swallowed
+    until the next POST or reload."""
+    client, _ = portal_client
+    patch_gates(monkeypatch, claude=SIGNED_IN)
+    monkeypatch.setattr(portal_app, "CHAT_POLL_SECONDS", 0.01)
+
+    onboarding.start_interview("claude")  # lands in the idle-close gap
+
+    async def drive():
+        baseline = await portal_app._chat_signature()
+        agen = portal_app._stream_chat(baseline)
+        try:
+            return await agen.__anext__()
+        finally:
+            await agen.aclose()
+
+    event = asyncio.run(drive())
+    assert event["event"] == "chat"
+    assert "Tell me about your background" in event["data"]

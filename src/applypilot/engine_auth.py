@@ -24,7 +24,9 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 from dataclasses import dataclass, field
+from typing import Callable
 
 # The three gate states — the tri-state every consumer switches on.
 NOT_INSTALLED = "not_installed"
@@ -105,6 +107,50 @@ def claude_status(timeout: float = STATUS_TIMEOUT_SECONDS) -> EngineStatus:
     if proc.returncode == 0:
         return EngineStatus("claude", SIGNED_IN, auth_method, binary)
     return EngineStatus("claude", SIGNED_OUT, auth_method, binary)
+
+
+# The portal polls the Claude gate from several surfaces at once (the
+# engine cards every 2s, the onboarding chat signature, onboarding
+# readiness) — each poll used to spawn its own `claude auth status`
+# subprocess. A short TTL shares one probe across concurrent callers;
+# callers still run it in a worker thread (asyncio.to_thread), never on
+# an event loop. Sign-in flips surface within TTL + one poll tick, well
+# inside the gate's multi-minute polling window.
+_STATUS_CACHE_TTL_SECONDS = 1.5
+
+_status_lock = threading.Lock()
+# (monotonic time taken, probe that produced it, its result). Keying on
+# the probe identity makes test fakes (which monkeypatch claude_status)
+# invalidate the cache automatically — a new fake is a new probe.
+_status_cache: tuple[float, Callable[[], EngineStatus], EngineStatus] | None = None
+
+
+def reset_status_cache() -> None:
+    """Drop the cached Claude status (tests, and fresh-probe callers)."""
+    global _status_cache
+    with _status_lock:
+        _status_cache = None
+
+
+def claude_status_cached(ttl: float = _STATUS_CACHE_TTL_SECONDS) -> EngineStatus:
+    """claude_status() behind a short TTL cache, safe to call concurrently.
+
+    The lock is held across the probe so simultaneous callers SHARE one
+    subprocess instead of each spawning their own — the probe holds the
+    lock only for its (bounded) runtime, and a stale value outlives it by
+    at most the TTL. A change of probe identity (test fakes, a patched
+    function) is always a cache miss, so fakes take effect immediately.
+    """
+    global _status_cache
+    probe = claude_status  # read through the module global: patch-aware
+    with _status_lock:
+        if _status_cache is not None:
+            taken_at, cached_probe, cached = _status_cache
+            if cached_probe is probe and time.monotonic() - taken_at < ttl:
+                return cached
+        value = probe()
+        _status_cache = (time.monotonic(), probe, value)
+        return value
 
 
 def droid_status() -> EngineStatus:

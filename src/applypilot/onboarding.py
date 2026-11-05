@@ -1341,7 +1341,10 @@ def provider_ready() -> bool:
 
 def readiness() -> dict:
     """The step-1 gate picture: engine states and which start paths exist."""
-    claude = engine_auth.claude_status()
+    # The cached probe: readiness runs per onboarding render and per chat
+    # signature poll, often concurrently with the engine page's own gate
+    # poll — one `claude auth status` subprocess serves them all (P1-1).
+    claude = engine_auth.claude_status_cached()
     llm_ready = provider_ready()
     return {
         "claude": claude,

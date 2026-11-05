@@ -9,6 +9,7 @@ monkeypatch reverts them per test).
 import os
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -391,6 +392,78 @@ def test_engine_gap_messages_install_hint_when_nothing_installed(monkeypatch):
     gaps = config._engine_gap_messages()
     assert len(gaps) == 1
     assert "claude.ai/code" in gaps[0]
+
+
+# ---------------------------------------------------------------------------
+# claude_status_cached — the portal's TTL-shared probe (P1-1)
+# ---------------------------------------------------------------------------
+
+class TestClaudeStatusCache:
+    @pytest.fixture(autouse=True)
+    def _fresh_cache(self):
+        engine_auth.reset_status_cache()
+        yield
+        engine_auth.reset_status_cache()
+
+    def test_concurrent_callers_share_one_probe(self, monkeypatch):
+        """Simultaneous callers within the TTL spawn ONE subprocess — the lock
+        hands every waiter the same fresh result. The engine page's 2s poll,
+        the onboarding chat signature and onboarding readiness all probe the
+        gate; without the cache each would run its own `claude auth status`."""
+        calls: list[int] = []
+
+        def fake_status(*args, **kwargs):
+            calls.append(1)
+            return engine_auth.EngineStatus("claude", engine_auth.SIGNED_IN,
+                                            "claude.ai", CLAUDE_BIN)
+
+        monkeypatch.setattr(engine_auth, "claude_status", fake_status)
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(
+                lambda _: engine_auth.claude_status_cached(), range(8)))
+        assert len(calls) == 1  # eight callers, one subprocess
+        assert all(r.state == engine_auth.SIGNED_IN for r in results)
+
+    def test_new_probe_identity_invalidates_cache(self, monkeypatch):
+        """A changed probe (a newly installed fake, a patched function) always
+        misses — a cached fake must never answer for a different one."""
+        signed_out = engine_auth.EngineStatus("claude", engine_auth.SIGNED_OUT,
+                                              None, CLAUDE_BIN)
+        signed_in = engine_auth.EngineStatus("claude", engine_auth.SIGNED_IN,
+                                             "claude.ai", CLAUDE_BIN)
+        monkeypatch.setattr(engine_auth, "claude_status", lambda *a, **k: signed_out)
+        assert engine_auth.claude_status_cached().state == engine_auth.SIGNED_OUT
+        monkeypatch.setattr(engine_auth, "claude_status", lambda *a, **k: signed_in)
+        assert engine_auth.claude_status_cached().state == engine_auth.SIGNED_IN
+
+    def test_expired_ttl_reprobes(self, monkeypatch):
+        """Past the TTL the cached value is dropped and the probe re-runs —
+        sign-in flips surface within TTL + one poll tick."""
+        calls: list[int] = []
+
+        def fake_status(*args, **kwargs):
+            calls.append(1)
+            return engine_auth.EngineStatus("claude", engine_auth.SIGNED_IN,
+                                            None, CLAUDE_BIN)
+
+        monkeypatch.setattr(engine_auth, "claude_status", fake_status)
+        engine_auth.claude_status_cached(ttl=500)
+        engine_auth.claude_status_cached(ttl=0)  # expired the instant it landed
+        assert len(calls) == 2
+
+    def test_reset_forces_a_fresh_probe(self, monkeypatch):
+        calls: list[int] = []
+
+        def fake_status(*args, **kwargs):
+            calls.append(1)
+            return engine_auth.EngineStatus("claude", engine_auth.SIGNED_IN,
+                                            None, CLAUDE_BIN)
+
+        monkeypatch.setattr(engine_auth, "claude_status", fake_status)
+        engine_auth.claude_status_cached()
+        engine_auth.reset_status_cache()
+        engine_auth.claude_status_cached()
+        assert len(calls) == 2
 
 
 if __name__ == "__main__":  # pragma: no cover

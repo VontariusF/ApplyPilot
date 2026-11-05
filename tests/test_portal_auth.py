@@ -14,6 +14,7 @@ import stat
 import pytest
 from fastapi.testclient import TestClient
 
+from applypilot.portal import auth as auth_mod
 from applypilot.portal.app import create_app
 
 # Every GET route the portal serves (plus a bogus run id path).
@@ -140,3 +141,35 @@ def test_token_reused_not_regenerated(portal_env):
     app1 = create_app()
     app2 = create_app()
     assert app1.state.token == app2.state.token
+
+
+# ---------------------------------------------------------------------------
+# P2-4: the deliberate token-check opt-out (APPLIPILOT_PORTAL_DISABLE_AUTH)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("value", ["1", "true", "yes", "TRUE", "  Yes  "])
+def test_disable_auth_optout_skips_token_check(anon_client, monkeypatch, value):
+    """P2-4: with the opt-out set, an unauthenticated request passes the
+    middleware. The env is read per request, so no app rebuild is needed."""
+    monkeypatch.setenv(auth_mod.AUTH_DISABLE_ENV, value)
+    r = anon_client.get("/")
+    assert r.status_code == 200
+
+
+@pytest.mark.parametrize("value", ["0", "false", "off", "", "junk"])
+def test_disable_auth_non_truthy_keeps_token_check(anon_client, monkeypatch, value):
+    """Anything but the truthy spellings leaves the token check intact."""
+    monkeypatch.setenv(auth_mod.AUTH_DISABLE_ENV, value)
+    r = anon_client.get("/")
+    assert r.status_code == 401
+
+
+def test_disable_auth_never_weakens_host_check(anon_client, monkeypatch):
+    """The pinned invariant: the opt-out relaxes ONLY the token check —
+    a non-localhost Host header is still refused outright. Without this,
+    an opted-out portal behind a widened bind is a LAN-reachable
+    unauthenticated store reader."""
+    monkeypatch.setenv(auth_mod.AUTH_DISABLE_ENV, "1")
+    r = anon_client.get("/", headers={"Host": "evil.example.com"})
+    assert r.status_code == 400
+

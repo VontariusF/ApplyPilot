@@ -101,7 +101,10 @@ def seed_applied(n: int) -> None:
 
 # Per-question plan. Choices answer by the hidden value the button
 # submits; "free:" entries are typed into the per-kind widget; None
-# entries are skipped (their review chips are the point).
+# entries are skipped (their review chips are the point); "last-choice:"
+# entries click the final rendered choice button — for questions whose
+# choices derive at runtime (salary bands follow the captured currency
+# and experience level), so no literal here can rot when they re-derive.
 WALK = {
     "full_name": "free:Test Person",
     "education": "Bachelor's",
@@ -112,7 +115,7 @@ WALK = {
     "sponsorship": "no",
     "permit_type": "Citizen",
     "currency": "USD",
-    "salary_band": "120000",
+    "salary_band": "last-choice:",  # the open-ended top band, whatever the floors are
     "start_date": "Immediately",
     "target_roles": "free:Data Engineer\nAnalytics Engineer",
     "location": "free:Austin, TX",
@@ -143,6 +146,13 @@ async def _answer_current(page, plan):
             "input[name='free_text'], textarea[name='free_text']"
         ).fill(step[5:])
         await card.locator("button:has-text('Save answer')").click()
+    elif isinstance(step, str) and step.startswith("last-choice:"):
+        # Derived-choice questions (salary bands follow the captured
+        # currency and experience level): click the LAST rendered choice —
+        # the open-ended top band. PR #44 re-derived the floors and the
+        # old hardcoded value clicked nothing; deriving from the rendered
+        # buttons cannot rot the same way.
+        await card.locator(".choice-grid form button").last.click()
     else:
         await card.locator(
             f'.choice-grid form:has(input[name="value"][value="{step}"]) button'
@@ -200,7 +210,12 @@ def test_full_user_journey_end_to_end(run_journey, chromium, portal_server,
             await page.wait_for_selector("[data-question-id]")
 
             first = page.locator("[data-question-id]").first
-            assert await first.locator(".choice-grid button").count() >= 2
+            # Identity-first agenda (PR #38/#43): the wizard opens on the
+            # name question — a free-text card with no choice grid. Pin
+            # the card and its Save control; the walk below answers it
+            # from the plan.
+            assert await first.get_attribute("data-question-id") == "full_name"
+            assert await first.locator("button:has-text('Save answer')").count() == 1
 
             await _walk_to_review(page, WALK)
             # Zero keyboard-only-chat answers: no user chat bubble at all.

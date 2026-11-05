@@ -124,6 +124,22 @@ ruff format src/
 - **Keep commits clean.** Squash fixup commits before requesting review.
 - **CI must pass.** All linting and tests must be green.
 
+### Pre-merge validation (this fork)
+
+GitHub Actions are disabled in this fork, so the local run IS the merge gate.
+Before every merge — and always for portal or onboarding changes — run:
+
+```
+ruff check .                 # lint (src + tests)
+pytest tests -m "not e2e"    # unit suite
+pytest tests/e2e             # browser e2e — portal PRs must not merge without it
+```
+
+The e2e suite catches the choice-value and first-card contract breaks that the
+unit suites mock away: the PR #44 salary-band break shipped exactly that way.
+Chromium must be installed once per machine (`playwright install chromium`) —
+without it the e2e tests silently SKIP, and a skipped gate is no gate.
+
 ## Project Structure
 
 ```

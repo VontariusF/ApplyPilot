@@ -731,6 +731,87 @@ def test_ensure_columns_concurrent_migration_no_duplicate_column(
     assert "fit_score" in cols and "url" in cols
 
 
+class _WinningProcessConn:
+    """Proxy that replays the cross-process race against every ALTER: a
+    concurrent winner commits the same column first, so this connection's
+    ALTER raises 'duplicate column name' (P2-3)."""
+
+    def __init__(self, conn, winner):
+        self._conn = conn
+        self._winner = winner
+
+    def execute(self, sql, *args, **kwargs):
+        if sql.startswith("ALTER TABLE jobs ADD COLUMN"):
+            col = sql.split("ADD COLUMN ", 1)[1].split()[0]
+            self._winner.execute(sql)
+            self._winner.commit()
+            raise sqlite3.OperationalError(f"duplicate column name: {col}")
+        return self._conn.execute(sql, *args, **kwargs)
+
+    def commit(self):
+        return self._conn.commit()
+
+
+def test_ensure_columns_tolerates_cross_process_duplicate_column(
+    isolated_db, tmp_path
+):
+    """P2-3: the portal and CLI processes race their first init_db; a
+    threading lock cannot serialize them, so the loser's ALTER hits
+    'duplicate column name' after the winner committed. That is the
+    winner's success: the migration completes instead of crashing the
+    portal startup or a run spawn."""
+    path = str(tmp_path / "old.db")
+    setup = sqlite3.connect(path)
+    setup.execute("CREATE TABLE jobs (url TEXT PRIMARY KEY, title TEXT)")
+    setup.execute("PRAGMA journal_mode=WAL")
+    setup.commit()
+    setup.close()
+
+    conn = sqlite3.connect(path, timeout=30)
+    conn.execute("PRAGMA busy_timeout=10000")
+    winner = sqlite3.connect(path, timeout=30)
+    winner.execute("PRAGMA busy_timeout=10000")
+
+    added = database.ensure_columns(_WinningProcessConn(conn, winner))
+
+    # Every column the loser lost the race for is still reported as added.
+    assert "fit_score" in added
+    verify = sqlite3.connect(path)
+    cols = {row[1] for row in verify.execute("PRAGMA table_info(jobs)").fetchall()}
+    verify.close()
+    assert "fit_score" in cols and "apply_conflict" in cols
+
+    # And a subsequent pass adds nothing (idempotent, as before).
+    assert database.ensure_columns(conn) == []
+
+
+def test_ensure_columns_still_raises_other_operational_errors(isolated_db, tmp_path):
+    """The duplicate-column tolerance must not swallow real failures."""
+    path = str(tmp_path / "old.db")
+    setup = sqlite3.connect(path)
+    setup.execute("CREATE TABLE jobs (url TEXT PRIMARY KEY, title TEXT)")
+    setup.commit()
+    setup.close()
+
+    class _LockedAlterConn:
+        """Passes reads through, fails every ALTER like a busy database."""
+
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, sql, *args, **kwargs):
+            if sql.startswith("ALTER TABLE jobs ADD COLUMN"):
+                raise sqlite3.OperationalError("database is locked")
+            return self._conn.execute(sql, *args, **kwargs)
+
+        def commit(self):
+            return self._conn.commit()
+
+    conn = sqlite3.connect(path, timeout=30)
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        database.ensure_columns(_LockedAlterConn(conn))
+
+
 # ---------------------------------------------------------------------------
 # F5 — streaming discover must surface sub-scraper failures
 # ---------------------------------------------------------------------------
