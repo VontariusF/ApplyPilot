@@ -390,11 +390,130 @@ def convert_to_pdf(
     return out
 
 
+def _record_pdf_failure(text_path: Path) -> None:
+    """Burn one pdf attempt on the job row whose tailored resume failed.
+
+    Keeps retry semantics bounded: after _MAX pdf_attempts the row leaves
+    the pending count, the same cap the tailor and cover stages apply.
+    """
+    from applypilot.database import get_connection
+
+    conn = get_connection()
+    conn.execute(
+        "UPDATE jobs SET pdf_attempts = COALESCE(pdf_attempts, 0) + 1 "
+        "WHERE tailored_resume_path = ?",
+        (str(text_path),),
+    )
+    conn.commit()
+
+
+def _settle_job_pdf_states(convert_budget: int | None = None) -> int:
+    """Reconcile the jobs table's PDF state with the filesystem.
+
+    The streaming pipeline counts pending pdf work from the jobs table
+    (pipeline._PENDING_SQL), so batch_convert must be the writer that
+    settles that state — otherwise a row whose .txt never changes keeps
+    the count above zero and the pdf stage busy-loops. Three settle paths:
+
+      - a matching PDF already exists on disk (including one this pass
+        just generated): mark pdf_generated_at — the work is done;
+      - the source .txt exists but has no PDF (e.g. outside the
+        TAILORED_DIR scan): convert it here, so the row settles
+        wherever the file lives;
+      - the source .txt has vanished: burn one pdf attempt so the row
+        ages out of the pending count under the same attempt cap the
+        tailor and cover stages use.
+
+    Args:
+        convert_budget: Maximum number of renders this reconciliation may
+            attempt (None = unbounded). Bookkeeping-only updates — marking
+            an existing PDF generated, burning an attempt for a vanished
+            source — always run; only renders consume budget. Rows beyond
+            the budget simply stay pending for the next pass.
+
+    Returns:
+        Number of rows settled as generated this pass.
+    """
+    from applypilot.database import _utc_now, get_connection
+
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT url, tailored_resume_path FROM jobs "
+        "WHERE tailored_resume_path IS NOT NULL "
+        "AND tailored_resume_path LIKE '%.txt' "
+        "AND pdf_generated_at IS NULL "
+        # Cap parity with pipeline._PENDING_SQL: an exhausted row is not
+        # pending, so reconciliation must not re-render it either (it
+        # would re-invoke Chromium for a known poison input forever).
+        "AND COALESCE(pdf_attempts, 0) < 5"
+    ).fetchall()
+
+    # Pass 1 — classify rows and do all filesystem work BEFORE any DB
+    # write: an open SQLite write transaction held across a Chromium
+    # render would block other stages' writes for the render's duration.
+    generated: list[tuple[str, Path]] = []
+    failed: list[tuple[str, Path]] = []
+    conversions: list[tuple[str, Path]] = []
+    for row in rows:
+        txt = Path(row["tailored_resume_path"])
+        pdf = txt.with_suffix(".pdf")
+        if pdf.exists():
+            generated.append((row["url"], txt))
+        elif txt.exists():
+            if convert_budget is not None and len(conversions) >= convert_budget:
+                continue  # over quota — stays pending for the next pass
+            conversions.append((row["url"], txt))
+        else:
+            failed.append((row["url"], txt))  # source vanished — burn an attempt
+
+    for url, txt in conversions:
+        try:
+            convert_to_pdf(txt)
+        except Exception as e:
+            log.error("PDF conversion failed for %s: %s", txt.name, e)
+            failed.append((url, txt))
+        else:
+            generated.append((url, txt))
+
+    # Pass 2 — one short write transaction with no renders inside it.
+    # Both updates are predicated on the row still pointing at the exact
+    # path this pass inspected: a concurrent reset + re-tailor that swaps
+    # the row to a new path must not be settled (or attempt-burned) by an
+    # obsolete render result for the old path.
+    now = _utc_now()
+    settled = 0
+    for url, txt in generated:
+        # Re-verify at write time: with history off a concurrent
+        # reset_job_tailoring deletes the stale .pdf — invalidating this
+        # mark keeps the row pending so the regenerated text converts.
+        if not txt.with_suffix(".pdf").exists():
+            continue
+        cur = conn.execute(
+            "UPDATE jobs SET pdf_generated_at = ? "
+            "WHERE url = ? AND tailored_resume_path = ?",
+            (now, url, str(txt)),
+        )
+        settled += cur.rowcount
+    for url, txt in failed:
+        conn.execute(
+            "UPDATE jobs SET pdf_attempts = COALESCE(pdf_attempts, 0) + 1 "
+            "WHERE url = ? AND tailored_resume_path = ?",
+            (url, str(txt)),
+        )
+    conn.commit()
+    return settled
+
+
 def batch_convert(limit: int = 50) -> int:
     """Convert .txt files in TAILORED_DIR that don't have corresponding PDFs.
 
     Scans for .txt files (excluding _JOB.txt and _REPORT.json), checks if a
     .pdf with the same stem already exists, and converts any that are missing.
+
+    Afterwards, reconciles the jobs table's PDF bookkeeping with the
+    filesystem (see _settle_job_pdf_states) so the streaming pipeline's
+    pending count converges instead of re-counting unchanged .txt paths
+    forever.
 
     Args:
         limit: Maximum number of files to convert.
@@ -403,7 +522,10 @@ def batch_convert(limit: int = 50) -> int:
         Number of PDFs generated.
     """
     if not TAILORED_DIR.exists():
+        # No directory does not mean no pending rows — sources may have
+        # been deleted since the last run. Settle the jobs table anyway.
         log.warning("Tailored directory does not exist: %s", TAILORED_DIR)
+        _settle_job_pdf_states()
         return 0
 
     txt_files = sorted(TAILORED_DIR.glob("*.txt"))
@@ -414,27 +536,58 @@ def batch_convert(limit: int = 50) -> int:
         if not f.name.endswith("_JOB.txt")
     ]
 
+    # Skip files whose job row has exhausted its pdf attempts (cap parity
+    # with pipeline._PENDING_SQL): the pipeline no longer counts them as
+    # pending, so re-invoking Chromium for a known poison input on every
+    # call would defeat the bounded-retry semantics.
+    from applypilot.database import get_connection
+
+    conn = get_connection()
+    exhausted = {
+        row["tailored_resume_path"]
+        for row in conn.execute(
+            "SELECT tailored_resume_path FROM jobs "
+            "WHERE COALESCE(pdf_attempts, 0) >= 5 "
+            "AND tailored_resume_path IS NOT NULL"
+        ).fetchall()
+    }
+
     # Filter to those without a corresponding PDF
     to_convert: list[Path] = []
     for f in candidates:
+        if str(f) in exhausted:
+            continue
         pdf_path = f.with_suffix(".pdf")
         if not pdf_path.exists():
             to_convert.append(f)
         if len(to_convert) >= limit:
             break
 
-    if not to_convert:
-        log.info("All text files already have PDFs.")
-        return 0
-
-    log.info("Converting %d files to PDF...", len(to_convert))
     converted = 0
-    for f in to_convert:
-        try:
-            convert_to_pdf(f)
-            converted += 1
-        except Exception as e:
-            log.error("Failed to convert %s: %s", f.name, e)
+    attempted = 0
+    if to_convert:
+        log.info("Converting %d files to PDF...", len(to_convert))
+        for f in to_convert:
+            attempted += 1  # a failed render spends the Chromium budget too
+            try:
+                convert_to_pdf(f)
+                converted += 1
+            except Exception as e:
+                log.error("Failed to convert %s: %s", f.name, e)
+                _record_pdf_failure(f)
+        log.info("Done: %d/%d PDFs generated in %s", converted, len(to_convert), TAILORED_DIR)
+    else:
+        log.info("All text files already have PDFs.")
 
-    log.info("Done: %d/%d PDFs generated in %s", converted, len(to_convert), TAILORED_DIR)
+    # Settle the jobs table's PDF bookkeeping so the streaming pipeline's
+    # pending count converges (rows whose PDF exists or whose source is
+    # gone must not pend forever). Runs on every exit path — including
+    # when nothing needed converting, which is exactly the stale-
+    # accounting state that used to busy-loop the pdf stage. The
+    # reconciliation's render quota is whatever is left of this call's
+    # limit, counting failed renders — a poison file must not get a
+    # second Chromium call through the reconciliation pass.
+    settled = _settle_job_pdf_states(convert_budget=limit - attempted)
+    if settled:
+        log.info("Settled %d job(s) with PDFs already on disk.", settled)
     return converted

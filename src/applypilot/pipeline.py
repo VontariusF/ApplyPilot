@@ -268,12 +268,20 @@ _PENDING_SQL: dict[str, str] = {
     ),
     "pdf": (
         "SELECT COUNT(*) FROM jobs WHERE tailored_resume_path IS NOT NULL "
-        "AND tailored_resume_path LIKE '%.txt'"
+        "AND tailored_resume_path LIKE '%.txt' "
+        "AND pdf_generated_at IS NULL "
+        "AND COALESCE(pdf_attempts, 0) < 5"
     ),
 }
 
 # How long to sleep between polling loops in streaming mode (seconds)
 _STREAM_POLL_INTERVAL = 10
+
+# Backoff between runner passes while work is still pending (seconds). The
+# sleep used to live only on the idle branch, so a stage whose runner could
+# not settle its pending count (e.g. the pdf stage before DB accounting)
+# spun at 100% CPU between no-op passes.
+_STREAM_BUSY_INTERVAL = 1.0
 
 # B6: maximum consecutive failed runner passes before a streaming stage gives
 # up and reports an error, instead of spinning on a poison job forever.
@@ -366,6 +374,12 @@ def _run_stage_streaming(
                         "consecutive_errors": consecutive_errors,
                     })
                     return
+            else:
+                # Yield the CPU between passes even when work remains, so a
+                # runner that cannot settle its pending count (yet) cannot
+                # busy-loop. Breaking on stop keeps shutdown responsive.
+                if stop_event.wait(timeout=_STREAM_BUSY_INTERVAL):
+                    break
         else:
             # No work right now
             upstream_done = upstream is None or tracker.is_done(upstream)

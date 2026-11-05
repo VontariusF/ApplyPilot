@@ -5,17 +5,20 @@ pipeline stage are created up front so any stage can run independently
 without migration ordering issues.
 """
 
+import logging
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from applypilot import config
-from applypilot.config import DB_PATH
+from applypilot.config import DB_PATH, history_enabled
 
 # Thread-local connection storage — each thread gets its own connection
 # (required for SQLite thread safety with parallel workers)
 _local = threading.local()
+
+log = logging.getLogger(__name__)
 
 # Document kinds tracked in document_versions (spec D2)
 KIND_RESUME = "resume"
@@ -102,6 +105,7 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
       - Scoring:    fit_score, score_reasoning, scored_at
       - Tailoring:  tailored_resume_path, tailored_at, tailor_attempts
       - Cover:      cover_letter_path, cover_letter_at, cover_attempts
+      - PDF:        pdf_generated_at, pdf_attempts
       - Apply:      applied_at, apply_status, apply_error, apply_attempts,
                    agent_id, last_attempted_at, apply_duration_ms, apply_task_id,
                    verification_confidence
@@ -156,6 +160,13 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             cover_letter_path     TEXT,
             cover_letter_at       TEXT,
             cover_attempts        INTEGER DEFAULT 0,
+
+            -- PDF conversion stage (scoring/pdf.py). Tracks whether the
+            -- tailored resume's PDF has been generated, so the streaming
+            -- pipeline's pending count reads state batch_convert actually
+            -- settles instead of re-counting unchanged .txt paths forever.
+            pdf_generated_at      TEXT,
+            pdf_attempts          INTEGER DEFAULT 0,
 
             -- Application stage
             applied_at            TEXT,
@@ -260,6 +271,9 @@ _ALL_COLUMNS: dict[str, str] = {
     "cover_letter_path": "TEXT",
     "cover_letter_at": "TEXT",
     "cover_attempts": "INTEGER DEFAULT 0",
+    # PDF conversion (scoring/pdf.py)
+    "pdf_generated_at": "TEXT",
+    "pdf_attempts": "INTEGER DEFAULT 0",
     # Application
     "applied_at": "TEXT",
     "apply_status": "TEXT",
@@ -722,10 +736,36 @@ def reset_job_tailoring(conn: sqlite3.Connection, url: str,
 
     Keeps fit_score and full_description (the tailor stage needs both) and
     resets the attempt counters so a previously-exhausted job can try again.
-    Existing files and version rows stay on disk — history is never deleted.
+    Also clears the PDF bookkeeping: the new resume is a different document,
+    so the stale pdf_generated_at/pdf_attempts of the previous one must not
+    keep it out of the pdf stage's pending count. With history off the
+    regenerated resume overwrites the same .txt stem, so the previous .pdf
+    at that stem is deleted — it renders the OLD resume and PDF
+    reconciliation would otherwise mark the regenerated document as done
+    from the stale file. With history on the replacement lands at a fresh
+    _v{N} stem; the old .txt/.pdf pair stays on disk — history is never
+    deleted. Version rows also stay on disk in both modes.
     Returns True when the job exists.
     """
-    sets = ["tailored_resume_path = NULL", "tailored_at = NULL", "tailor_attempts = 0"]
+    row = conn.execute(
+        "SELECT tailored_resume_path FROM jobs WHERE url = ?", (url,)
+    ).fetchone()
+    if row is None:
+        return False
+
+    old_path = row["tailored_resume_path"]
+    if old_path and old_path.lower().endswith(".txt") and not history_enabled():
+        stale_pdf = Path(old_path).with_suffix(".pdf")
+        try:
+            stale_pdf.unlink()
+        except FileNotFoundError:
+            pass  # nothing to invalidate
+        except OSError as e:
+            log.warning("Could not remove stale PDF %s during re-tailor "
+                        "reset: %s", stale_pdf, e)
+
+    sets = ["tailored_resume_path = NULL", "tailored_at = NULL", "tailor_attempts = 0",
+            "pdf_generated_at = NULL", "pdf_attempts = 0"]
     params: list = []
     if include_cover:
         sets += ["cover_letter_path = NULL", "cover_letter_at = NULL", "cover_attempts = 0"]
