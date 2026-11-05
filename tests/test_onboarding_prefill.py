@@ -180,6 +180,35 @@ def test_pending_context_survives_until_extraction(portal_client, fake_llm, monk
     assert state.profile_draft["personal"]["full_name"] == "Jane Doe"
 
 
+def test_spent_context_echo_still_strips_gated_claims(portal_client, fake_llm, monkeypatch):
+    """After the pending context is spent, the backend can still echo
+    resume-derived authorization claims — Claude from its session
+    memory, the provider from the earlier unstripped assistant reply in
+    the transcript — so a later chat-turn draft cannot be trusted as
+    the user's own prose (Codex P1 on 1f1b505). Every extraction is
+    behind the gate: the draft still finishes to review, but the gated
+    pair arrives empty for the wizard to ask."""
+    client, _ = portal_client
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
+    fake_llm.respond("Hello! Tell me about your background.")  # kickoff: no draft
+
+    onboarding.start_intake()
+    client.post("/onboarding/resume", data={"resume_text": "MARKER-RESUME-7788"})
+    client.post("/onboarding/start", data={"mode": "llm"})
+
+    fake_llm.respond(DRAFT_REPLY)  # first extraction spends the context
+    client.post("/onboarding/send", data={"text": "that's everything"})
+    assert onboarding.load_state().pending_context == ""
+
+    fake_llm.respond(DRAFT_REPLY)  # the memory-echo turn: no context delivered
+    client.post("/onboarding/send", data={"text": "yes, submit it"})
+    state = onboarding.load_state()
+    assert state.phase == onboarding.REVIEW  # chat draft still finishes to review
+    auth = state.profile_draft["work_authorization"]
+    assert auth["legally_authorized_to_work"] == ""  # the echo never survives
+    assert auth["require_sponsorship"] == ""
+
+
 def test_guided_answer_keeps_the_resume_in_play(portal_client, fake_llm, monkeypatch):
     """The guided-answer path (record_answer) carries the same resume
     context the chat path does: the provider's request includes the

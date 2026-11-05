@@ -1176,10 +1176,13 @@ def _strip_gated_claims(draft: dict) -> dict:
 
     The resume-first kickoff (and any extraction while the wizard walks
     its agenda) reads a document, not the user — _GATED_PATHS stays
-    absolute (spec art_ti3XJuNr): work authorization and sponsorship are
-    set by a wizard answer or, in agent-led chat, the user's own prose —
-    never by an extraction the wizard didn't ask about. Returns a copy;
-    the caller's draft is untouched.
+    absolute (spec art_ti3XJuNr): work authorization and sponsorship
+    are set by a wizard answer, never by an extraction. Later chat
+    turns are stripped too (Codex P1 on 1f1b505): a backend that once
+    saw the resume — Claude's session memory, or the provider's
+    transcript with the earlier unstripped reply — can echo its
+    authorization claims into any draft, indistinguishable from the
+    user's own prose. Returns a copy; the caller's draft is untouched.
     """
     stripped = json.loads(json.dumps(draft))  # deep copy: callers reuse the dict
     profile = stripped.get("_applypilot_profile")
@@ -1203,14 +1206,21 @@ def _after_reply(state: InterviewState, reply: str, allow_review: bool = True) -
     allow_review=False for the kickoff and guided-answer turns: there the
     agenda is not the agent's to finish — an extraction mid-walk feeds the
     prefill bridge (remaining_questions then asks only the gaps) instead
-    of yanking the wizard to review, and its gated claims are stripped
-    (_strip_gated_claims). Free-form chat finishes on the draft as before,
-    claims included — there the extraction paraphrases the user's own words.
+    of yanking the wizard to review. Free-form chat still finishes on the
+    draft — but the gated pair is stripped from EVERY extraction (Codex
+    P1 on 1f1b505): after a resume-backed turn spends the pending
+    context, the backend can still echo resume-derived authorization
+    claims — Claude from its session memory, the provider from the
+    earlier unstripped assistant reply in the transcript — and a later
+    chat turn cannot tell that echo from the user's own prose. The
+    wizard is the only authority for work authorization and sponsorship
+    (spec art_ti3XJuNr: _GATED_PATHS is absolute); recorded answers
+    overlay the draft either way, so stripping never fights a confirmed
+    answer.
     """
     draft = extract_profile_draft(reply)
     if draft is not None:
-        if not allow_review:
-            draft = _strip_gated_claims(draft)
+        draft = _strip_gated_claims(draft)
         profile, meta = normalize_profile(draft, state.answers)
         state.profile_draft = {**profile, "_applypilot_search": meta}
         if allow_review:
@@ -1317,10 +1327,12 @@ def send_message(text: str) -> InterviewState:
         state.error = None
         state.messages.append({"role": _ROLE_ASSISTANT, "content": reply})
         # A turn that consumed pending resume context is document-informed:
-        # its extraction is treated like the kickoff's (gated claims
-        # stripped, agenda kept for the bridge), not like a paraphrase of
-        # the user's own words. Pure chat turns keep the draft-to-review
-        # finish.
+        # its extraction is treated like the kickoff's (agenda kept for the
+        # bridge), not like a paraphrase of the user's own words. Pure chat
+        # turns keep the draft-to-review finish; the gated pair is stripped
+        # from every extraction either way (_after_reply — Codex P1 on
+        # 1f1b505: a backend echoing the resume's claims into a later
+        # chat-turn draft must not slip them into review).
         if not _after_reply(state, reply, allow_review=not context) and context:
             # No draft this turn: keep the pending context (the resume) in
             # play for the next one — a spent context that extracted nothing
