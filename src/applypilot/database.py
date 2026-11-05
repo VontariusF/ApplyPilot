@@ -165,7 +165,8 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             last_attempted_at     TEXT,
             apply_duration_ms     INTEGER,
             apply_task_id         TEXT,
-            verification_confidence TEXT
+            verification_confidence TEXT,
+            apply_conflict        TEXT
         )
     """)
     conn.execute("""
@@ -272,6 +273,10 @@ _ALL_COLUMNS: dict[str, str] = {
     # were actually uploaded when the application was submitted.
     "applied_resume_version_id": "INTEGER",
     "applied_cover_version_id": "INTEGER",
+    # Writer-coordination note (fix 5): set when a worker result met a
+    # conflicting manual mark and neither side was clobbered — the board and
+    # detail page show it so the desync is visible instead of silent.
+    "apply_conflict": "TEXT",
     # Board curation (spec Jobs panel): the user dismissed this listing from
     # the board. A presentation flag with a timestamp — never a pipeline
     # stage; STAGE_CONDITIONS and the automation queries ignore it.

@@ -84,6 +84,14 @@ class AmbiguousJobURLError(ValueError):
     """
 
 
+class ManualMarkConflict(RuntimeError):
+    """A manual mark landed on a job a run currently owns (fix 5).
+
+    Raised by mark_job; the portal turns it into a 409 with plain-language
+    guidance instead of silently overwriting the run's state.
+    """
+
+
 def _resolve_target_rows(target_url: str, core: str, rows: list) -> dict | None:
     """F4: pick the job a --url lookup refers to, or refuse loudly.
 
@@ -230,19 +238,83 @@ def mark_result(url: str, status: str, error: str | None = None,
                 permanent: bool = False, duration_ms: int | None = None,
                 task_id: str | None = None,
                 resume_version_id: int | None = None,
-                cover_version_id: int | None = None) -> None:
-    """Update a job's apply status in the database.
+                cover_version_id: int | None = None) -> str:
+    """Record a worker's apply outcome with writer coordination (fix 5).
 
     On 'applied', records the apply-time snapshot (spec D3): the version ids
     of the documents the worker actually uploaded. None means the document
     had no version row (pre-history or history disabled) — stored as NULL.
+
+    Coordination rule: the later writer wins only over matching state.
+
+    - A manual mark recorded while this worker held the lock supersedes a
+      matching worker result (worker applied + user marked applied): the
+      user's applied_at and document snapshot stay, the stale lock is
+      released, and the marker is cleared.
+    - A mismatched manual mark (worker result against a mark of the other
+      kind, or a manual mark on a lock the worker does not own) is a
+      conflict: nothing is clobbered — the run's outcome is recorded as a
+      visible `apply_conflict` note and the board keeps the manual state.
+
+    Returns one of "recorded", "superseded", or "conflict" so callers can
+    log what happened.
     """
     conn = get_connection()
     now = datetime.now(timezone.utc).isoformat()
+    row = conn.execute(
+        "SELECT apply_status, apply_task_id FROM jobs WHERE url = ?", (url,)
+    ).fetchone()
+    if row is None:
+        conn.rollback()
+        return "recorded"  # job vanished (e.g. removed mid-run) — nothing to write
+
+    marker = row["apply_task_id"]
+    if marker is None:
+        # Pre-marker row (this fork ran before coordination existed): fall
+        # back to status-based detection. An in_progress row with no marker
+        # is a plain run mid-flight — a later writer may legitimately record
+        # over it.
+        if row["apply_status"] == "applied":
+            marker = "manual-applied"
+        elif row["apply_status"] == "failed":
+            marker = "manual-failed"
+    elif not str(marker).startswith("manual-"):
+        marker = None  # a real engine task id from a previous result — not a mark
+
+    if marker in ("manual-applied", "manual-failed"):
+        # A human recorded an outcome while this worker held the lock.
+        if (status == "applied") == (marker == "manual-applied"):
+            # Matching state: the user's record stands. Clear the marker and
+            # settle the status; the manual timestamp and document snapshot
+            # stay untouched.
+            conn.execute("""
+                UPDATE jobs SET apply_task_id = NULL, agent_id = NULL,
+                               apply_status = CASE WHEN apply_status = 'in_progress'
+                               THEN ? ELSE apply_status END
+                WHERE url = ?
+            """, (status, url))
+            conn.commit()
+            return "superseded"
+        # Mismatch: the user says one thing, the worker another. Neither side
+        # wins silently — surface the worker's outcome as a conflict note and
+        # leave the manual record (including its timestamp) intact.
+        note = (f"Run reported '{status}' after you marked it "
+                f"{'applied' if marker == 'manual-applied' else 'failed'}"
+                f" — kept your mark" + (f": {error}" if error else "."))
+        conn.execute("""
+            UPDATE jobs SET apply_conflict = ?,
+                           apply_attempts = COALESCE(apply_attempts, 0) + 1,
+                           agent_id = NULL, apply_duration_ms = ?
+            WHERE url = ?
+        """, (note, duration_ms, url))
+        conn.commit()
+        return "conflict"
+
     if status == "applied":
         conn.execute("""
             UPDATE jobs SET apply_status = 'applied', applied_at = ?,
-                           apply_error = NULL, agent_id = NULL,
+                           apply_error = NULL, apply_conflict = NULL,
+                           agent_id = NULL,
                            apply_duration_ms = ?, apply_task_id = ?,
                            applied_resume_version_id = ?,
                            applied_cover_version_id = ?
@@ -253,10 +325,12 @@ def mark_result(url: str, status: str, error: str | None = None,
         conn.execute(f"""
             UPDATE jobs SET apply_status = ?, apply_error = ?,
                            apply_attempts = {attempts}, agent_id = NULL,
+                           apply_task_id = NULL, apply_conflict = NULL,
                            apply_duration_ms = ?, apply_task_id = ?
             WHERE url = ?
         """, (status, error or "unknown", duration_ms, task_id, url))
     conn.commit()
+    return "recorded"
 
 
 def release_lock(url: str) -> None:
@@ -350,21 +424,39 @@ def mark_job(url: str, status: str, reason: str | None = None) -> None:
     """
     conn = get_connection()
     now = datetime.now(timezone.utc).isoformat()
+    # Writer coordination (spec reliability fix 5): a manual mark on a job a
+    # run currently owns is refused — the run's own mark_result will record
+    # the real outcome, and overwriting the in_progress row here is what
+    # made board state and run reality diverge. `apply_task_id` doubles as
+    # the manual-mark marker ("manual-applied" / "manual-failed") so the
+    # worker can recognize a human outcome; normal worker writes and
+    # reset_failed clear it back to NULL.
+    row = conn.execute(
+        "SELECT apply_status FROM jobs WHERE url = ?", (url,)
+    ).fetchone()
+    if row is not None and row["apply_status"] == "in_progress":
+        conn.rollback()
+        raise ManualMarkConflict(
+            "A run is applying to this job right now — the card updates when "
+            "it finishes. Its result will be recorded on the job; if it "
+            "disagrees with your mark, the job shows the conflict."
+        )
     if status == "applied":
         # Apply-time snapshot (spec D3): for a manual mark the best answer to
         # "what did I send them?" is the document the job pointed at when the
         # mark was made. NULL stays NULL for pre-history documents.
-        row = conn.execute(
+        doc_row = conn.execute(
             "SELECT tailored_resume_path, cover_letter_path FROM jobs WHERE url = ?",
             (url,),
         ).fetchone()
         resume_vid = cover_vid = None
-        if row is not None:
-            resume_vid = resolve_version_id(conn, url, KIND_RESUME, row["tailored_resume_path"])
-            cover_vid = resolve_version_id(conn, url, KIND_COVER_LETTER, row["cover_letter_path"])
+        if doc_row is not None:
+            resume_vid = resolve_version_id(conn, url, KIND_RESUME, doc_row["tailored_resume_path"])
+            cover_vid = resolve_version_id(conn, url, KIND_COVER_LETTER, doc_row["cover_letter_path"])
         conn.execute("""
             UPDATE jobs SET apply_status = 'applied', applied_at = ?,
                            apply_error = NULL, agent_id = NULL,
+                           apply_task_id = 'manual-applied',
                            applied_resume_version_id = ?,
                            applied_cover_version_id = ?
             WHERE url = ?
@@ -372,7 +464,8 @@ def mark_job(url: str, status: str, reason: str | None = None) -> None:
     else:
         conn.execute("""
             UPDATE jobs SET apply_status = 'failed', apply_error = ?,
-                           apply_attempts = 99, agent_id = NULL
+                           apply_attempts = 99, agent_id = NULL,
+                           apply_task_id = 'manual-failed'
             WHERE url = ?
         """, (reason or "manual", url))
     conn.commit()
@@ -390,7 +483,8 @@ def reset_failed() -> int:
     conn = get_connection()
     cursor = conn.execute("""
         UPDATE jobs SET apply_status = NULL, apply_error = NULL,
-                       apply_attempts = 0, agent_id = NULL
+                       apply_attempts = 0, agent_id = NULL,
+                       apply_task_id = NULL
         WHERE apply_status = 'failed'
           OR (apply_status IS NOT NULL AND apply_status != 'applied'
               AND apply_status != 'in_progress')
@@ -404,6 +498,16 @@ def reset_failed() -> int:
 # ---------------------------------------------------------------------------
 # Per-job execution
 # ---------------------------------------------------------------------------
+
+def _coordination_note(outcome: str, job: dict) -> str:
+    """Plain-language run-log line for a coordinated (non-clobbered) result."""
+    title = _job_title(job)[:30]
+    if outcome == "superseded":
+        return (f"Your manual mark on '{title}' stands — the run agreed with "
+                "it and kept it")
+    return (f"Run finished on '{title}' but conflicts with your manual mark — "
+            "the job shows both")
+
 
 def run_job(job: dict, port: int, worker_id: int = 0,
             model: str = "sonnet", dry_run: bool = False,
@@ -726,17 +830,21 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
                 add_event(f"[W{worker_id}] Skipped: {_job_title(job)[:30]}")
                 continue
             elif result == "applied":
-                mark_result(job["url"], "applied", duration_ms=duration_ms,
-                            resume_version_id=job.get("resume_version_id"),
-                            cover_version_id=job.get("cover_version_id"))
+                outcome = mark_result(job["url"], "applied", duration_ms=duration_ms,
+                                      resume_version_id=job.get("resume_version_id"),
+                                      cover_version_id=job.get("cover_version_id"))
+                if outcome != "recorded":
+                    add_event(f"[W{worker_id}] {_coordination_note(outcome, job)}")
                 applied += 1
                 update_state(worker_id, jobs_applied=applied,
                              jobs_done=applied + failed)
             else:
                 reason = result.split(":", 1)[-1] if ":" in result else result
-                mark_result(job["url"], "failed", reason,
-                            permanent=_is_permanent_failure(result),
-                            duration_ms=duration_ms)
+                outcome = mark_result(job["url"], "failed", reason,
+                                      permanent=_is_permanent_failure(result),
+                                      duration_ms=duration_ms)
+                if outcome != "recorded":
+                    add_event(f"[W{worker_id}] {_coordination_note(outcome, job)}")
                 failed += 1
                 update_state(worker_id, jobs_failed=failed,
                              jobs_done=applied + failed)
