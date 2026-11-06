@@ -1474,14 +1474,19 @@ def _draft_value_empty(value) -> bool:
 def _merge_extracted_draft(existing: dict, profile: dict, meta: dict) -> tuple[dict, dict]:
     """Merge a fresh extraction into the draft the interview already holds.
 
-    Field-wise union over normalized shapes on both sides: a value the
-    new extraction carries fills a field the existing draft holds empty
-    or absent — a non-empty existing value never loses its slot to a
-    later, sparser fenced block (the resume's extraction is not
-    re-derivable once the pending context is spent, and only recorded
-    answers, review edits, and chip clears intentionally change values —
-    each of which runs through normalize_profile after the merge).
-    Sections the incoming extraction lacks keep whatever they held.
+    Field-wise correction merge over normalized shapes on both sides: a
+    non-empty value the new extraction carries fills a field the existing
+    draft holds empty — or updates a filled one, because the later block
+    is the backend's current answer, and mid-interview the user voices
+    corrections in chat that only arrive this way (F-4: a sparse block
+    correcting one field must not drop corrections to others, and a
+    field the incoming block does not carry keeps its slot — the resume's
+    extraction is not re-derivable once the pending context is spent, so
+    absence never erases). Sections the incoming extraction lacks keep
+    whatever they held. Recorded answers, review edits, and chip clears
+    intentionally change values a different way — they run through
+    normalize_profile after the merge, and the answer overlay still wins
+    over any draft value at the bridge (the user's click always wins).
     """
     if not isinstance(existing, dict) or not existing:
         return profile, meta
@@ -1493,14 +1498,14 @@ def _merge_extracted_draft(existing: dict, profile: dict, meta: dict) -> tuple[d
         base = base if isinstance(base, dict) else {}
         merged_fields = dict(base)
         for field_name, value in fields.items():
-            if _draft_value_empty(merged_fields.get(field_name)):
+            if not _draft_value_empty(value):
                 merged_fields[field_name] = value
         merged_profile[section] = merged_fields
     existing_meta = existing.get("_applypilot_search")
     existing_meta = existing_meta if isinstance(existing_meta, dict) else {}
     merged_meta = dict(existing_meta)
     for key, value in meta.items():
-        if _draft_value_empty(merged_meta.get(key)):
+        if not _draft_value_empty(value):
             merged_meta[key] = value
     return merged_profile, merged_meta
 
