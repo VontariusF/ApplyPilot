@@ -1,7 +1,7 @@
 """ApplyPilot CLI — the main entry point."""
 
 from __future__ import annotations
-
+import json
 import logging
 import os
 from typing import Optional
@@ -42,6 +42,28 @@ def _bootstrap() -> None:
     load_env()
     ensure_dirs()
     init_db()
+
+
+# Presentation-free states shared by the Rich renderer and the --json
+# contract. "fail" renders as MISSING (the historical doctor wording) in
+# Rich mode.
+_MARKS = {
+    "ok": "[green]OK[/green]",
+    "warn": "[yellow]WARN[/yellow]",
+    "fail": "[red]MISSING[/red]",
+    "optional": "[dim]optional[/dim]",
+}
+
+
+def _emit_json(payload: dict) -> None:
+    """Write one pure-JSON document to stdout — no Rich markup, no stderr."""
+    typer.echo(json.dumps(payload, indent=2, default=str))
+
+
+def _emit_json_error(code: str, message: str) -> None:
+    """Write the --json error envelope to stdout and exit nonzero."""
+    _emit_json({"error": {"code": code, "message": message}})
+    raise typer.Exit(code=1)
 
 
 def _version_callback(value: bool) -> None:
@@ -393,11 +415,25 @@ def apply(
 
 
 @app.command()
-def status() -> None:
+def status(
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit the raw pipeline-stats dict as JSON instead of a Rich table."
+    ),
+) -> None:
     """Show pipeline statistics from the database."""
     _bootstrap()
 
     from applypilot.database import get_stats
+
+    if json_output:
+        try:
+            stats = get_stats()
+        except Exception as exc:
+            _emit_json_error("database_error", f"{type(exc).__name__}: {exc}")
+        # Emitted outside the except so a serialization bug is not
+        # mislabeled as a database failure.
+        _emit_json(stats)
+        return
 
     stats = get_stats()
 
@@ -502,69 +538,83 @@ def portal(
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
 
 
-@app.command()
-def doctor() -> None:
-    """Check your setup and diagnose missing requirements."""
+def _doctor_checks() -> list[dict]:
+    """Collect doctor checks as presentation-free data.
+
+    Each check is {name, status, note, fix}: status is one of
+    ok|warn|fail|optional, and fix is a machine-readable remediation hint
+    ({code, command}) or None. Both the Rich renderer and the --json
+    contract consume this, so the two surfaces cannot drift apart.
+    """
+    import os
     import shutil
+
     from applypilot.config import (
-        load_env, PROFILE_PATH, RESUME_PATH, RESUME_PDF_PATH,
-        SEARCH_CONFIG_PATH, ENV_PATH, get_chrome_path,
+        PROFILE_PATH, RESUME_PATH, RESUME_PDF_PATH,
+        SEARCH_CONFIG_PATH, get_chrome_path,
     )
 
-    load_env()
+    checks: list[dict] = []
 
-    ok_mark = "[green]OK[/green]"
-    fail_mark = "[red]MISSING[/red]"
-    warn_mark = "[yellow]WARN[/yellow]"
-
-    results: list[tuple[str, str, str]] = []  # (check, status, note)
+    def _check(name: str, state: str, note: str, fix: dict | None = None) -> None:
+        checks.append({"name": name, "status": state, "note": note, "fix": fix})
 
     # --- Tier 1 checks ---
     # Profile
     if PROFILE_PATH.exists():
-        results.append(("profile.json", ok_mark, str(PROFILE_PATH)))
+        _check("profile.json", "ok", str(PROFILE_PATH))
     else:
-        results.append(("profile.json", fail_mark, "Run 'applypilot init' to create"))
+        _check("profile.json", "fail", "Run 'applypilot init' to create",
+               {"code": "run_init", "command": "applypilot init"})
 
     # Resume
     if RESUME_PATH.exists():
-        results.append(("resume.txt", ok_mark, str(RESUME_PATH)))
+        _check("resume.txt", "ok", str(RESUME_PATH))
     elif RESUME_PDF_PATH.exists():
-        results.append(("resume.txt", warn_mark, "Only PDF found — plain-text needed for AI stages"))
+        _check("resume.txt", "warn", "Only PDF found — plain-text needed for AI stages",
+               {"code": "add_plain_text_resume", "command": None})
     else:
-        results.append(("resume.txt", fail_mark, "Run 'applypilot init' to add your resume"))
+        _check("resume.txt", "fail", "Run 'applypilot init' to add your resume",
+               {"code": "run_init", "command": "applypilot init"})
 
     # Search config
     if SEARCH_CONFIG_PATH.exists():
-        results.append(("searches.yaml", ok_mark, str(SEARCH_CONFIG_PATH)))
+        _check("searches.yaml", "ok", str(SEARCH_CONFIG_PATH))
     else:
-        results.append(("searches.yaml", warn_mark, "Will use example config — run 'applypilot init'"))
+        _check("searches.yaml", "warn", "Will use example config — run 'applypilot init'",
+               {"code": "run_init", "command": "applypilot init"})
 
     # jobspy (discovery dep installed separately)
     try:
         import jobspy  # noqa: F401
-        results.append(("python-jobspy", ok_mark, "Job board scraping available"))
+        _check("python-jobspy", "ok", "Job board scraping available")
     except ImportError:
-        results.append(("python-jobspy", warn_mark,
-                        "pip install --no-deps python-jobspy && pip install pydantic tls-client requests markdownify regex"))
+        pip_line = ("pip install --no-deps python-jobspy && pip install pydantic "
+                    "tls-client requests markdownify regex")
+        _check("python-jobspy", "warn", pip_line, {"code": "install_jobspy", "command": pip_line})
 
-    # Composio (optional discovery source — web3.career)
-    from applypilot.discovery.composio import doctor_row
-    results.append(("Composio discovery", *doctor_row()))
+    # Composio (optional discovery source — web3.career). composio_state()
+    # is the presentation-free source; doctor_row() only maps its states to
+    # legacy Rich marks, which _MARKS now owns.
+    from applypilot.discovery.composio import composio_state
+    state, note = composio_state()
+    if state == "warn":
+        _check("Composio discovery", state, note, {"code": "fix_composio_discovery", "command": None})
+    elif state == "optional":
+        _check("Composio discovery", state, note, {"code": "set_composio_api_key", "command": None})
+    else:
+        _check("Composio discovery", state, note)
 
     # --- Tier 2 checks ---
-    import os
     from applypilot.llm import describe_provider
 
     try:
         info = describe_provider()
-        results.append((
-            "LLM provider",
-            ok_mark,
-            f"{info['provider']}: {info['base_url']} (model {info['model']}, key {info['key_hint']})",
-        ))
+        _check("LLM provider", "ok",
+               f"{info['provider']}: {info['base_url']} (model {info['model']}, key {info['key_hint']})")
     except RuntimeError as exc:
-        results.append(("LLM provider", fail_mark, str(exc)))
+        _check("LLM provider", "fail", str(exc),
+               {"code": "configure_llm_provider", "command": "applypilot init"})
 
     # --- Tier 3 checks ---
     from applypilot import engine_auth
@@ -573,72 +623,106 @@ def doctor() -> None:
     claude = engine_auth.claude_status()
     if claude.state == engine_auth.SIGNED_IN:
         method = f", sign-in method: {claude.auth_method}" if claude.auth_method else ""
-        results.append(("Claude Code CLI", ok_mark, f"{claude.binary} (signed in{method})"))
+        _check("Claude Code CLI", "ok", f"{claude.binary} (signed in{method})")
     elif claude.state == engine_auth.SIGNED_OUT:
         note = f"Installed at {claude.binary} but not signed in — run `claude auth login` (needed for auto-apply)"
         if claude.error:
             note += f" [{claude.error}]"
-        results.append(("Claude Code CLI", warn_mark, note))
+        _check("Claude Code CLI", "warn", note, {"code": "claude_cli_login", "command": "claude auth login"})
     else:
-        results.append(("Claude Code CLI", fail_mark,
-                        "Install from https://claude.ai/code (needed for auto-apply)"))
+        _check("Claude Code CLI", "fail",
+               "Install from https://claude.ai/code (needed for auto-apply)",
+               {"code": "install_claude_cli", "command": None})
 
     # Factory Droid CLI (optional second engine) — install + key state
     droid = engine_auth.droid_status()
     if droid.state == engine_auth.SIGNED_IN:
-        results.append(("Factory Droid CLI", ok_mark, f"{droid.binary} (FACTORY_API_KEY set)"))
+        _check("Factory Droid CLI", "ok", f"{droid.binary} (FACTORY_API_KEY set)")
     elif droid.state == engine_auth.SIGNED_OUT:
-        results.append(("Factory Droid CLI", warn_mark,
-                        f"Installed at {droid.binary}; set FACTORY_API_KEY in .env to use it"))
+        _check("Factory Droid CLI", "warn",
+               f"Installed at {droid.binary}; set FACTORY_API_KEY in .env to use it",
+               {"code": "set_factory_api_key", "command": None})
     else:
-        results.append(("Factory Droid CLI", warn_mark,
-                        "Install from https://docs.factory.ai/cli (only needed for --engine droid)"))
+        _check("Factory Droid CLI", "warn",
+               "Install from https://docs.factory.ai/cli (only needed for --engine droid)",
+               {"code": "install_droid_cli", "command": None})
 
     # Chrome
     try:
         chrome_path = get_chrome_path()
-        results.append(("Chrome/Chromium", ok_mark, chrome_path))
+        _check("Chrome/Chromium", "ok", chrome_path)
     except FileNotFoundError:
-        results.append(("Chrome/Chromium", fail_mark,
-                        "Install Chrome or set CHROME_PATH env var (needed for auto-apply)"))
+        _check("Chrome/Chromium", "fail",
+               "Install Chrome or set CHROME_PATH env var (needed for auto-apply)",
+               {"code": "install_chrome", "command": None})
 
     # Node.js / npx (for Playwright MCP)
     npx_bin = shutil.which("npx")
     if npx_bin:
-        results.append(("Node.js (npx)", ok_mark, npx_bin))
+        _check("Node.js (npx)", "ok", npx_bin)
     else:
-        results.append(("Node.js (npx)", fail_mark,
-                        "Install Node.js 18+ from nodejs.org (needed for auto-apply)"))
+        _check("Node.js (npx)", "fail",
+               "Install Node.js 18+ from nodejs.org (needed for auto-apply)",
+               {"code": "install_node", "command": None})
 
     # CapSolver (optional)
-    capsolver = os.environ.get("CAPSOLVER_API_KEY")
-    if capsolver:
-        results.append(("CapSolver API key", ok_mark, "CAPTCHA solving enabled"))
+    if os.environ.get("CAPSOLVER_API_KEY"):
+        _check("CapSolver API key", "ok", "CAPTCHA solving enabled")
     else:
-        results.append(("CapSolver API key", "[dim]optional[/dim]",
-                        "Set CAPSOLVER_API_KEY in .env for CAPTCHA solving"))
+        _check("CapSolver API key", "optional",
+               "Set CAPSOLVER_API_KEY in .env for CAPTCHA solving",
+               {"code": "set_capsolver_api_key", "command": None})
 
     # FACTORY_API_KEY (optional, droid engine)
-    factory_key = os.environ.get("FACTORY_API_KEY")
-    if factory_key:
-        results.append(("FACTORY_API_KEY", ok_mark, "Droid engine auth available"))
+    if os.environ.get("FACTORY_API_KEY"):
+        _check("FACTORY_API_KEY", "ok", "Droid engine auth available")
     else:
-        results.append(("FACTORY_API_KEY", "[dim]optional[/dim]",
-                        "Set FACTORY_API_KEY in .env to use --engine droid"))
+        _check("FACTORY_API_KEY", "optional",
+               "Set FACTORY_API_KEY in .env to use --engine droid",
+               {"code": "set_factory_api_key", "command": None})
+
+    return checks
+
+
+@app.command()
+def doctor(
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON instead of the Rich report."
+    ),
+) -> None:
+    """Check your setup and diagnose missing requirements."""
+    from applypilot.config import load_env, get_tier, TIER_LABELS
+
+    load_env()
+
+    if json_output:
+        try:
+            checks = _doctor_checks()
+        except Exception as exc:
+            _emit_json_error("doctor_error", f"{type(exc).__name__}: {exc}")
+        tier = get_tier()
+        _emit_json({
+            "ok": not any(c["status"] == "fail" for c in checks),
+            "tier": tier,
+            "tier_label": TIER_LABELS[tier],
+            "checks": checks,
+        })
+        return
+
+    checks = _doctor_checks()
 
     # --- Render results ---
     console.print()
     console.print("[bold]ApplyPilot Doctor[/bold]\n")
 
-    col_w = max(len(r[0]) for r in results) + 2
-    for check, status, note in results:
-        pad = " " * (col_w - len(check))
-        console.print(f"  {check}{pad}{status}  [dim]{note}[/dim]")
+    col_w = max(len(c["name"]) for c in checks) + 2
+    for check in checks:
+        pad = " " * (col_w - len(check["name"]))
+        console.print(f"  {check['name']}{pad}{_MARKS[check['status']]}  [dim]{check['note']}[/dim]")
 
     console.print()
 
     # Tier summary
-    from applypilot.config import get_tier, TIER_LABELS
     tier = get_tier()
     console.print(f"[bold]Current tier: Tier {tier} — {TIER_LABELS[tier]}[/bold]")
 
