@@ -155,8 +155,33 @@ def _resolve_target_rows(target_url: str, core: str, rows: list) -> dict | None:
     return dict(rows[0])
 
 
+def _queue_filters(params: list, min_score: int) -> str:
+    """The queue's blocked-site/URL WHERE tail, shared by acquire_job and
+    derive_batch so the plan preview can never describe a batch the worker
+    would refuse (count_apply_eligible documents the same sync rule).
+
+    Appends the leading filter params (stale cutoff, attempt cap, min_score)
+    and then the blocked-site/URL params to `params`, in SQL order.
+    """
+    params.extend([_stale_lock_cutoff(),
+                   config.DEFAULTS["max_apply_attempts"],
+                   min_score])
+    blocked_sites, blocked_patterns = _load_blocked()
+    site_clause = ""
+    if blocked_sites:
+        placeholders = ",".join("?" * len(blocked_sites))
+        site_clause = f"AND site NOT IN ({placeholders})"
+        params.extend(blocked_sites)
+    url_clauses = ""
+    if blocked_patterns:
+        url_clauses = " ".join("AND url NOT LIKE ?" for _ in blocked_patterns)
+        params.extend(blocked_patterns)
+    return f"{site_clause} {url_clauses}"
+
+
 def acquire_job(target_url: str | None = None, min_score: int = 7,
-                worker_id: int = 0, agent_label: str = "claude") -> dict | None:
+                worker_id: int = 0, agent_label: str = "claude",
+                allowed_urls: set[str] | None = None) -> dict | None:
     """Atomically acquire the next job to apply to.
 
     Args:
@@ -164,6 +189,9 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
         min_score: Minimum fit_score threshold.
         worker_id: Worker claiming this job (for tracking).
         agent_label: Engine name recorded in agent_id ("{label}-worker-{id}").
+        allowed_urls: Gate 2 pin — when set (with no target_url), the queue
+            is narrowed to exactly these URLs: a confirmed plan's batch is
+            the batch that runs. Same transaction, same lock path.
 
     Returns:
         Job dict or None if the queue is empty.
@@ -197,22 +225,17 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                   target_url, core, target_url, core)).fetchall()
             row = _resolve_target_rows(target_url, core, rows)
         else:
-            blocked_sites, blocked_patterns = _load_blocked()
-            # Build parameterized filters to avoid SQL injection
+            # Build parameterized filters to avoid SQL injection.
             # B4: an in_progress lock whose last_attempted_at predates the
             # stale cutoff is reclaimable (the owning worker crashed).
-            params: list = [_stale_lock_cutoff(),
-                            config.DEFAULTS["max_apply_attempts"],
-                            min_score]
-            site_clause = ""
-            if blocked_sites:
-                placeholders = ",".join("?" * len(blocked_sites))
-                site_clause = f"AND site NOT IN ({placeholders})"
-                params.extend(blocked_sites)
-            url_clauses = ""
-            if blocked_patterns:
-                url_clauses = " ".join(f"AND url NOT LIKE ?" for _ in blocked_patterns)
-                params.extend(blocked_patterns)
+            params: list = []
+            filter_clauses = _queue_filters(params, min_score)
+            # Gate 2: a confirmed batch pins acquisition to the planned
+            # URLs — the pin only narrows the queue, never widens it.
+            pin_clause = ""
+            if allowed_urls is not None:
+                pin_clause = f"AND url IN ({','.join('?' * len(allowed_urls))})"
+                params.extend(sorted(allowed_urls))
             row = conn.execute(f"""
                 SELECT url, title, site, application_url, tailored_resume_path,
                        fit_score, location, full_description, cover_letter_path,
@@ -224,8 +247,8 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                            AND last_attempted_at <= ?))
                   AND (apply_attempts IS NULL OR apply_attempts < ?)
                   AND fit_score >= ?
-                  {site_clause}
-                  {url_clauses}
+                  {filter_clauses}
+                  {pin_clause}
                 ORDER BY fit_score DESC, url
                 LIMIT 1
             """, params).fetchone()
@@ -275,6 +298,35 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
     except Exception:
         conn.rollback()
         raise
+
+
+def derive_batch(min_score: int = 7, limit: int = 1) -> list[dict]:
+    """Read-only preview of the batch the apply queue would run (Gate 2).
+
+    Same queue predicate as acquire_job's non-target branch (shared
+    _queue_filters — one selection truth), but a plain SELECT: no BEGIN
+    IMMEDIATE, no lock, no write of any kind. Ordered the way the worker
+    picks (fit_score DESC, url) and cut at the plan's batch size.
+    """
+    conn = get_connection()
+    params: list = []
+    filter_clauses = _queue_filters(params, min_score)
+    rows = conn.execute(f"""
+        SELECT url, title, site, application_url, tailored_resume_path,
+               fit_score, location, full_description, cover_letter_path,
+               apply_status
+        FROM jobs
+        WHERE tailored_resume_path IS NOT NULL
+          AND (apply_status IS NULL OR apply_status = 'failed'
+               OR (apply_status = 'in_progress' AND last_attempted_at IS NOT NULL
+                   AND last_attempted_at <= ?))
+          AND (apply_attempts IS NULL OR apply_attempts < ?)
+          AND fit_score >= ?
+          {filter_clauses}
+        ORDER BY fit_score DESC, url
+        LIMIT ?
+    """, [*params, limit]).fetchall()
+    return [dict(row) for row in rows]
 
 
 def mark_result(url: str, status: str, error: str | None = None,
@@ -861,7 +913,8 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
                 model: str = "sonnet", dry_run: bool = False,
                 continuous: bool = False,
                 engine: str = "claude",
-                daily_cap: int | None = None) -> tuple[int, int]:
+                daily_cap: int | None = None,
+                allowed_urls: set[str] | None = None) -> tuple[int, int]:
     """Run jobs sequentially until limit is reached or queue is empty.
 
     Args:
@@ -880,6 +933,8 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
             (P2-2). None disables the check (manual CLI runs without a
             cap). Re-read live before every job so applications made by
             any path since the run started count.
+        allowed_urls: Gate 2 pin (confirmed plan) — acquisition is
+            narrowed to exactly these URLs.
 
     Returns:
         Tuple of (applied_count, failed_count).
@@ -908,7 +963,8 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
                      last_action="waiting for job", actions=0)
 
         job = acquire_job(target_url=target_url, min_score=min_score,
-                          worker_id=worker_id, agent_label=engine_obj.name)
+                          worker_id=worker_id, agent_label=engine_obj.name,
+                          allowed_urls=allowed_urls)
         if not job:
             if not continuous:
                 add_event(f"[W{worker_id}] Queue empty")
@@ -1021,7 +1077,8 @@ def main(limit: int = 1, target_url: str | None = None,
          min_score: int = 7, headless: bool = False, model: str = "sonnet",
          dry_run: bool = False, continuous: bool = False,
          poll_interval: int = 60, workers: int = 1,
-         engine: str = "claude", daily_cap: int | None = None) -> None:
+         engine: str = "claude", daily_cap: int | None = None,
+         allowed_urls: set[str] | None = None) -> None:
     """Launch the apply pipeline.
 
     Args:
@@ -1039,6 +1096,8 @@ def main(limit: int = 1, target_url: str | None = None,
         daily_cap: Max applications per UTC day this run must respect
             (P2-2); None disables the check. Portal preset starts pass
             the configured cap so mid-run drift cannot exceed it.
+        allowed_urls: Gate 2 pin (confirmed plan) — the run draws only
+            from these URLs; continuous polling is refused with a pin.
     """
     global POLL_INTERVAL
     POLL_INTERVAL = poll_interval
@@ -1060,6 +1119,8 @@ def main(limit: int = 1, target_url: str | None = None,
         workers = 1
 
     if continuous:
+        if allowed_urls is not None:
+            raise ValueError("a pinned batch (confirmed plan) cannot run continuously")
         effective_limit = 0
         mode_label = "continuous"
     else:
@@ -1125,6 +1186,7 @@ def main(limit: int = 1, target_url: str | None = None,
                     continuous=continuous,
                     engine=engine_obj.name,
                     daily_cap=daily_cap,
+                    allowed_urls=allowed_urls,
                 )
             else:
                 # Multi-worker — distribute limit across workers (B1: a
@@ -1147,6 +1209,7 @@ def main(limit: int = 1, target_url: str | None = None,
                             continuous=continuous,
                             engine=engine_obj.name,
                             daily_cap=daily_cap,
+                            allowed_urls=allowed_urls,
                         ): i
                         for i in range(workers)
                     }
