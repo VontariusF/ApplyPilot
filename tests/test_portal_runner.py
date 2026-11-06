@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -392,3 +393,88 @@ def test_start_run_popen_failure_leaves_a_terminal_row(portal_env, monkeypatch):
     assert len(rows) == 1
     assert rows[0]["status"] == "failed"
     assert rows[0]["ended_at"] is not None
+
+
+# ---------------------------------------------------------------------------
+# F-2: the guarded start — one choke point for every manual start
+# ---------------------------------------------------------------------------
+
+_SLEEPING_CHILD = [sys.executable, "-c", "import time; time.sleep(30)"]
+
+
+def test_concurrent_manual_starts_admit_only_one(portal_env):
+    """F-2: two concurrent manual starts must not both spawn.
+
+    The live verification drove two simultaneous POST /runs/start against
+    a daily cap of 1 and both ran — together applying past the cap. The
+    guard refusing a second run existed only on the scheduler path; this
+    test drives the shared choke point exactly the way the two HTTP
+    threads hit it: concurrently, against an empty registry.
+    """
+    runner.init_registry()
+    started = threading.Barrier(2)
+    results: list = []
+    errors: list = []
+
+    def attempt():
+        try:
+            started.wait()
+            results.append(runner.start_guarded(
+                "apply", {"limit": "1", "daily_cap": "1"},
+                command=_SLEEPING_CHILD, emit_jsonl=False))
+        except Exception as e:  # noqa: BLE001 - the refusal IS the assertion
+            errors.append(e)
+
+    threads = [threading.Thread(target=attempt) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(results) == 1, f"expected exactly 1 admitted, errors={errors}"
+    assert len(errors) == 1 and isinstance(errors[0], runner.RunActiveError)
+    assert runner.RUN_ACTIVE_MESSAGE in str(errors[0])
+    # Exactly one running row: the loser never reached the registry.
+    running = runner.running_runs()
+    assert len(running) == 1 and running[0]["kind"] == "apply"
+    runner.cancel_run(results[0]["id"])
+
+
+def test_manual_start_refused_while_run_active(portal_env):
+    """A manual start against an active run is refused with the plain
+    refusal — the same message the scheduler has always used."""
+    first = runner.start_guarded("pipeline", {}, command=_SLEEPING_CHILD,
+                                 emit_jsonl=False)
+    try:
+        with pytest.raises(runner.RunActiveError, match="already active"):
+            runner.start_guarded("pipeline", {}, command=_SLEEPING_CHILD,
+                                 emit_jsonl=False)
+    finally:
+        runner.cancel_run(first["id"])
+    # The refusal freed nothing by itself, but after the cancel the next
+    # guarded start is admitted again.
+    second = runner.start_guarded("pipeline", {}, command=_SLEEPING_CHILD,
+                                  emit_jsonl=False)
+    runner.cancel_run(second["id"])
+
+
+def test_scheduler_guard_delegates_to_the_runner_guard(portal_env, monkeypatch):
+    """The scheduler's guarded start and the manual routes share one
+    choke point, so their refusals can never drift apart."""
+    called: dict = {}
+
+    def fake_start(kind, params, command=None, emit_jsonl=None):
+        called["kind"] = kind
+        return {"id": "via-runner", "status": "running"}
+
+    monkeypatch.setattr(runner, "start_run", fake_start)
+    from applypilot.portal import automation
+
+    row = automation.start_guarded("pipeline", {})
+    assert row == {"id": "via-runner", "status": "running"}
+    assert called["kind"] == "pipeline"
+
+    monkeypatch.setattr(
+        runner, "running_runs",
+        lambda: [{"id": "active", "kind": "pipeline"}])
+    assert automation.start_guarded("pipeline", {}) is None

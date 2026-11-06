@@ -355,7 +355,9 @@ def create_app() -> FastAPI:
                                **await _jobs_board_context_async(view))
             return RedirectResponse(f"/jobs?error={quote(message)}", status_code=303)
         try:
-            runner.start_run("apply", {"url": url})
+            # F-2: manual starts acquire the active-run guard — a second
+            # click must never spawn a concurrent run past the cap.
+            runner.start_guarded("apply", {"url": url})
         except runner.ParamError as e:
             if hx:
                 return _render(request, "partials/jobs_board.html",
@@ -454,7 +456,13 @@ def create_app() -> FastAPI:
         as the Automation cards) shows live counts — no dead-end
         redirect to /runs.
         """
-        runner.start_run("rescore", {})
+        # F-2: guarded like every manual start; the refusal surfaces as an
+        # error redirect instead of an unhandled 500.
+        try:
+            runner.start_guarded("rescore", {})
+        except runner.ParamError as e:
+            return RedirectResponse(f"/jobs?error={quote(str(e))}",
+                                    status_code=303)
         return RedirectResponse("/jobs", status_code=303)
 
     # ------------------------------------------------------------------
@@ -545,7 +553,9 @@ def create_app() -> FastAPI:
             else "/runs"
         params = {k: v for k, v in form.items() if v}
         try:
-            runner.start_run(kind, params)
+            # F-2: the manual-start guard — a double click must not spawn a
+            # concurrent run that together blows past the daily cap.
+            runner.start_guarded(kind, params)
         except runner.ParamError as e:
             if request.headers.get("HX-Request"):
                 # In-context failure feedback on the board itself (the empty
@@ -623,7 +633,13 @@ def create_app() -> FastAPI:
                     idle += 1
             yield {"event": "end", "data": "closed"}
 
-        return EventSourceResponse(gen())
+        # ping keeps the connection warm and — more importantly — makes the
+        # response write on a fixed cadence, so a client that vanished
+        # (page navigated away, test teardown) is detected when the write
+        # fails and its generator is cancelled. Without it an abandoned
+        # stream keeps polling the board DB every POLL_SECONDS for the
+        # full quiet window (1200 polls ~ 10 minutes).
+        return EventSourceResponse(gen(), ping=5)
 
     @app.get("/runs/{run_id}/logstream")
     async def run_logstream(run_id: str, backfill: int = 1):
@@ -949,7 +965,13 @@ def create_app() -> FastAPI:
         partial pattern as the Automation cards) shows the run working —
         no dead-end redirect to /runs.
         """
-        runner.start_run("pipeline", {})
+        # F-2: guarded like every manual start; the refusal surfaces as an
+        # error redirect on the board instead of an unhandled 500.
+        try:
+            runner.start_guarded("pipeline", {})
+        except runner.ParamError as e:
+            return RedirectResponse(f"/jobs?error={quote(str(e))}",
+                                    status_code=303)
         return RedirectResponse("/jobs", status_code=303)
 
     @app.post("/onboarding/keep-editing")

@@ -308,3 +308,46 @@ def test_worker_loop_stops_before_acquiring_when_cap_is_reached(queue, monkeypat
     assert (applied, failed) == (0, 0)
     assert acquired["n"] == 0  # the cap check precedes any acquisition
     assert any("Daily cap reached" in e for e in events)
+
+
+# ---------------------------------------------------------------------------
+# F-3 — Chrome launch failures are environment errors, not job failures
+# ---------------------------------------------------------------------------
+
+
+def test_f3_chrome_launch_failure_refunds_the_attempt(queue, monkeypatch):
+    """A Chrome launch failure is an environment problem (fresh machine, no
+    profile dir), not a job failure: the acquisition attempt is refunded,
+    the job is not counted as failed, and consecutive launch failures stop
+    the run — bounded like the pipeline's consecutive-error cap — instead
+    of churning the queue."""
+    _seed_job(queue, "https://x.com/jobs/1",
+              tailored_resume_path="/tmp/fake/resume.pdf")
+
+    launches = {"n": 0}
+
+    def boom(*a, **k):
+        launches["n"] += 1
+        raise FileNotFoundError("no such directory: ~/.config/google-chrome")
+
+    monkeypatch.setattr(launcher, "launch_chrome", boom)
+    monkeypatch.setattr(launcher, "cleanup_worker", lambda *a, **k: None)
+
+    def run_job_must_not_run(job, **kwargs):
+        raise AssertionError("run_job must not run when Chrome never launched")
+
+    monkeypatch.setattr(launcher, "run_job", run_job_must_not_run)
+
+    applied, failed = launcher.worker_loop(limit=1, min_score=1, dry_run=True)
+    assert (applied, failed) == (0, 0)  # not a job failure
+    # Bounded: the worker retries the launch a fixed number of times and
+    # stops loudly instead of churning the queue forever.
+    assert launches["n"] == launcher._MAX_LAUNCH_FAILURES
+
+    row = queue.execute(
+        "SELECT apply_attempts, apply_status FROM jobs WHERE url = ?",
+        ("https://x.com/jobs/1",)).fetchone()
+    assert row["apply_attempts"] == 0  # the attempt was refunded
+    assert row["apply_status"] is None  # unlocked, fully retryable
+    # The job is still in the queue once the environment is fixed.
+    assert launcher.acquire_job(min_score=1) is not None

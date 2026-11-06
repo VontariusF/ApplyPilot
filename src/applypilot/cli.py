@@ -477,6 +477,7 @@ def portal(
         import uvicorn
 
         from applypilot.portal import create_app
+        from applypilot.portal.auth import token_path
     except ImportError as e:
         console.print(f"[red]Portal dependencies missing:[/red] {e}")
         console.print(
@@ -488,7 +489,9 @@ def portal(
 
     console.print("\n[bold green]ApplyPilot portal[/bold green]")
     console.print(f"  Local URL: http://127.0.0.1:{port}/")
-    console.print("  Token saved at ~/.applypilot/portal_token (0600).")
+    # F-9: print the path auth.py actually uses — under an APPLYPILOT_DIR
+    # override the hardcoded ~/.applypilot path was wrong.
+    console.print(f"  Token saved at {token_path()} (0600).")
     console.print(
         "[dim]  First visit asks for the token in the portal's login form —"
         " it is never sent in the URL, so it cannot leak into logs or browser"

@@ -404,6 +404,22 @@ def release_lock(url: str) -> None:
     conn.commit()
 
 
+def _refund_attempt(url: str) -> None:
+    """Undo acquire_job's attempt increment for an environment failure (F-3).
+
+    Infra-class failures never consume an attempt (P1-1 discipline in the
+    tailor/cover paths): the job stays fully retryable when the environment
+    recovers. acquire_job already incremented, so refund it here.
+    """
+    conn = get_connection()
+    conn.execute(
+        "UPDATE jobs SET apply_attempts = MAX(COALESCE(apply_attempts, 1) - 1, 0) "
+        "WHERE url = ?",
+        (url,),
+    )
+    conn.commit()
+
+
 def _stale_lock_cutoff() -> str:
     """ISO timestamp before which an in_progress lock is stale (B4).
 
@@ -806,6 +822,12 @@ PERMANENT_FAILURES: set[str] = {
 
 PERMANENT_PREFIXES: tuple[str, ...] = ("site_blocked", "cloudflare", "blocked_by")
 
+# F-3: consecutive Chrome launch failures before the run stops loudly. Same
+# shape as the pipeline's B6 consecutive-error cap (_MAX_ERROR_PASSES = 3):
+# an environment problem fails every job identically, so churning the queue
+# teaches nothing — the user fixes the environment and starts again.
+_MAX_LAUNCH_FAILURES = 3
+
 
 def _is_permanent_failure(result: str) -> bool:
     """Determine if a failure should never be retried."""
@@ -866,6 +888,7 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
     failed = 0
     jobs_done = 0
     empty_polls = 0
+    launch_failures = 0  # F-3: consecutive Chrome launch failures (env class)
     port = BASE_CDP_PORT + worker_id
     engine_obj = make_engine(engine)
 
@@ -911,7 +934,31 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
         chrome_proc = None
         try:
             add_event(f"[W{worker_id}] Launching Chrome...")
-            chrome_proc = launch_chrome(worker_id, port=port, headless=headless)
+            try:
+                chrome_proc = launch_chrome(worker_id, port=port, headless=headless)
+            except Exception as e:
+                # F-3: a launch-phase failure is an environment problem
+                # (no Chrome profile on a fresh machine, missing binary,
+                # unwritable dirs) — the same class as a provider outage
+                # (P1-1): not the job's fault, so the attempt acquire
+                # burned is refunded and the job stays fully retryable.
+                # Bounded like the pipeline's consecutive-error cap (B6):
+                # an environment problem fails every job the same way, so
+                # stop the run loudly instead of churning the queue.
+                logger.exception("Worker %d Chrome launch failed", worker_id)
+                add_event(f"[W{worker_id}] Chrome launch failed: {str(e)[:40]}")
+                release_lock(job["url"])
+                _refund_attempt(job["url"])
+                launch_failures += 1
+                update_state(worker_id, last_action="chrome launch failed")
+                if launch_failures >= _MAX_LAUNCH_FAILURES or target_url:
+                    add_event(
+                        f"[W{worker_id}] Stopping: Chrome will not launch "
+                        f"({launch_failures} consecutive failures — fix the "
+                        "environment, then start the run again)")
+                    break
+                continue
+            launch_failures = 0
 
             result, duration_ms = run_job(job, port=port, worker_id=worker_id,
                                           model=model, dry_run=dry_run,

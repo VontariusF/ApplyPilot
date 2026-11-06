@@ -74,3 +74,36 @@ def test_existing_worker_profile_is_reused(isolated_clone):
 
     assert second == first
     assert (second / "Default" / "Preferences").read_text() == '{"marker": true}'
+
+
+@pytest.fixture
+def fresh_machine(tmp_path, monkeypatch):
+    """A machine where Chrome has never run: no user-data dir at all (F-3)."""
+    workers = tmp_path / "workers"
+    monkeypatch.setattr(config, "CHROME_WORKER_DIR", workers)
+    monkeypatch.setattr(config, "get_chrome_user_data",
+                        lambda: tmp_path / "no-chrome-here")
+    return workers
+
+
+def test_first_run_with_no_chrome_profile_starts_fresh(fresh_machine):
+    """F-3: on a machine where Chrome has never run, setup must create an
+    empty worker profile instead of crashing on the missing source dir —
+    the old code raised FileNotFoundError from source.iterdir() and the
+    launcher burned the job's apply attempt on that environment error."""
+    profile_dir = chrome.setup_worker_profile(worker_id=0)
+
+    assert profile_dir.is_dir()
+    assert profile_dir.parent == fresh_machine
+
+
+def test_fresh_bootstrap_then_worker_clone_still_works(fresh_machine):
+    """After the first-run bootstrap, the next worker clones worker-0 (now
+    real) instead of falling back to the still-missing user profile."""
+    first = chrome.setup_worker_profile(worker_id=0)
+    (first / "Default").mkdir()
+    (first / "Default" / "Preferences").write_text("{}")
+
+    second = chrome.setup_worker_profile(worker_id=1)
+
+    assert (second / "Default" / "Preferences").exists()

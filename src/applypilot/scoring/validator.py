@@ -85,6 +85,20 @@ def _build_skills_set(profile: dict) -> set[str]:
     return allowed
 
 
+def _is_allowed_skill(term: str, allowed_skills: set[str]) -> bool:
+    """True when a watchlist term is a skill the user actually listed (F-6).
+
+    Matching mirrors the watchlist's own substring semantics: an exact hit
+    or either containment counts, so a user who lists "go" is not flagged
+    for "golang" and vice versa. Only watchlist terms reach this check —
+    the looseness never widens what gets scanned.
+    """
+    term = term.lower().strip()
+    if term in allowed_skills:
+        return True
+    return any(term in skill or skill in term for skill in allowed_skills)
+
+
 def sanitize_text(text: str) -> str:
     """Auto-fix common LLM output issues instead of rejecting."""
     text = text.replace(" \u2014 ", ", ").replace("\u2014", ", ")   # em dash -> comma
@@ -113,9 +127,19 @@ def validate_json_fields(data: dict, profile: dict, mode: str = "normal") -> dic
     errors: list[str] = []
     warnings: list[str] = []
 
-    # Required keys — always checked regardless of mode
+    # Required keys — always checked regardless of mode. An empty `projects`
+    # list is honest output (F-5): the tailoring prompt instructs the model to
+    # drop irrelevant projects, so an empty list must validate. Everything
+    # else still treats falsy as missing.
     for key in ("title", "summary", "skills", "experience", "projects", "education"):
-        if key not in data or not data[key]:
+        if key not in data:
+            errors.append(f"Missing required field: {key}")
+            continue
+        if key == "projects":
+            if not isinstance(data[key], list):
+                errors.append(f"Required field must be a list: {key}")
+            continue
+        if not data[key]:
             errors.append(f"Missing required field: {key}")
     if errors:
         return {"passed": False, "errors": errors, "warnings": warnings}
@@ -123,13 +147,16 @@ def validate_json_fields(data: dict, profile: dict, mode: str = "normal") -> dic
     # Collect all text for bulk checks
     all_text_parts: list[str] = [data["summary"]]
 
-    # Skills: check for fabrication (always enforced)
+    # Skills: check for fabrication (always enforced). Skills the user
+    # actually listed in their profile are never fabricated (F-6) — a
+    # boundary the model echoes is a fact, not a lie.
     if isinstance(data["skills"], dict):
         skills_text = " ".join(str(v) for v in data["skills"].values()).lower()
+        allowed_skills = _build_skills_set(profile)
         for fake in FABRICATION_WATCHLIST:
             if len(fake) <= 2:
                 continue
-            if fake in skills_text:
+            if fake in skills_text and not _is_allowed_skill(fake, allowed_skills):
                 errors.append(f"Fabricated skill: '{fake}'")
 
     # Experience: preserved companies must be present (always enforced)
@@ -242,7 +269,9 @@ def validate_tailored_resume(text: str, profile: dict, original_text: str = "") 
     if phone and phone not in text:
         warnings.append("Phone missing -- will be injected")
 
-    # 7. Scan TECHNICAL SKILLS section for fabricated tools
+    # 7. Scan TECHNICAL SKILLS section for fabricated tools — never for
+    # skills the user actually listed (F-6)
+    allowed_skills = _build_skills_set(profile)
     skills_start = text_lower.find("technical skills")
     skills_end = text_lower.find("experience", skills_start) if skills_start != -1 else -1
     if skills_start != -1 and skills_end != -1:
@@ -250,16 +279,18 @@ def validate_tailored_resume(text: str, profile: dict, original_text: str = "") 
         for fake in FABRICATION_WATCHLIST:
             if len(fake) <= 2:
                 continue
-            if fake in skills_block:
+            if fake in skills_block and not _is_allowed_skill(fake, allowed_skills):
                 errors.append(f"FABRICATED SKILL in Technical Skills: '{fake}'")
 
     # 8. Scan full document for fabrication watchlist items not in original
+    # (profile-listed skills are never flagged — F-6)
     if original_text:
         original_lower = original_text.lower()
         for fake in FABRICATION_WATCHLIST:
             if len(fake) <= 2:
                 continue
-            if fake in text_lower and fake not in original_lower:
+            if (fake in text_lower and fake not in original_lower
+                    and not _is_allowed_skill(fake, allowed_skills)):
                 warnings.append(f"New tool/skill appeared: '{fake}' (not in original)")
 
     # 9. Em dashes (should be auto-fixed by sanitize_text, but safety net)

@@ -251,6 +251,29 @@ def test_runs_start_rejects_bad_params(portal_client):
     assert "error=" in r.headers["location"]
 
 
+def test_runs_start_refused_while_run_active(portal_client):
+    """F-2: a manual start against an active run is refused with a plain
+    error redirect — a double click must not spawn a concurrent run that
+    together blows past the daily cap."""
+    client, _ = portal_client
+    from urllib.parse import unquote
+
+    from applypilot.portal import runner as runner_mod
+
+    runner_mod.init_registry()
+    get_connection().execute(
+        "INSERT INTO runs (id, kind, params, status, pid, started_at) "
+        "VALUES ('active-1', 'apply', '{}', 'running', 1, "
+        "'2026-11-04T00:00:00+00:00')")
+    get_connection().commit()
+
+    r = client.post("/runs/start", data={"kind": "pipeline"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert "already active" in unquote(r.headers["location"])
+    assert len(runner_mod.list_runs()) == 1  # nothing new spawned
+
+
 def test_log_page_renders_redacted_backfill(portal_client, portal_env):
     import json as _json
 
