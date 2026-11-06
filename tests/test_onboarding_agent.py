@@ -73,6 +73,21 @@ PROFILE_BLOCK = """Here is your profile.
 ```
 """
 
+if os.environ.get("FAKE_CLAUDE_MODE") == "sparse_correction":
+    # F-4 journey: the kickoff greets, the next turn emits the full
+    # profile block, and a turn whose prompt carries a spoken correction
+    # gets a sparse block changing that one field and nothing else.
+    if "opened onboarding" in prompt:
+        envelope("Hello! Tell me about your background.")
+    elif "changed my email" in prompt:
+        envelope("Updated!\n```json\n" + json.dumps(
+            {"_applypilot_profile": {"personal": {"email": "new@example.com"}}}) + "\n```")
+    elif "changed my city" in prompt:
+        envelope("Updated!\n```json\n" + json.dumps(
+            {"_applypilot_profile": {"personal": {"city": "Denver, CO"}}}) + "\n```")
+    else:
+        envelope("Thanks! " + PROFILE_BLOCK)
+    sys.exit(0)
 if os.environ.get("FAKE_CLAUDE_MODE") == "unsigned_in":
     # The real envelope observed live on an unsigned-in CLI (exit 1).
     envelope("Not logged in · Please run /login", is_error=True)
@@ -625,6 +640,66 @@ def test_later_sparse_fenced_block_fills_without_erasing(app_dir, fake_llm):
     assert draft["skills_boundary"]["programming_languages"] == ["Python", "Go"]  # kept
     assert draft["compensation"]["salary_expectation"] == "90000"  # filled
     assert state.phase == onboarding.REVIEW  # a chat turn still finishes the flow
+
+
+def test_sparse_correction_updates_the_field_it_carries():
+    """F-4: a later sparse block correcting one field must land in the
+    draft — the merge is per-field correction, not fill-only-empty."""
+    existing = {"personal": {"email": "resume@example.com", "city": "Austin, TX"}}
+    merged, meta = onboarding._merge_extracted_draft(
+        existing, {"personal": {"email": "new@example.com"}}, {})
+    assert merged["personal"]["email"] == "new@example.com"  # corrected, not dropped
+    assert merged["personal"]["city"] == "Austin, TX"  # field the block lacks: kept
+    assert meta == {}  # empty incoming meta adds nothing
+
+
+def test_sparse_correction_keeps_earlier_field_corrections():
+    """F-4 acceptance: a correction touching one question preserves the
+    corrections a previous sparse block recorded for other questions —
+    corrections accumulate per field, they do not replace each other."""
+    corrected = {"personal": {"full_name": "Test Person",
+                              "email": "new@example.com"}}
+    merged, meta = onboarding._merge_extracted_draft(
+        corrected, {"personal": {"city": "Denver, CO"}},
+        {"location": "Denver, CO"})
+    assert merged["personal"]["email"] == "new@example.com"  # earlier correction kept
+    assert merged["personal"]["full_name"] == "Test Person"
+    assert merged["personal"]["city"] == "Denver, CO"  # new correction applied
+    assert meta["location"] == "Denver, CO"
+
+
+def test_sparse_agent_correction_mid_interview(app_dir, fake_claude, signed_in,
+                                               monkeypatch):
+    """F-4 journey: the user corrects a field in chat mid-interview; the
+    agent's sparse fenced block carries the change and it must reach the
+    draft and the prefill bridge — with every other extracted field
+    intact, and with the first correction surviving a second one."""
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "sparse_correction")
+    onboarding.start_interview("claude")  # kickoff: greeting, no block
+    onboarding.send_message("background and preferences")  # full block
+    state = onboarding.load_state()
+    assert state.phase == onboarding.REVIEW
+    assert state.profile_draft["personal"]["email"] == "test@example.com"
+
+    onboarding.keep_editing()  # back mid-interview, draft kept
+    onboarding.send_message("I changed my email to new@example.com")
+    state = onboarding.load_state()
+    assert state.profile_draft["personal"]["email"] == "new@example.com"  # landed
+    assert state.profile_draft["personal"]["full_name"] == "Test Person"  # kept
+    assert state.profile_draft["_applypilot_search"]["location"] == "Austin, TX"
+
+    # A second sparse correction preserves the first.
+    onboarding.keep_editing()
+    onboarding.send_message("I changed my city to Denver, CO")
+    state = onboarding.load_state()
+    assert state.profile_draft["personal"]["email"] == "new@example.com"  # kept
+    assert state.profile_draft["personal"]["city"] == "Denver, CO"  # landed
+
+    # The prefill bridge surfaces both corrections — the questions were
+    # never recorded, so the corrected draft values are what review shows.
+    bridged = onboarding.draft_to_answers(state.profile_draft, state.answers)
+    assert bridged["email"] == "new@example.com"
+    assert bridged["city"] == "Denver, CO"
 
 
 def test_ack_turn_ignores_fenced_blocks(app_dir, fake_llm):
