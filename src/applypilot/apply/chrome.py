@@ -132,6 +132,16 @@ def setup_worker_profile(worker_id: int) -> Path:
     if source is None:
         source = config.get_chrome_user_data()
 
+    # F-3: a fresh machine has no Chrome user-data dir to clone. That is
+    # first-run setup, not an error: Chrome initializes a brand-new profile
+    # in an empty user-data dir, so create it and skip the copy instead of
+    # crashing on iterdir() and burning the job's attempt.
+    if not source.is_dir():
+        logger.info("[worker-%d] No Chrome profile at %s — starting a fresh one",
+                    worker_id, source)
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        return profile_dir
+
     logger.info("[worker-%d] Copying Chrome profile from %s (first time setup)...",
                 worker_id, source.name)
     profile_dir.mkdir(parents=True, exist_ok=True)

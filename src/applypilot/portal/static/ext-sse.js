@@ -187,14 +187,19 @@ This extension adds support for Server Sent Events to htmx.  See /www/extensions
 			// remove the sse: prefix from here on out
 			sseEventName = sseEventName.substr(4);
 
-			var listener = function() {
-				if (maybeCloseSSESource(sourceElement)) {
-					return
-				}
-
-				if (!api.bodyContains(child)) {
-					source.removeEventListener(sseEventName, listener);
-				}
+			// [ApplyPilot fork] htmx core registers `hx-trigger="sse:*"`
+			// listeners on the EventSource object that existed when the
+			// element was processed and saves it as internalData.sseListener
+			// on the trigger element. When this extension replaces the source
+			// after a disconnect, the core's listener is stranded on the dead
+			// object and the element goes permanently deaf (e.g. a board
+			// refresher that never refetches again). Re-attach the saved
+			// listener to the live source on every (re)registration. The
+			// listener body itself is source-agnostic — it only removes
+			// itself from the current source when the element leaves the DOM.
+			var coreListener = api.getInternalData(child).sseListener;
+			if (coreListener) {
+				source.addEventListener(sseEventName, coreListener);
 			}
 		});
 	}
@@ -237,6 +242,17 @@ This extension adds support for Server Sent Events to htmx.  See /www/extensions
 	}
 
 	function ensureEventSource(elt, url, retryCount) {
+		var internalData = api.getInternalData(elt);
+
+		// [ApplyPilot fork] Close the EventSource this element already owns
+		// before creating a replacement. Upstream overwrites internalData
+		// without closing, so a still-connected previous source is orphaned
+		// and duplicate streams pile up when the element is reprocessed.
+		if (internalData.sseEventSource) {
+			internalData.sseEventSource.close();
+			internalData.sseEventSource = null;
+		}
+
 		var source = htmx.createEventSource(url);
 
 		source.onerror = function(err) {

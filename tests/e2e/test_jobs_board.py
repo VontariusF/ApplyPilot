@@ -23,6 +23,21 @@ async def login(page, base, token):
     await page.wait_for_selector(".stat-card")
 
 
+async def freeze_board(page):
+    """Block the board's SSE stream so the page keeps exactly what the POST
+    rendered (F-8).
+
+    The verb journeys assert the immediate POST response: the busy-card
+    swap and its toast. The live SSE stream refetches the board on
+    run-started/run-finished events, and under full-suite load that
+    refetch can replace the response before the assertions read it — a
+    fast-failing child turns the busy card back into a normal card and
+    drops the toast. Blocking the stream removes the timing race: these
+    journeys verify the immediate-response contract, not the SSE refresh.
+    """
+    await page.route("**/events/board", lambda route: route.abort())
+
+
 def seed_jobs(count=1, **overrides):
     """Seed scored jobs in the isolated store; returns their urls."""
     from applypilot.database import init_db
@@ -62,6 +77,7 @@ def test_tailor_now_shows_busy_card_and_toast(
         base = portal_server.base_url
         (url,) = seed_jobs(1)
         async with chromium() as page:
+            await freeze_board(page)
             await login(page, base, portal_server.token)
             await page.goto(f"{base}/jobs")
             card = page.locator(".job-card", has_text="E2E Job 0")
@@ -86,6 +102,7 @@ def test_apply_now_modal_lists_documents_then_confirms(
         base = portal_server.base_url
         seed_jobs(1, tailored_resume_path="/tmp/resume.txt")
         async with chromium() as page:
+            await freeze_board(page)
             await login(page, base, portal_server.token)
             await page.goto(f"{base}/jobs")
             await page.click("label[for='apply-confirm-main-1']")

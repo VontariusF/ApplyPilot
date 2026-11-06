@@ -458,6 +458,19 @@ def test_rescore_all_returns_to_the_jobs_board(portal_client, real_spawns):
     assert len(runs) == 1 and runs[0]["kind"] == "rescore"
 
 
+def test_rescore_all_refused_while_run_active(portal_client):
+    """F-2: rescore-all is a manual start — refused with an error redirect
+    (not an unhandled 500) while another run is active."""
+    client, _ = portal_client
+    from urllib.parse import unquote
+
+    seed_run("active-1", "apply", status="running", pid=1)
+    r = client.post("/jobs/rescore-all", follow_redirects=False)
+    assert r.status_code == 303
+    assert "already active" in unquote(r.headers["location"])
+    assert len(runner.list_runs()) == 1  # nothing new spawned
+
+
 def test_find_jobs_empty_state_returns_to_the_board(portal_client, real_spawns):
     client, _ = portal_client
     r = client.post("/runs/start",
@@ -465,6 +478,21 @@ def test_find_jobs_empty_state_returns_to_the_board(portal_client, real_spawns):
                     follow_redirects=False)
     assert r.status_code == 303
     assert r.headers["location"] == "/jobs"
+
+
+def test_find_jobs_refused_while_run_active(portal_client):
+    """F-2: the empty state's Find-jobs button is a manual start too —
+    refused with an error redirect on the board while a run is active."""
+    client, _ = portal_client
+    from urllib.parse import unquote
+
+    seed_run("active-1", "apply", status="running", pid=1)
+    r = client.post("/runs/start",
+                    data={"kind": "pipeline", "next": "/jobs"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert "already active" in unquote(r.headers["location"])
+    assert len(runner.list_runs()) == 1  # nothing new spawned
 
 
 def test_runs_start_rejects_offsite_next_targets(portal_client, real_spawns):

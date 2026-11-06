@@ -12,6 +12,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -37,6 +38,53 @@ _IDENTITY_SLACK_SECONDS = 5.0
 
 class ParamError(ValueError):
     """A run form submitted an invalid value."""
+
+
+# F-2: the plain-language refusal shared by every guarded start — the
+# scheduler's preset starts already used it; manual route starts now go
+# through the same guard (see start_guarded).
+RUN_ACTIVE_MESSAGE = (
+    "A run is already active — wait for it to finish or cancel it first."
+)
+
+
+class RunActiveError(ParamError):
+    """A run is already active — starting another is refused (P2-2 / F-2).
+
+    Subclasses ParamError so every route that already surfaces ParamError
+    (error redirect / toast) handles the refusal through the same channel
+    the scheduler's guarded starts always used.
+    """
+
+
+# One lock serializes every guarded start: the active-run check and the
+# registry insert + spawn inside start_run happen atomically, so two
+# concurrent starts can never both pass the check.
+_start_lock = threading.Lock()
+
+
+def start_guarded(kind: str, params: dict, command: list[str] | None = None,
+                  emit_jsonl: bool | None = None) -> dict:
+    """Start a run only when the registry has no active run.
+
+    The single choke point for every user- or automation-requested start
+    (F-2): check-then-spawn runs under one lock, and the registry row
+    (status 'running') is inserted inside start_run, so two concurrent
+    starts can never both pass the check. Manual route starts previously
+    called start_run directly — two concurrent manual /runs/start posts
+    both spawned, and together applied past the daily cap.
+
+    Raises:
+        RunActiveError: when a run is already active.
+        ParamError: on invalid form values (from start_run).
+    """
+    with _start_lock:
+        # Idempotent, same as start_run: the liveness check reads the
+        # registry, and a guarded start must work without prior setup.
+        init_registry()
+        if running_runs():
+            raise RunActiveError(RUN_ACTIVE_MESSAGE)
+        return start_run(kind, params, command=command, emit_jsonl=emit_jsonl)
 
 
 def _now() -> str:
@@ -535,7 +583,9 @@ def retry_run(run_id: str) -> dict:
         params = json.loads(row["params"]) if row["params"] else {}
     except (TypeError, json.JSONDecodeError) as e:
         raise ParamError("stored run parameters are unreadable") from e
-    return start_run(row["kind"], params)
+    # F-2: a retry is a manual start like any other — it must not run
+    # concurrently with an active run.
+    return start_guarded(row["kind"], params)
 
 
 def _signal_group(pgid: int, sig: signal.Signals) -> None:

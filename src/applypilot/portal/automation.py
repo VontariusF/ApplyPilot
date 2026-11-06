@@ -87,9 +87,9 @@ TICK_SECONDS = 30
 
 # P2-2: plain-language refusal for the guarded manual starts — start_guarded
 # returns None instead of a run row when another run is already active.
-_RUN_ALREADY_ACTIVE = (
-    "A run is already active — wait for it to finish or cancel it first."
-)
+# Single source of truth: the same message runner.start_guarded raises, so
+# scheduler and manual refusals can never drift.
+_RUN_ALREADY_ACTIVE = runner.RUN_ACTIVE_MESSAGE
 
 # P2-4: shared refusal for every route that would rewrite a job's documents
 # while an apply run owns it (apply-now, regenerate, tailor-now): one
@@ -322,24 +322,25 @@ def cap_pause_reason(cfg: dict, status: dict) -> str:
 # ---------------------------------------------------------------------------
 # Run starts (guarded) and single-job triggers
 # ---------------------------------------------------------------------------
-
-_start_lock = threading.Lock()
+# The guarded-start lock lives in runner.start_guarded since F-2 — every
+# start path (scheduler ticks, presets, manual routes, retry, tailor-now)
+# funnels through that one choke point.
 
 
 def start_guarded(kind: str, params: dict) -> dict | None:
     """Start a run only when the registry has no active run.
 
-    The scheduler's double-start guard: check-then-spawn happens under one
-    lock, and the registry row (status 'running') is inserted inside
-    runner.start_run, so two ticks can never both pass the check.
+    The scheduler's double-start guard (P2-2): the check-then-spawn pair
+    is atomic inside runner.start_guarded — one lock wraps the active-run
+    check and the registry insert + spawn — so two ticks (and, since F-2,
+    manual route starts, which go through the same choke point) can never
+    both pass the check. Returns None instead of a run row when another
+    run is already active.
     """
-    with _start_lock:
-        # Idempotent, same as start_run: the liveness check reads the
-        # registry, and a guarded start must work without prior setup.
-        runner.init_registry()
-        if runner.running_runs():
-            return None
-        return runner.start_run(kind, params)
+    try:
+        return runner.start_guarded(kind, params)
+    except runner.RunActiveError:
+        return None
 
 
 def start_single_job_tailor(url: str, include_cover: bool = False) -> dict:
@@ -362,7 +363,9 @@ def start_single_job_tailor(url: str, include_cover: bool = False) -> dict:
         raise runner.ParamError(APPLY_IN_PROGRESS_MESSAGE)
     database.reset_job_tailoring(database.get_connection(), url,
                                  include_cover=include_cover)
-    return runner.start_run("tailor", {"url": url, "min_score": "0"})
+    # F-2: tailor-now is a manual start too — it waits for an active run
+    # like every other guarded start.
+    return runner.start_guarded("tailor", {"url": url, "min_score": "0"})
 
 
 # ---------------------------------------------------------------------------
