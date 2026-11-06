@@ -11,6 +11,7 @@ from rich.console import Console
 from rich.table import Table
 
 from applypilot import __version__
+from applypilot.agent_protocol import agent_app
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,6 +29,15 @@ log = logging.getLogger(__name__)
 
 # Valid pipeline stages (in execution order)
 VALID_STAGES = ("discover", "enrich", "score", "tailor", "cover", "pdf")
+
+# The `agent` sub-app: the JSON protocol any shell-capable coding agent
+# drives (spec art_A71wyYS4). A separate module keeps its pure-stdout
+# contract clear of the Rich helpers above.
+app.add_typer(
+    agent_app,
+    name="agent",
+    help="JSON onboarding protocol for host coding agents (any-agent chat mode).",
+)
 
 
 # ---------------------------------------------------------------------------
