@@ -70,9 +70,17 @@ def _emit_json(payload: dict) -> None:
     typer.echo(json.dumps(payload, indent=2, default=str))
 
 
-def _emit_json_error(code: str, message: str) -> None:
-    """Write the --json error envelope to stdout and exit nonzero."""
-    _emit_json({"error": {"code": code, "message": message}})
+def _emit_json_error(code: str, message: str,
+                     details: dict | None = None) -> None:
+    """Write the --json error envelope to stdout and exit nonzero.
+
+    Details ride along only when present (plan refusals attach expected/
+    actual values); the plain two-key envelope is unchanged.
+    """
+    error: dict = {"code": code, "message": message}
+    if details is not None:
+        error["details"] = details
+    _emit_json({"error": error})
     raise typer.Exit(code=1)
 
 
@@ -293,13 +301,27 @@ def apply(
         None, "--daily-cap",
         help=("Max applications per UTC day this run must respect. The count is "
               "re-checked live before every job, so applications from any path "
-              "count. Omit for no cap."),
+              "count. Omit for no cap — unless --plan/--i-confirm drives the "
+              "run, where omitting means the 5/day externally-driven default "
+              "(the smallest automation preset)."),
     ),
     gen: bool = typer.Option(False, "--gen", help="Generate prompt file for manual debugging instead of running."),
     mark_applied: Optional[str] = typer.Option(None, "--mark-applied", help="Manually mark a job URL as applied."),
     mark_failed: Optional[str] = typer.Option(None, "--mark-failed", help="Manually mark a job URL as failed (provide URL)."),
     fail_reason: Optional[str] = typer.Option(None, "--fail-reason", help="Reason for --mark-failed."),
     reset_failed: bool = typer.Option(False, "--reset-failed", help="Reset all failed jobs for retry."),
+    plan: bool = typer.Option(
+        False, "--plan",
+        help=("Gate 2: print the batch this run would apply as ONE pure-JSON "
+              "plan (job URLs, per-job estimates, daily-cap headroom, a plan "
+              "hash) and stage its confirm token. Commits nothing."),
+    ),
+    i_confirm: Optional[str] = typer.Option(
+        None, "--i-confirm",
+        help=("Gate 2: the plan hash from a --plan run staged today (UTC). "
+              "Second invocation of plan-then-confirm — verifies the token, "
+              "consumes it, and runs exactly the planned batch."),
+    ),
 ) -> None:
     """Launch auto-apply to submit job applications."""
     # Engine resolution first — a bad name should fail readably before any
@@ -322,6 +344,55 @@ def apply(
         from applypilot.config import default_apply_model
 
         model = default_apply_model()
+
+    # --- Gate 2/3 (spec art_A71wyYS4): plan-then-confirm for externally
+    # driven batches. --plan is a read-only preview that stages the
+    # per-batch token; --i-confirm verifies the token on a second
+    # invocation the same UTC day and pins the run to the planned URLs.
+    from applypilot.apply.planning import (
+        PlanError, consume_staged_plan, stage_batch_plan, verify_confirm,
+    )
+
+    if plan and i_confirm is not None:
+        _emit_json_error(
+            "invalid_usage",
+            "--plan and --i-confirm are mutually exclusive — plan first, "
+            "then confirm the hash it printed.")
+    if (plan or i_confirm is not None) and any(
+            (continuous, bool(url), gen, bool(mark_applied),
+             bool(mark_failed), reset_failed)):
+        _emit_json_error(
+            "invalid_usage",
+            "--plan/--i-confirm run a batch and cannot be combined with "
+            "--continuous, --url, --gen, --mark-applied, --mark-failed, "
+            "or --reset-failed.")
+
+    if plan:
+        try:
+            payload = stage_batch_plan(
+                min_score=min_score,
+                limit=limit if limit is not None else 1,
+                explicit_cap=daily_cap,
+            )
+        except PlanError as exc:
+            _emit_json_error(exc.code, str(exc), exc.details)
+        _emit_json(payload)
+        return
+
+    planned: Optional[dict] = None
+    if i_confirm is not None:
+        try:
+            # limit stays None when the flag is absent — the planned batch
+            # defines the run size, so only an explicit --limit can
+            # disagree with it.
+            planned = verify_confirm(
+                i_confirm,
+                explicit_cap=daily_cap,
+                min_score=min_score,
+                limit=limit,
+            )
+        except PlanError as exc:
+            _emit_json_error(exc.code, str(exc), exc.details)
 
     from applypilot.config import check_tier, PROFILE_PATH as _profile_path
     from applypilot.database import get_connection
@@ -397,7 +468,16 @@ def apply(
 
     from applypilot.apply.launcher import main as apply_main
 
-    effective_limit = limit if limit is not None else (0 if continuous else 1)
+    if planned is not None:
+        # Gate 2: the token burns only now — after every check that could
+        # refuse the run — so a broken environment never costs a re-plan.
+        consume_staged_plan()
+        effective_limit = len(planned["urls"])
+        allowed_urls: Optional[set[str]] = set(planned["urls"])
+        daily_cap = planned["cap"]
+    else:
+        effective_limit = limit if limit is not None else (0 if continuous else 1)
+        allowed_urls = None
 
     console.print("\n[bold blue]Launching Auto-Apply[/bold blue]")
     console.print(f"  Limit:    {'unlimited' if continuous else effective_limit}")
@@ -421,6 +501,7 @@ def apply(
         workers=workers,
         engine=engine_name,
         daily_cap=daily_cap,
+        allowed_urls=allowed_urls,
     )
 
 
