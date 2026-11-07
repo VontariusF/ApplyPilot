@@ -45,6 +45,7 @@ import re
 import shutil
 import subprocess
 import threading
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 
@@ -88,6 +89,37 @@ _ROLE_SYSTEM = "system"
 _ROLE_NOTE = "note"
 
 _STATE_LOCK = threading.Lock()  # one agent turn at a time (single-user portal)
+
+# How long a second surface (a portal tab while the protocol runs a turn,
+# or vice versa) waits for the lock holder before refusing. Long enough
+# that two surfaces landing in the same instant serialize instead of
+# erroring; short enough that a second caller during a real agent turn —
+# a claude subprocess or provider round trip, tens of seconds — gets a
+# structured busy refusal instead of queueing behind a hung request.
+# Spec art_A71wyYS4: single-session across surfaces, first wins, second
+# gets busy. Tests shrink this to drive the refusal deterministically.
+STATE_TURN_TIMEOUT = 2.0
+
+_STATE_BUSY_MESSAGE = (
+    "an interview turn is already running on another surface — "
+    "wait for it to finish and try again")
+
+
+@contextmanager
+def _state_turn():
+    """Hold _STATE_LOCK for one state-mutating turn, refusing when busy.
+
+    Same mutual exclusion as the bare lock; the acquire carries a grace
+    timeout so contention between the two front doors resolves as the
+    busy error the portal already renders (every OnboardingError catch
+    site) instead of blocking a request thread for a whole agent turn.
+    """
+    if not _STATE_LOCK.acquire(timeout=STATE_TURN_TIMEOUT):
+        raise OnboardingError(_STATE_BUSY_MESSAGE)
+    try:
+        yield
+    finally:
+        _STATE_LOCK.release()
 
 
 class OnboardingError(RuntimeError):
@@ -1247,7 +1279,7 @@ def update_answers(updates: dict[str, str]) -> InterviewState:
     resume's value resurrect on the re-normalize below (the review form
     submits every field, cleared ones included).
     """
-    with _STATE_LOCK:
+    with _state_turn():
         state = load_state()
         if state is None or state.phase != REVIEW:
             raise OnboardingError("there is no profile to review")
@@ -1563,7 +1595,7 @@ def start_interview(mode: str) -> InterviewState:
     step, carrying the uploaded resume's pending context into the kickoff
     turn so its reply extracts the draft before the first question.
     """
-    with _STATE_LOCK:
+    with _state_turn():
         existing = load_state()
         if existing is not None and existing.phase != INTAKE:
             return existing
@@ -1629,7 +1661,7 @@ def send_message(text: str) -> InterviewState:
     text = (text or "").strip()
     if not text:
         raise OnboardingError("empty message")
-    with _STATE_LOCK:
+    with _state_turn():
         state = load_state()
         if state is None or state.phase != INTERVIEW:
             raise OnboardingError("the interview is not active")
@@ -1692,7 +1724,7 @@ def start_intake() -> InterviewState:
     later phase resumes as-is (two tabs must not wipe work in progress);
     a fresh or gate-phase store opens intake.
     """
-    with _STATE_LOCK:
+    with _state_turn():
         existing = load_state()
         if existing is not None and existing.phase != GATE:
             return existing
@@ -1826,7 +1858,7 @@ def record_answer(question_id: str, value: str = "", free_text: str = "",
     turn considers no fenced block (an ack extracts nothing — see
     _without_fenced_blocks).
     """
-    with _STATE_LOCK:
+    with _state_turn():
         state = load_state()
         if state is None:
             raise OnboardingError("the interview is not active")
@@ -1975,7 +2007,7 @@ def clear_prefill(question_id: str) -> InterviewState:
     the empty answer also keeps remaining_questions from re-asking it.
     No agent turn runs: a removal has nothing to acknowledge, so the
     transcript note carries the change instead."""
-    with _STATE_LOCK:
+    with _state_turn():
         state = load_state()
         if state is None or state.phase != INTERVIEW:
             raise OnboardingError("the interview is not active")
@@ -2015,7 +2047,7 @@ def set_agent_led(enabled: bool) -> InterviewState:
     and the surface would otherwise render a composer over an empty
     agenda with no path to review — the agent-led dead end).
     """
-    with _STATE_LOCK:
+    with _state_turn():
         state = load_state()
         if state is None or state.phase != INTERVIEW:
             raise OnboardingError("the interview is not active")
@@ -2115,7 +2147,7 @@ def add_resume(text: str | None = None, pdf_bytes: bytes | None = None,
     art_ti3XJuNr) — the pending context rides the interview's kickoff
     turn, whose reply extracts the draft the prefill bridge consumes.
     """
-    with _STATE_LOCK:
+    with _state_turn():
         state = load_state()
         if state is None or state.phase not in (INTAKE, INTERVIEW):
             raise OnboardingError("the interview is not active")
@@ -2152,7 +2184,7 @@ def confirm_profile() -> dict:
     the existing profile's password rather than wiping it, and a fresh
     confirm writes "" (the wizard's S2 flow remains the only collector).
     """
-    with _STATE_LOCK:
+    with _state_turn():
         state = load_state()
         if state is None or state.phase != REVIEW or not state.profile_draft:
             raise OnboardingError("there is no profile draft to confirm")
@@ -2195,7 +2227,7 @@ def confirm_profile() -> dict:
 
 def keep_editing() -> InterviewState:
     """Back from review into the conversation (draft kept for context)."""
-    with _STATE_LOCK:
+    with _state_turn():
         state = load_state()
         if state is None or state.phase != REVIEW:
             raise OnboardingError("nothing to edit")
