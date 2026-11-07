@@ -683,28 +683,29 @@ def main() -> int:
 
     conn3 = database.get_connection()
     rows = {r["url"]: dict(r) for r in conn3.execute(
-        "SELECT url, apply_status, applied_at FROM jobs").fetchall()}
+        "SELECT url, apply_status, apply_error, apply_attempts, applied_at "
+        "FROM jobs").fetchall()}
     t.check("alpha recorded applied",
             rows["https://jobs.example/alpha"]["applied_at"] is not None,
             json.dumps(rows["https://jobs.example/alpha"], default=str))
     t.check("beta terminal, not applied (CAPTCHA)",
             rows["https://jobs.example/beta"]["applied_at"] is None,
             json.dumps(rows["https://jobs.example/beta"], default=str))
-    t.flag(
-        "launcher bookkeeping: the engine's CAPTCHA verdict is scanned, "
-        "narrated as an event, and marked permanent (never retried), but it "
-        "persists as apply_status='failed' with the reason in apply_error — "
-        "the board shows 'failed', not a distinct captcha status. This is "
-        "pre-existing launcher semantics, not a protocol-verb defect in this "
-        "journey; disclosed here and in the PR body rather than silently "
-        "accepted. A distinct terminal status would be a product decision "
-        "(board displays, retry UX) outside this verification's scope.")
+    t.check("beta persists distinct captcha status, attempts pinned",
+            rows["https://jobs.example/beta"]["apply_status"] == "captcha"
+            and rows["https://jobs.example/beta"]["apply_error"] == "captcha"
+            and rows["https://jobs.example/beta"]["apply_attempts"] == 99,
+            json.dumps(rows["https://jobs.example/beta"], default=str))
 
     # status --json: the machine-readable scoreboard after the run.
     out = run(["status", "--json"])
     stats = json.loads(out)
     t.check("status --json counts 1 applied", stats.get("applied") == 1,
             f"applied={stats.get('applied')}, total={stats.get('total')}")
+    t.check("status --json counts captcha separately from failures",
+            stats.get("captcha") == 1 and stats.get("apply_errors") == 0,
+            f"captcha={stats.get('captcha')}, "
+            f"apply_errors={stats.get('apply_errors')}")
 
     # Replay probe: the one-shot token is burned — the confirm refuses.
     run_probe(["apply", "--i-confirm", plan["plan_hash"]], "plan_required")

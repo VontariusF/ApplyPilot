@@ -31,6 +31,14 @@
         {% endfor %}
       </select>
     </label>
+    <label>Apply status
+      <select name="apply_status">
+        <option value="">All</option>
+        {% for s in statuses %}
+        <option value="{{ s }}" {{ 'selected' if s == apply_status }}>{{ s }}</option>
+        {% endfor %}
+      </select>
+    </label>
     <label>Location <input type="text" name="location" value="{{ location }}" placeholder="e.g. Austin"></label>
     <label>Found between
       <input type="date" name="discovered_from" value="{{ discovered_from }}" aria-label="Found from">

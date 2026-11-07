@@ -245,8 +245,26 @@ Droid specifics:
 # Utility modes (no Chrome/Claude needed)
 applypilot apply --mark-applied URL    # manually mark a job as applied
 applypilot apply --mark-failed URL     # manually mark a job as failed
-applypilot apply --reset-failed        # reset all failed jobs for retry
+applypilot apply --reset-failed        # reset failed jobs for retry (captcha jobs are skipped)
 applypilot apply --gen --url URL       # generate prompt file for manual debugging
+```
+
+#### Apply statuses
+
+Jobs carry an `apply_status` value shown verbatim as a badge on the jobs board:
+
+- `applied` — the application was submitted.
+- `failed` — the application itself went wrong (form issue, engine error, crashed worker).
+- `captcha` — the board blocked the submission with a CAPTCHA. **This is terminal by decision:** the application never happened, the job is never auto-retried, and `--reset-failed` deliberately skips it. It renders its own badge and is counted separately from failures in `applypilot status` (`captcha` vs `apply_errors`).
+- `manual` — the site requires manual application (unsolvable CAPTCHA class).
+- `in_progress` — a worker currently holds the job.
+
+**Historical CAPTCHA rows predate the distinct status:** they remain `apply_status='failed'` with `apply_error='captcha'` (no data migration is shipped). If a manual cleanup is ever wanted, identify them with:
+
+```sql
+SELECT * FROM jobs
+WHERE apply_status = 'failed' AND apply_error = 'captcha'
+  AND (apply_task_id IS NULL OR apply_task_id != 'manual-failed');
 ```
 
 ---

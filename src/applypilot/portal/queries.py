@@ -115,7 +115,8 @@ def _view_condition(name: str) -> str:
     - "new": found, no score outcome yet. The literal discovered stage is
       1=1 (every job is discovered), so its condition cannot distinguish.
     - "apply_failed": failed apply attempts (apply_status), for the
-      Needs-attention chip.
+      Needs-attention chip. captcha rows are terminal by decision and a
+      distinct status — they never match this condition.
     """
     if name == "new":
         return "fit_score IS NULL AND score_error IS NULL"

@@ -31,6 +31,7 @@ STATS = {
     "with_cover_letter": 1,
     "ready_to_apply": 1,
     "applied": 0,
+    "captcha": 1,
     "apply_errors": 0,
     "score_distribution": [(7, 1), (5, 1)],
 }

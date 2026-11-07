@@ -309,7 +309,7 @@ def apply(
     mark_applied: Optional[str] = typer.Option(None, "--mark-applied", help="Manually mark a job URL as applied."),
     mark_failed: Optional[str] = typer.Option(None, "--mark-failed", help="Manually mark a job URL as failed (provide URL)."),
     fail_reason: Optional[str] = typer.Option(None, "--fail-reason", help="Reason for --mark-failed."),
-    reset_failed: bool = typer.Option(False, "--reset-failed", help="Reset all failed jobs for retry."),
+    reset_failed: bool = typer.Option(False, "--reset-failed", help="Reset failed jobs for retry (captcha-blocked jobs are kept terminal and skipped)."),
     plan: bool = typer.Option(
         False, "--plan",
         help=("Gate 2: print the batch this run would apply as ONE pure-JSON "
@@ -546,6 +546,7 @@ def status(
     summary.add_row("Cover letters", str(stats["with_cover_letter"]))
     summary.add_row("Ready to apply", str(stats["ready_to_apply"]))
     summary.add_row("Applied", str(stats["applied"]))
+    summary.add_row("Captcha blocked", str(stats["captcha"]))
     summary.add_row("Apply errors", str(stats["apply_errors"]))
 
     console.print(summary)

@@ -466,8 +466,16 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
         "SELECT COUNT(*) FROM jobs WHERE applied_at IS NOT NULL"
     ).fetchone()[0]
 
+    # Captcha blocks: terminal by decision, reported separately from the
+    # other apply errors (a captcha block is not an application failure —
+    # the application never happened).
+    stats["captcha"] = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE apply_status = 'captcha'"
+    ).fetchone()[0]
+
     stats["apply_errors"] = conn.execute(
-        "SELECT COUNT(*) FROM jobs WHERE apply_error IS NOT NULL"
+        "SELECT COUNT(*) FROM jobs WHERE apply_error IS NOT NULL "
+        "AND COALESCE(apply_status, '') != 'captcha'"
     ).fetchone()[0]
 
     stats["ready_to_apply"] = conn.execute(
@@ -748,6 +756,8 @@ def count_apply_eligible(min_score: int = 7) -> int:
           AND (apply_status IS NULL OR apply_status = 'failed'
                OR (apply_status = 'in_progress' AND last_attempted_at IS NOT NULL
                    AND last_attempted_at <= ?))
+          -- captcha is terminal by decision: a blocked job is never requeued
+          AND COALESCE(apply_status, '') != 'captcha'
           AND (apply_attempts IS NULL OR apply_attempts < ?)
           AND fit_score >= ?
           {site_clause}
