@@ -70,6 +70,23 @@ def _emit_json(payload: dict) -> None:
     typer.echo(json.dumps(payload, indent=2, default=str))
 
 
+def _scored_label(provenance: dict) -> str:
+    """The status table's 'Scored ...' row label, honest about authorship.
+
+    Reads the scored_by split (spec art_IMViYTMU) instead of assuming: a
+    store with only host-written scores says 'host agent'; a store with
+    none keeps the legacy 'Scored by LLM' wording (unattributed
+    pre-column rows render as they always have); a mix spells both out.
+    """
+    host = provenance.get("host", 0)
+    if host == 0:
+        return "Scored by LLM"
+    rest = provenance.get("provider", 0) + provenance.get("unattributed", 0)
+    if rest == 0:
+        return "Scored by host agent"
+    return f"Scored (host {host}, LLM {rest})"
+
+
 def _emit_json_error(code: str, message: str,
                      details: dict | None = None) -> None:
     """Write the --json error envelope to stdout and exit nonzero.
@@ -539,7 +556,7 @@ def status(
     summary.add_row("With full description", str(stats["with_description"]))
     summary.add_row("Pending enrichment", str(stats["pending_detail"]))
     summary.add_row("Enrichment errors", str(stats["detail_errors"]))
-    summary.add_row("Scored by LLM", str(stats["scored"]))
+    summary.add_row(_scored_label(stats["score_provenance"]), str(stats["scored"]))
     summary.add_row("Pending scoring", str(stats["unscored"]))
     summary.add_row("Tailored resumes", str(stats["tailored"]))
     summary.add_row("Pending tailoring (7+)", str(stats["untailored_eligible"]))
