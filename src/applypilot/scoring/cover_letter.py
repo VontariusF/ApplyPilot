@@ -190,6 +190,77 @@ def generate_cover_letter(
     return letter  # last attempt even if failed
 
 
+# ── Persistence (shared by the LLM loop and the host verb) ───────────────
+
+def persist_cover_letter(conn, job: dict, letter: str,
+                         validation_mode: str = "normal") -> tuple[dict, dict]:
+    """Write the cover letter and stamp the jobs row — the single
+    persistence path for a validated letter (spec art_IMViYTMU: the host
+    verb writes through the same files and UPDATE as the LLM loop).
+
+    Writes the letter file, re-validates what is actually persisted,
+    records the version row (spec D2) when history is on, generates the
+    PDF best-effort, updates the jobs pointer and the attempt counter,
+    and commits. Returns (result dict, final validation).
+    """
+    COVER_LETTER_DIR.mkdir(parents=True, exist_ok=True)
+    prefix = docs.output_prefix(job)
+
+    # History on (D1/D2): every generation is a new version at a
+    # _v{N} stem; a pre-history legacy file is backfilled as version 1
+    # by next_document_version and never touched. History off: the
+    # exact pre-history overwrite behavior at the bare prefix.
+    history_on = history_enabled()
+    if history_on:
+        version = next_document_version(
+            conn, job["url"], KIND_COVER_LETTER,
+            legacy_path=COVER_LETTER_DIR / f"{prefix}_CL.txt")
+        cl_path = COVER_LETTER_DIR / f"{docs.versioned_stem(prefix, version)}_CL.txt"
+    else:
+        cl_path = COVER_LETTER_DIR / f"{prefix}_CL.txt"
+
+    cl_path.write_text(letter, encoding="utf-8")
+
+    # Record the validation outcome of the letter actually returned —
+    # it may be the last retry, which can have failed validation.
+    final_validation = validate_cover_letter(letter, mode=validation_mode)
+    validation_status = "approved" if final_validation["passed"] else "failed_validation"
+
+    # Record the version row (spec D2): file path + validation outcome.
+    version_id = None
+    if history_on:
+        version_id = record_document_version(
+            conn, job["url"], KIND_COVER_LETTER, version, str(cl_path),
+            validation_status=validation_status,
+        )
+
+    # Generate PDF (best-effort)
+    pdf_path = None
+    try:
+        from applypilot.scoring.pdf import convert_to_pdf
+        pdf_path = str(convert_to_pdf(cl_path))
+    except Exception:
+        log.debug("PDF generation failed for %s", cl_path, exc_info=True)
+
+    conn.execute(
+        "UPDATE jobs SET cover_letter_path=?, cover_letter_at=?, "
+        "cover_attempts=COALESCE(cover_attempts,0)+1 WHERE url=?",
+        (str(cl_path), datetime.now(timezone.utc).isoformat(), job["url"]),
+    )
+    conn.commit()
+
+    result = {
+        "url": job["url"],
+        "path": str(cl_path),
+        "pdf_path": pdf_path,
+        "title": job["title"],
+        "site": job["site"],
+        "status": validation_status,
+        "version_id": version_id,
+    }
+    return result, final_validation
+
+
 # ── Batch Entry Point ────────────────────────────────────────────────────
 
 def run_cover_letters(min_score: int = 7, limit: int = 20,
@@ -211,26 +282,15 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
     resume_text = RESUME_PATH.read_text(encoding="utf-8")
     conn = get_connection()
 
-    # Fetch jobs that have tailored resumes but no cover letter yet
-    jobs = conn.execute(
-        "SELECT * FROM jobs "
-        "WHERE fit_score >= ? AND tailored_resume_path IS NOT NULL "
-        "AND full_description IS NOT NULL "
-        "AND (cover_letter_path IS NULL OR cover_letter_path = '') "
-        "AND COALESCE(cover_attempts, 0) < ? "
-        + ("AND url = ? " if url else "")
-        + "ORDER BY fit_score DESC LIMIT ?",
-        (min_score, MAX_ATTEMPTS, *([url] if url else []), limit),
-    ).fetchall()
+    # Fetch jobs that have tailored resumes but no cover letter yet — the
+    # same queue condition the host cover verb drains (STAGE_CONDITIONS
+    # "pending_cover"), so both front doors see identical eligibility.
+    jobs = get_jobs_by_stage(conn=conn, stage="pending_cover",
+                             min_score=min_score, limit=limit, url=url)
 
     if not jobs:
         log.info("No jobs needing cover letters (score >= %d).", min_score)
         return {"generated": 0, "errors": 0, "elapsed": 0.0}
-
-    # Convert rows to dicts
-    if jobs and not isinstance(jobs[0], dict):
-        columns = jobs[0].keys()
-        jobs = [dict(zip(columns, row)) for row in jobs]
 
     COVER_LETTER_DIR.mkdir(parents=True, exist_ok=True)
     log.info(
@@ -241,62 +301,17 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
     completed = 0
     results: list[dict] = []
     error_count = 0
-    history_on = history_enabled()
 
     for job in jobs:
         completed += 1
         try:
             letter = generate_cover_letter(resume_text, job, profile,
-                                          validation_mode=validation_mode)
+                                           validation_mode=validation_mode)
 
-            # Build safe filename prefix (B3: URL-hash suffix ends collisions;
-            # output_prefix also guards the nullable title, B12)
-            prefix = docs.output_prefix(job)
-
-            # History on (D1/D2): every generation is a new version at a
-            # _v{N} stem; a pre-history legacy file is backfilled as version 1
-            # by next_document_version and never touched. History off: the
-            # exact pre-history overwrite behavior at the bare prefix.
-            if history_on:
-                version = next_document_version(
-                    conn, job["url"], KIND_COVER_LETTER,
-                    legacy_path=COVER_LETTER_DIR / f"{prefix}_CL.txt")
-                cl_path = COVER_LETTER_DIR / f"{docs.versioned_stem(prefix, version)}_CL.txt"
-            else:
-                cl_path = COVER_LETTER_DIR / f"{prefix}_CL.txt"
-
-            cl_path.write_text(letter, encoding="utf-8")
-
-            # Record the validation outcome of the letter actually returned —
-            # it may be the last retry, which can have failed validation.
-            final_validation = validate_cover_letter(letter, mode=validation_mode)
-            validation_status = "approved" if final_validation["passed"] else "failed_validation"
-
-            # Record the version row (spec D2): file path + validation outcome.
-            version_id = None
-            if history_on:
-                version_id = record_document_version(
-                    conn, job["url"], KIND_COVER_LETTER, version, str(cl_path),
-                    validation_status=validation_status,
-                )
-
-            # Generate PDF (best-effort)
-            pdf_path = None
-            try:
-                from applypilot.scoring.pdf import convert_to_pdf
-                pdf_path = str(convert_to_pdf(cl_path))
-            except Exception:
-                log.debug("PDF generation failed for %s", cl_path, exc_info=True)
-
-            result = {
-                "url": job["url"],
-                "path": str(cl_path),
-                "pdf_path": pdf_path,
-                "title": job["title"],
-                "site": job["site"],
-                "status": validation_status,
-                "version_id": version_id,
-            }
+            # One persistence path: files, version row, jobs pointer, and
+            # the attempt counter — shared with the host cover verb.
+            result, _final_validation = persist_cover_letter(
+                conn, job, letter, validation_mode=validation_mode)
             results.append(result)
 
             elapsed = time.time() - t0
@@ -318,28 +333,22 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
             results.append(result)
             log.error("%d/%d [ERROR] %s -- %s", completed, len(jobs), (job.get("title") or "untitled")[:40], e)
 
-    # Persist to DB: increment attempt counter for content-level failures,
-    # save path only for successes. P1-1: infra-classified errors (provider
-    # down, timed out, 5xx) do not burn the attempt budget — the job stays
-    # fully retryable when the provider recovers, instead of one outage
-    # exhausting every queued job's attempts.
-    now = datetime.now(timezone.utc).isoformat()
-    saved = 0
+    # Persist to DB: increment attempt counter for content-level failures.
+    # Successes were persisted inline by persist_cover_letter (path,
+    # pointer, attempt counter, version row). P1-1: infra-classified errors
+    # (provider down, timed out, 5xx) do not burn the attempt budget — the
+    # job stays fully retryable when the provider recovers, instead of one
+    # outage exhausting every queued job's attempts.
+    saved = sum(1 for r in results if r.get("path"))
     for r in results:
         if r.get("path"):
-            conn.execute(
-                "UPDATE jobs SET cover_letter_path=?, cover_letter_at=?, "
-                "cover_attempts=COALESCE(cover_attempts,0)+1 WHERE url=?",
-                (r["path"], now, r["url"]),
-            )
-            saved += 1
-        elif r.get("error_class") == "infra":
+            continue  # already stamped by persist_cover_letter
+        if r.get("error_class") == "infra":
             continue  # provider-down: stay fully retryable, no attempt burned
-        else:
-            conn.execute(
-                "UPDATE jobs SET cover_attempts=COALESCE(cover_attempts,0)+1 WHERE url=?",
-                (r["url"],),
-            )
+        conn.execute(
+            "UPDATE jobs SET cover_attempts=COALESCE(cover_attempts,0)+1 WHERE url=?",
+            (r["url"],),
+        )
     conn.commit()
 
     elapsed = time.time() - t0

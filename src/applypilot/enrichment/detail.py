@@ -620,6 +620,29 @@ def scrape_detail_page(page, url: str) -> dict:
     return result
 
 
+def persist_description(conn: sqlite3.Connection, url: str,
+                        full_description: str | None,
+                        application_url: str | None, title: str | None) -> None:
+    """The single description-capture write: one UPDATE that stamps the
+    captured description, the apply URL, and the is_remote inference,
+    and clears any prior detail error.
+
+    The scrape loop (below) and the host enrich verb (spec art_IMViYTMU)
+    both land here — the host path writes through the same UPDATE the
+    fallback tier's result would, so no parallel schema for host data.
+    """
+    conn.execute(
+        "UPDATE jobs SET full_description = ?, application_url = ?, "
+        "detail_scraped_at = ?, detail_error = NULL, is_remote = ? "
+        "WHERE url = ?",
+        (full_description, application_url,
+         datetime.now(timezone.utc).isoformat(),
+         1 if infer_remote(title or "", full_description) else 0,
+         url),
+    )
+    conn.commit()
+
+
 def scrape_site_batch(
     conn: sqlite3.Connection | None,
     site: str,
@@ -677,16 +700,9 @@ def scrape_site_batch(
 
                 if status in ("ok", "partial"):
                     stats[status] += 1
-                    # is_remote is an inference from the listing text (spec
-                    # PR D), refreshed with the description each scrape.
-                    conn.execute(
-                        "UPDATE jobs SET full_description = ?, application_url = ?, "
-                        "detail_scraped_at = ?, detail_error = NULL, is_remote = ? "
-                        "WHERE url = ?",
-                        (result.get("full_description"), result.get("application_url"), now,
-                         1 if infer_remote(title, result.get("full_description")) else 0,
-                         url),
-                    )
+                    persist_description(conn, url,
+                                        result.get("full_description"),
+                                        result.get("application_url"), title)
                 else:
                     stats["error"] += 1
                     conn.execute(
