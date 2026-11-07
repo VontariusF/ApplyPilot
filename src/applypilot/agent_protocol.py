@@ -75,6 +75,10 @@ _ERROR_CODE_RULES: tuple[tuple[str, str], ...] = (
     ("No LLM provider is configured", "provider_setup"),
     ("not signed in", "provider_setup"),
     ("interview backend", "provider_setup"),
+    # Cross-surface contention on the single-session lock: another surface
+    # holds the state lock mid-turn (spec art_A71wyYS4 — first wins,
+    # second gets busy). Retrying once the other turn finishes is safe.
+    ("already running on another surface", "busy"),
     ("interview is not active", "not_active"),
     ("nothing to edit", "nothing_to_edit"),
     ("no profile draft to confirm", "nothing_to_confirm"),
