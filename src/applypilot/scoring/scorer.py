@@ -166,6 +166,23 @@ def _scored_by_provider() -> str:
     return getattr(get_client(), "provider_name", "") or "llm"
 
 
+def persist_score(conn, url: str, score: int, keywords: str, reasoning: str,
+                  scored_by: str, when: str) -> None:
+    """Write one job's score — the single UPDATE shared by the LLM path
+    and the host protocol (spec art_IMViYTMU: no parallel write path).
+
+    Clears any prior score_error; `scored_by` stamps provenance ('host'
+    for protocol writes, the provider name for LLM ones). The stored
+    blob is `keywords\\nreasoning` — split_score_reasoning depends on
+    that shape. Callers commit.
+    """
+    conn.execute(
+        "UPDATE jobs SET fit_score = ?, score_reasoning = ?, scored_at = ?, "
+        "score_error = NULL, scored_by = ? WHERE url = ?",
+        (score, f"{keywords}\n{reasoning}", when, scored_by, url),
+    )
+
+
 def _record_score_errors(conn, urls: list[str], error: str) -> None:
     """Persist a scoring failure per job so the portal can show it (E).
 
@@ -277,11 +294,8 @@ def run_scoring(limit: int = 0, rescore: bool = False, url: str | None = None) -
                 "UPDATE jobs SET score_error = ? WHERE url = ?", (r["error"], r["url"])
             )
             continue
-        conn.execute(
-            "UPDATE jobs SET fit_score = ?, score_reasoning = ?, scored_at = ?, "
-            "score_error = NULL, scored_by = ? WHERE url = ?",
-            (r["score"], f"{r['keywords']}\n{r['reasoning']}", now, scored_by, r["url"]),
-        )
+        persist_score(conn, r["url"], r["score"], r["keywords"], r["reasoning"],
+                      scored_by, now)
     conn.commit()
 
     elapsed = time.time() - t0

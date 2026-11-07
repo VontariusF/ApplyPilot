@@ -1,11 +1,12 @@
-"""The `applypilot agent` JSON protocol — onboarding for any host coding agent.
+"""The `applypilot agent` JSON protocol — onboarding and host-driven
+pipeline stages for any host coding agent.
 
-One Typer sub-app over the existing onboarding service layer (spec
-art_A71wyYS4): every verb is a thin serialization of a function the
-portal already calls, over the same persisted state file and the same
-lock. The protocol adds no state of its own — the portal and the
-protocol are two front doors over one truth, so an interview started
-here can be finished there and vice versa.
+One Typer sub-app over existing service layers (onboarding, spec
+art_A71wyYS4; pipeline scoring, spec art_IMViYTMU): every verb is a thin
+serialization of a function the portal or CLI already calls, over the
+same persisted state. The protocol adds no state of its own — the portal
+and the protocol are two front doors over one truth, so an interview
+started here can be finished there and vice versa.
 
 Wire contract (the entire stdout surface):
 
@@ -29,6 +30,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -54,6 +56,16 @@ def _prepare() -> None:
 
     load_env()
     ensure_dirs()
+
+
+def _prepare_db() -> None:
+    """_prepare + init_db — the pipeline verbs (job-next/score) read and
+    write the store, unlike the onboarding verbs, so the schema must be
+    current (the scored_by migration rides along here too)."""
+    _prepare()
+    from applypilot.database import init_db
+
+    init_db()
 
 
 def _emit(payload: dict) -> None:
@@ -201,10 +213,15 @@ def _review_fields_payload(state: onboarding.InterviewState) -> list[dict]:
     return rows
 
 
+def _resume_text() -> str | None:
+    """The resume document, or None when none is on disk."""
+    if not config.RESUME_PATH.exists():
+        return None
+    return config.RESUME_PATH.read_text(encoding="utf-8", errors="replace")
+
+
 def _resume_block(state: onboarding.InterviewState | None, reveal: bool) -> dict:
-    text = None
-    if config.RESUME_PATH.exists():
-        text = config.RESUME_PATH.read_text(encoding="utf-8", errors="replace")
+    text = _resume_text()
     block: dict = {
         "provided": bool(text and text.strip()),
         "chars": len(text) if text is not None else None,
@@ -213,6 +230,30 @@ def _resume_block(state: onboarding.InterviewState | None, reveal: bool) -> dict
     if reveal and text is not None:
         block["text"] = text  # the only place the resume document may appear
     return block
+
+
+def _scoring_resume_block(reveal: bool) -> dict:
+    """Resume metadata for the pipeline payloads — the text itself only
+    behind --reveal (stdout lands in host chat logs)."""
+    text = _resume_text()
+    block: dict = {
+        "provided": bool(text and text.strip()),
+        "chars": len(text) if text is not None else None,
+    }
+    if reveal and text is not None:
+        block["text"] = text  # the only place the resume document may appear
+    return block
+
+
+def _resume_facts() -> dict | None:
+    """The profile's resume_facts — --reveal only (personal data).
+
+    None when the store has no profile yet: honestly absent, not an error.
+    """
+    try:
+        return config.load_profile().get("resume_facts")
+    except FileNotFoundError:
+        return None
 
 
 def _needs_resume(state: onboarding.InterviewState | None) -> bool:
@@ -444,3 +485,193 @@ def agent_led_cmd(
     if action not in ("on", "off"):
         _fail("invalid_action", f"expected 'on' or 'off', got {action!r}")
     _verb(lambda: _next_payload(onboarding.set_agent_led(action == "on")))
+
+
+# ---------------------------------------------------------------------------
+# Host-driven pipeline: scoring (spec art_IMViYTMU, T1)
+#
+# The driving agent supplies the scoring intelligence; ApplyPilot owns the
+# rubric contract, validation, and persistence. No LLM call anywhere on
+# these paths — and nothing here calls check_tier, the way `agent start`
+# runs host onboarding with no provider configured.
+# ---------------------------------------------------------------------------
+
+# T1 implements the scoring stage only; enrich/tailor/cover and the apply
+# bookkeeping arrive in later PRs of the same spec. The flag validates
+# against what is implemented so a driver gets a typed refusal instead of
+# a silently wrong queue.
+_STAGES = ("score",)
+
+# Stage -> the queue it drains (a database.STAGE_CONDITIONS key).
+_STAGE_QUEUES = {"score": "pending_score"}
+
+# The scorer's description window: the LLM sees the first 6000 chars of
+# full_description (scorer.score_job), so the host agent judges a job on
+# the same window only when the excerpt matches it.
+_DESCRIPTION_EXCERPT_CAP = 6000
+
+
+def _pipeline_progress(conn=None) -> dict:
+    """The progress block every pipeline payload carries: the stage
+    counts, plus pending_detail — the stranded-jobs signal (jobs with no
+    captured description never enter the score queue; they need enrich
+    first, and the payload keeps that visible instead of silent)."""
+    from applypilot.database import get_stats
+
+    stats = get_stats(conn)
+    return {
+        "scored": stats["scored"],
+        "unscored": stats["unscored"],
+        "pending_detail": stats["pending_detail"],
+        "score_distribution": stats["score_distribution"],
+    }
+
+
+def _job_block(job: dict) -> dict:
+    """The wire shape of one pending job — the scoring inputs and nothing else."""
+    desc = job.get("full_description") or ""
+    return {
+        "url": job["url"],
+        "title": job.get("title"),
+        "site": job.get("site"),
+        "location": job.get("location"),
+        "salary": job.get("salary"),
+        "description_excerpt": desc[:_DESCRIPTION_EXCERPT_CAP],
+        "description_chars": len(desc),
+        "excerpt_truncated": len(desc) > _DESCRIPTION_EXCERPT_CAP,
+    }
+
+
+def _scoring_payload(job: dict | None, reveal: bool) -> dict:
+    """The authoritative payload for the scoring loop: the next pending
+    job (null when the queue is drained — the loop's termination signal),
+    the rubric, progress, and resume metadata."""
+    from applypilot.scoring.scorer import SCORE_PROMPT
+
+    payload: dict = {
+        "stage": "score",
+        "job": _job_block(job) if job is not None else None,
+        "rubric": SCORE_PROMPT,
+        "progress": _pipeline_progress(),
+        "resume": _scoring_resume_block(reveal),
+    }
+    if reveal:
+        facts = _resume_facts()
+        if facts:
+            payload["resume_facts"] = facts
+    return payload
+
+
+def _job_next(stage: str, reveal: bool) -> dict:
+    from applypilot.database import get_connection, get_jobs_by_stage
+
+    conn = get_connection()
+    jobs = get_jobs_by_stage(conn=conn, stage=_STAGE_QUEUES[stage], limit=1)
+    return _scoring_payload(jobs[0] if jobs else None, reveal)
+
+
+@agent_app.command("job-next")
+def job_next_cmd(
+    stage: str = typer.Option(
+        "score", "--stage",
+        help="Which pipeline queue to drain. T1 implements score; "
+             "enrich/tailor/cover arrive in later PRs of the same spec.",
+    ),
+    reveal: bool = typer.Option(
+        False, "--reveal",
+        help="Include the resume text and resume_facts (redacted by "
+             "default — stdout lands in host chat logs).",
+    ),
+) -> None:
+    """The next pending job for a stage, with the rubric and progress."""
+    _prepare_db()
+    if stage not in _STAGES:
+        _fail("invalid_stage",
+              f"--stage must be one of {', '.join(_STAGES)} (implemented so far)",
+              {"stage": stage, "implemented": list(_STAGES)})
+    _verb(lambda: _job_next(stage, reveal))
+
+
+def _validated_host_score(score_raw: str, reasoning: str | None) -> int:
+    """An integer 1-10 with non-empty reasoning, else the invalid_score
+    envelope — the same contract the LLM parser enforces (score clamped
+    and range-checked, reasoning mandatory in the stored blob)."""
+    raw = str(score_raw).strip()
+    if not raw.isdigit():
+        _fail("invalid_score", f"--score must be an integer 1-10, got {score_raw!r}",
+              {"score": score_raw})
+    value = int(raw)
+    if not 1 <= value <= 10:
+        _fail("invalid_score", f"--score must be 1-10 (the rubric's scale), got {value}",
+              {"score": score_raw})
+    if not (reasoning and reasoning.strip()):
+        _fail("invalid_score",
+              "--reasoning is required — an unjustified score is not persisted",
+              {"score": score_raw})
+    return value
+
+
+def _host_score(url: str, score_raw: str, keywords: str | None,
+                reasoning: str | None, rescore: bool, reveal: bool) -> dict:
+    """Validate and persist one host score, then serve the next payload.
+
+    The write goes through scorer.persist_score — the same UPDATE the
+    LLM path uses (spec: no parallel schema for host data) — stamped
+    scored_by='host'. A failed verb never writes: validation errors are
+    envelopes only.
+    """
+    from applypilot.database import get_connection, get_jobs_by_stage
+    from applypilot.scoring.scorer import persist_score
+
+    score = _validated_host_score(score_raw, reasoning)
+
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT fit_score, full_description FROM jobs WHERE url = ?", (url,)
+    ).fetchone()
+    if row is None or not row["full_description"]:
+        _fail("not_scoreable",
+              f"no scoreable job at {url} — it must exist and hold a captured "
+              "full_description (drain pending_detail with enrich first)",
+              {"url": url})
+    if row["fit_score"] is not None and not rescore:
+        _fail("already_scored",
+              f"{url} already carries a fit score — pass --rescore to overwrite it",
+              {"url": url, "fit_score": row["fit_score"]})
+
+    persist_score(
+        conn, url, score,
+        keywords=(keywords or "").strip(),
+        reasoning=(reasoning or "").strip(),
+        scored_by="host",
+        when=datetime.now(timezone.utc).isoformat(),
+    )
+    conn.commit()
+
+    jobs = get_jobs_by_stage(conn=conn, stage=_STAGE_QUEUES["score"], limit=1)
+    return _scoring_payload(jobs[0] if jobs else None, reveal)
+
+
+@agent_app.command("score")
+def score_cmd(
+    url: Optional[str] = typer.Option(
+        None, "--url", help="Job URL from the job-next payload."),
+    score: Optional[str] = typer.Option(
+        None, "--score", help="Fit score, integer 1-10 (the rubric rides the job-next payload)."),
+    keywords: Optional[str] = typer.Option(
+        None, "--keywords", help="Comma-separated ATS keywords matched from the description."),
+    reasoning: Optional[str] = typer.Option(
+        None, "--reasoning", help="2-3 sentences justifying the score. Required."),
+    rescore: bool = typer.Option(
+        False, "--rescore", help="Overwrite an existing score (LLM-path parity)."),
+    reveal: bool = typer.Option(
+        False, "--reveal",
+        help="Include the resume text and resume_facts in the returned next payload."),
+) -> None:
+    """Persist a host score for one job; the payload serves the next pending job."""
+    _prepare_db()
+    if not url:
+        _fail("invalid_usage", "--url is required")
+    if score is None:
+        _fail("invalid_usage", "--score is required")
+    _verb(lambda: _host_score(url, score, keywords, reasoning, rescore, reveal))
