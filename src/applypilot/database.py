@@ -558,6 +558,15 @@ STAGE_CONDITIONS: dict[str, str] = {
         "AND tailored_resume_path IS NULL AND COALESCE(tailor_attempts, 0) < 5"
     ),
     "tailored": "tailored_resume_path IS NOT NULL",
+    # Same shape as run_cover_letters' inline queue query (score >= min,
+    # tailored materials present, nothing generated yet, attempts left) —
+    # shared so the host cover verb drains exactly the LLM path's queue.
+    "pending_cover": (
+        "fit_score >= ? AND full_description IS NOT NULL "
+        "AND tailored_resume_path IS NOT NULL "
+        "AND (cover_letter_path IS NULL OR cover_letter_path = '') "
+        "AND COALESCE(cover_attempts, 0) < 5"
+    ),
     "pending_apply": (
         "tailored_resume_path IS NOT NULL AND applied_at IS NULL "
         "AND application_url IS NOT NULL"

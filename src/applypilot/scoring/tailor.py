@@ -38,6 +38,30 @@ log = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 5  # max cross-run retries before giving up
 
+# The JSON shape the validator requires (mirrors the tailoring prompt's
+# OUTPUT block). The host tailor verb carries it in the job-next payload
+# as the driving agent's data contract.
+TAILOR_DATA_TEMPLATE: dict = {
+    "title": "Role Title",
+    "summary": "2-3 tailored sentences.",
+    "skills": {
+        "Languages": "comma-separated skills",
+        "Frameworks": "comma-separated skills",
+        "DevOps & Infra": "comma-separated skills",
+        "Databases": "comma-separated skills",
+        "Tools": "comma-separated skills",
+    },
+    "experience": [
+        {"header": "Title at Company", "subtitle": "Tech | Dates",
+         "bullets": ["bullet 1", "bullet 2", "bullet 3", "bullet 4"]},
+    ],
+    "projects": [
+        {"header": "Project Name - Description", "subtitle": "Tech | Dates",
+         "bullets": ["bullet 1", "bullet 2"]},
+    ],
+    "education": "Degree | School",
+}
+
 
 # ── Prompt Builders (profile-driven) ──────────────────────────────────────
 
@@ -460,6 +484,97 @@ def tailor_resume(
     return tailored, report
 
 
+# Reports count these as success — a generated document is a success even
+# when the LLM judge only warned (both statuses stamp the jobs pointer).
+_SUCCESS_STATUSES = {"approved", "approved_with_judge_warning"}
+
+
+# ── Persistence (shared by the LLM loop and the host verb) ───────────────
+
+def persist_tailored(conn, job: dict, tailored_text: str, report: dict) -> dict:
+    """Write the tailored document set and stamp the jobs row — the single
+    persistence path for a validated tailored resume (spec art_IMViYTMU:
+    the host verb writes through the same files and UPDATE as the LLM
+    loop, no parallel schema for host data).
+
+    Writes the tailored text, the job-description sidecar, and the
+    validation report; generates the PDF best-effort; records the version
+    row (spec D2) when history is on; updates the jobs pointer and the
+    attempt counter; commits. Returns the result dict the batch loop logs.
+    """
+    TAILORED_DIR.mkdir(parents=True, exist_ok=True)
+    prefix = docs.output_prefix(job)
+
+    # History on (D1/D2): every generation is a new version at a
+    # _v{N} stem; a pre-history legacy file is backfilled as version 1
+    # by next_document_version and never touched. History off: the
+    # exact pre-history overwrite behavior at the bare prefix.
+    history_on = history_enabled()
+    if history_on:
+        version = next_document_version(
+            conn, job["url"], KIND_RESUME,
+            legacy_path=TAILORED_DIR / f"{prefix}.txt")
+        stem = docs.versioned_stem(prefix, version)
+    else:
+        stem = prefix
+
+    txt_path = TAILORED_DIR / f"{stem}.txt"
+    txt_path.write_text(tailored_text, encoding="utf-8")
+
+    # Save job description for traceability
+    job_path = TAILORED_DIR / f"{stem}_JOB.txt"
+    job_desc = (
+        f"Title: {job['title']}\n"
+        f"Company: {job['site']}\n"
+        f"Location: {job.get('location', 'N/A')}\n"
+        f"Score: {job.get('fit_score', 'N/A')}\n"
+        f"URL: {job['url']}\n\n"
+        f"{job.get('full_description', '')}"
+    )
+    job_path.write_text(job_desc, encoding="utf-8")
+
+    # Save validation report
+    report_path = TAILORED_DIR / f"{stem}_REPORT.json"
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+    # Generate PDF for approved resumes (best-effort)
+    # "approved_with_judge_warning" is also a success — resume was generated.
+    pdf_path = None
+    if report["status"] in ("approved", "approved_with_judge_warning"):
+        try:
+            from applypilot.scoring.pdf import convert_to_pdf
+            pdf_path = str(convert_to_pdf(txt_path))
+        except Exception:
+            log.debug("PDF generation failed for %s", txt_path, exc_info=True)
+
+    # Record the version row (spec D2): file path + validation outcome
+    # for every written document, approved or not.
+    version_id = None
+    if history_on:
+        version_id = record_document_version(
+            conn, job["url"], KIND_RESUME, version, str(txt_path),
+            validation_status=report["status"],
+        )
+
+    conn.execute(
+        "UPDATE jobs SET tailored_resume_path=?, tailored_at=?, "
+        "tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
+        (str(txt_path), datetime.now(timezone.utc).isoformat(), job["url"]),
+    )
+    conn.commit()
+
+    return {
+        "url": job["url"],
+        "path": str(txt_path),
+        "pdf_path": pdf_path,
+        "title": job["title"],
+        "site": job["site"],
+        "status": report["status"],
+        "attempts": report["attempts"],
+        "version_id": version_id,
+    }
+
+
 # ── Batch Entry Point ────────────────────────────────────────────────────
 
 def run_tailoring(min_score: int = 7, limit: int = 20,
@@ -493,7 +608,6 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
     completed = 0
     results: list[dict] = []
     stats: dict[str, int] = {"approved": 0, "failed_validation": 0, "failed_judge": 0, "error": 0}
-    history_on = history_enabled()
 
     for job in jobs:
         completed += 1
@@ -501,71 +615,9 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
             tailored, report = tailor_resume(resume_text, job, profile,
                                              validation_mode=validation_mode)
 
-            # Build safe filename prefix (B3: URL-hash suffix ends same-site/
-            # title collisions; B12: title is nullable — guard)
-            prefix = docs.output_prefix(job)
-
-            # History on (D1/D2): every generation is a new version at a
-            # _v{N} stem; a pre-history legacy file is backfilled as version 1
-            # by next_document_version and never touched. History off: the
-            # exact pre-history overwrite behavior at the bare prefix.
-            if history_on:
-                version = next_document_version(
-                    conn, job["url"], KIND_RESUME,
-                    legacy_path=TAILORED_DIR / f"{prefix}.txt")
-                stem = docs.versioned_stem(prefix, version)
-            else:
-                stem = prefix
-
-            # Save tailored resume text
-            txt_path = TAILORED_DIR / f"{stem}.txt"
-            txt_path.write_text(tailored, encoding="utf-8")
-
-            # Save job description for traceability
-            job_path = TAILORED_DIR / f"{stem}_JOB.txt"
-            job_desc = (
-                f"Title: {job['title']}\n"
-                f"Company: {job['site']}\n"
-                f"Location: {job.get('location', 'N/A')}\n"
-                f"Score: {job.get('fit_score', 'N/A')}\n"
-                f"URL: {job['url']}\n\n"
-                f"{job.get('full_description', '')}"
-            )
-            job_path.write_text(job_desc, encoding="utf-8")
-
-            # Save validation report
-            report_path = TAILORED_DIR / f"{stem}_REPORT.json"
-            report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-
-            # Generate PDF for approved resumes (best-effort)
-            # "approved_with_judge_warning" is also a success — resume was generated.
-            pdf_path = None
-            if report["status"] in ("approved", "approved_with_judge_warning"):
-                try:
-                    from applypilot.scoring.pdf import convert_to_pdf
-                    pdf_path = str(convert_to_pdf(txt_path))
-                except Exception:
-                    log.debug("PDF generation failed for %s", txt_path, exc_info=True)
-
-            # Record the version row (spec D2): file path + validation outcome
-            # for every written document, approved or not.
-            version_id = None
-            if history_on:
-                version_id = record_document_version(
-                    conn, job["url"], KIND_RESUME, version, str(txt_path),
-                    validation_status=report["status"],
-                )
-
-            result = {
-                "url": job["url"],
-                "path": str(txt_path),
-                "pdf_path": pdf_path,
-                "title": job["title"],
-                "site": job["site"],
-                "status": report["status"],
-                "attempts": report["attempts"],
-                "version_id": version_id,
-            }
+            # One persistence path: files, version row, jobs pointer, and
+            # the attempt counter — shared with the host tailor verb.
+            result = persist_tailored(conn, job, tailored, report)
         except Exception as e:
             result = {
                 "url": job["url"], "title": job["title"], "site": job["site"],
@@ -592,26 +644,21 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
             (result.get("title") or "untitled")[:40],
         )
 
-    # Persist to DB: increment attempt counter for content-level failures,
-    # save path only for approved. P1-1: infra-classified errors (provider
-    # down, timed out, 5xx) do not burn the attempt budget — the job stays
-    # fully retryable when the provider recovers, instead of one outage
-    # exhausting every queued job's 5 attempts.
-    now = datetime.now(timezone.utc).isoformat()
-    _success_statuses = {"approved", "approved_with_judge_warning"}
+    # Persist to DB: increment attempt counter for content-level failures.
+    # Successes were persisted inline by persist_tailored (path, pointer,
+    # attempt counter, version row). P1-1: infra-classified errors
+    # (provider down, timed out, 5xx) do not burn the attempt budget — the
+    # job stays fully retryable when the provider recovers, instead of one
+    # outage exhausting every queued job's 5 attempts.
     for r in results:
-        is_infra = r.get("error_class") == "infra"
-        if r["status"] in _success_statuses:
-            conn.execute(
-                "UPDATE jobs SET tailored_resume_path=?, tailored_at=?, "
-                "tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
-                (r["path"], now, r["url"]),
-            )
-        elif not is_infra:
-            conn.execute(
-                "UPDATE jobs SET tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
-                (r["url"],),
-            )
+        if r["status"] in _SUCCESS_STATUSES:
+            continue  # already stamped by persist_tailored
+        if r.get("error_class") == "infra":
+            continue
+        conn.execute(
+            "UPDATE jobs SET tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
+            (r["url"],),
+        )
     conn.commit()
 
     elapsed = time.time() - t0

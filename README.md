@@ -371,9 +371,59 @@ drives the whole queue.
   default payload — `--reveal` opts in per call.
 - These verbs never touch the LLM tier gate: they run on a store with
   zero provider configuration.
-- Later PRs of the same spec extend the pattern to enrich/tailor/cover
-  and the apply bookkeeping (`job-next --stage` refuses those values for
-  now with an `invalid_stage` envelope).
+- Apply bookkeeping is a later PR of the same spec (`agent apply-acquire`
+  / `apply-result`); the plan-then-confirm guardrails are unchanged.
+
+### Enrich, Tailor, and Cover by Agent (host-driven pipeline, T2)
+
+The same protocol now covers the three remaining LLM seams: description
+capture when the HTML tier misses (the `extract_with_llm` fallback),
+resume tailoring, and cover letters. In every case the driving agent
+supplies the text and the CLI runs the same local validation and
+persistence the LLM path uses — the LLM judge that normally reviews
+tailor output is skipped in host mode (validation is lenient, exactly
+like a portal run).
+
+```
+applypilot agent job-next --stage enrich            # stranded jobs (no description yet)
+applypilot agent enrich --url <url> \
+    --full-description "..." [--application-url "..."]
+applypilot agent job-next --stage tailor            # scored jobs missing materials
+applypilot agent tailor --url <url> --data '<resume JSON>'
+applypilot agent job-next --stage cover             # tailored jobs missing letters
+applypilot agent cover --url <url> --text "..."
+```
+
+- Each stage's `job-next` serves that stage's queue (enrich: pending
+  detail jobs; tailor: scored jobs with a description and no tailored
+  resume; cover: tailored jobs with no cover letter) and carries the
+  same shape as score: job block with a 6000-char description excerpt,
+  progress counts for the whole pipeline, and redaction by default.
+  `--reveal` adds the resume text and `resume_facts`; the tailor stage
+  also adds the profile slice the assembler uses (skills boundary,
+  experience, education — never personal fields) and a `data_template`
+  skeleton for the `--data` JSON.
+- `agent enrich` writes the description capture through the same
+  persistence path the scraper's fallback tier uses (same stamps, same
+  `pending_detail` -> score-queue transition). It refuses an unknown job
+  (`unknown_job`), an empty description (`invalid_description`), and a
+  recapture (`already_enriched`).
+- `agent tailor` runs the local validator then the assembler. A failed
+  validation is a retryable `invalid_resume_data` envelope carrying the
+  validator's errors as `avoid_notes` — fix them and call again;
+  nothing is persisted on failure. Lenient mode skips banned-filler
+  checks but never fabrication: skills outside the profile's boundary
+  are still refused.
+- `agent cover` sanitizes the letter (the same dash handling the LLM
+  path applies), runs `validate_cover_letter`, and refuses invalid
+  letters with a retryable `invalid_cover_letter` envelope. Covering a
+  job without a tailored resume is `not_coverable`; a second letter is
+  `already_covered`.
+- Every `job-next` payload reports `progress.pending_detail`, so a host
+  loop can see stranded jobs instead of dropping them: drain the enrich
+  queue and those jobs re-enter the score queue.
+- Like the scoring verbs, none of these touch the LLM tier gate — they
+  run on a store with zero provider configuration.
 
 ---
 
