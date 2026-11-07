@@ -135,7 +135,10 @@ class InterviewState:
     """Everything the interview needs to survive a portal restart."""
 
     phase: str = GATE
-    backend: str = ""  # "claude" | "llm" — empty until the interview starts
+    # "claude" | "llm" | "host" — empty until the interview starts; "host"
+    # means the driver (an agent-protocol client) supplies the intelligence
+    # and the service layer makes zero LLM/Claude calls for the journey.
+    backend: str = ""
     messages: list[dict] = field(default_factory=list)  # [{role, content}]
     claude_session_id: str | None = None  # print-mode --resume anchor
     # True when the live Claude session already received the pending
@@ -1587,7 +1590,12 @@ def start_interview(mode: str) -> InterviewState:
     """Open (or resume) an interview on the chosen backend.
 
     mode "claude" requires the signed-in gate (D1); "llm" is the explicit
-    skip to provider-key mode. The gate phase never reaches here unlocked.
+    skip to provider-key mode; "host" is the agent-protocol-only mode where
+    the driving host agent supplies the intelligence — no readiness gate and
+    no kickoff turn (spec art_v7WOlPfz): there is no backend to run one, so
+    no draft extraction either (the driver reads the resume itself via
+    `agent next --reveal` and answers everything). The portal never selects
+    "host" — its readiness gate is unchanged.
     An existing live state resumes as-is — two tabs (or the post-sign-in
     refresh) must not wipe an interview in progress; only a cleared state
     (first run, or after redo_interview) starts fresh. The exception is
@@ -1599,19 +1607,22 @@ def start_interview(mode: str) -> InterviewState:
         existing = load_state()
         if existing is not None and existing.phase != INTAKE:
             return existing
-        ready = readiness()
-        if mode == "claude":
-            if not ready["can_start_claude"]:
-                raise OnboardingError("Claude Code is not signed in yet — finish sign-in first.")
-            backend_name = "claude"
-        elif mode == "llm":
-            if not ready["can_start_llm"]:
-                raise OnboardingError(
-                    "No LLM provider is configured — add one on the Settings page first."
-                )
-            backend_name = "llm"
+        if mode == "host":
+            backend_name = "host"
         else:
-            raise OnboardingError(f"unknown interview mode {mode!r}")
+            ready = readiness()
+            if mode == "claude":
+                if not ready["can_start_claude"]:
+                    raise OnboardingError("Claude Code is not signed in yet — finish sign-in first.")
+                backend_name = "claude"
+            elif mode == "llm":
+                if not ready["can_start_llm"]:
+                    raise OnboardingError(
+                        "No LLM provider is configured — add one on the Settings page first."
+                    )
+                backend_name = "llm"
+            else:
+                raise OnboardingError(f"unknown interview mode {mode!r}")
 
         if existing is not None:  # INTAKE — the resume-first entry
             state = existing
@@ -1619,6 +1630,17 @@ def start_interview(mode: str) -> InterviewState:
             state = InterviewState(phase=INTERVIEW, backend=backend_name)
         state.backend = backend_name
         state.phase = INTERVIEW
+        if backend_name == "host":
+            # Zero-backend entry: no kickoff turn, no draft extraction — the
+            # pending resume context stays queued (it is never consumed
+            # without a backend; the driver reads it via `agent next
+            # --reveal`). The guided agenda runs gaps-only from an empty
+            # draft, exactly like a draftless kickoff.
+            _note(state, "Host-driven onboarding: no interview backend is configured, "
+                        "so the host agent reads the resume itself (next --reveal) and "
+                        "answers every question — no draft extraction runs.")
+            save_state(state)
+            return state
         kickoff_prompt = KICKOFF_PROMPT
         if state.pending_context and not (
                 state.backend == "claude"
@@ -1665,6 +1687,14 @@ def send_message(text: str) -> InterviewState:
         state = load_state()
         if state is None or state.phase != INTERVIEW:
             raise OnboardingError("the interview is not active")
+        if state.backend == "host":
+            # Free-form chat stays backend-only in host mode (spec
+            # art_v7WOlPfz): no canned echo, no local reply generation — the
+            # host agent is the interlocutor and drives the guided agenda.
+            # "interview backend" maps to the provider_setup protocol code.
+            raise OnboardingError(
+                "free-form chat needs an interview backend — drive the wizard "
+                "with agent answer / resume / review instead.")
         state.messages.append({"role": _ROLE_USER, "content": text})
         prompt = text
         context = state.pending_context
@@ -1937,7 +1967,13 @@ def record_answer(question_id: str, value: str = "", free_text: str = "",
         _finish_agenda(state)
         save_state(state)
 
-        if label:
+        if state.backend == "host":
+            # Host mode: no backend ack turn — the driving agent IS the
+            # interlocutor. The answer, agenda, and transcript stay exactly
+            # as recorded above; only the acknowledgement is replaced by a
+            # local note (spec art_v7WOlPfz).
+            _note(state, f"Answered \"{spec.prompt}\" — host-driven, no backend ack.")
+        elif label:
             # Grounded ack (spec art_ti3XJuNr): both backends hear the
             # question's id, text, options, and the submitted value — the
             # Claude CLI as its turn prompt, the provider as an unrecorded
@@ -2051,6 +2087,13 @@ def set_agent_led(enabled: bool) -> InterviewState:
         state = load_state()
         if state is None or state.phase != INTERVIEW:
             raise OnboardingError("the interview is not active")
+        if enabled and state.backend == "host":
+            # Agent-led mode is free-form chat (send_message's channel) —
+            # it stays backend-only in host mode, like send (spec
+            # art_v7WOlPfz): no backend exists to take the directive turn.
+            raise OnboardingError(
+                "agent-led free-form chat needs an interview backend — drive "
+                "the wizard with agent answer / resume / review instead.")
         if (state.mode == MODE_AGENT) == enabled:
             # Idempotent — double-clicks and stale tabs — except that
             # returning to buttons with an empty agenda is the one exit
@@ -2242,6 +2285,14 @@ def redo_interview() -> InterviewState:
     # but if the only backend signed out since the original run,
     # start_interview would fail over an empty store — an error with no
     # path forward. Tell the user to configure a backend first instead.
+    # The exception is host mode (spec art_v7WOlPfz): a host-driven
+    # interview needs no backend, so start-over there is a pure local
+    # reset that reopens on "host" — only a live host interview unlocks
+    # this path (a fresh store keeps the portal's backend gate).
+    existing = load_state()
+    if existing is not None and existing.backend == "host":
+        clear_state()
+        return start_interview("host")
     ready = readiness()
     if not ready["can_start_any"]:
         raise OnboardingError(

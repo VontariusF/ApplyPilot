@@ -236,6 +236,9 @@ def _next_payload(state: onboarding.InterviewState | None, reveal: bool = False)
     payload = {
         "phase": phase,
         "mode": state.mode if state is not None else None,
+        # The journey's backend: "host" when the driver supplies the
+        # intelligence (zero LLM calls), "claude"/"llm" otherwise.
+        "backend": state.backend if state is not None else None,
         "current_question": _current_question_payload(state),
         "prefill_chips": _chips_payload(state),
         "last_agent_reply": _last_agent_reply(state, reveal),
@@ -269,11 +272,13 @@ def _next_payload(state: onboarding.InterviewState | None, reveal: bool = False)
 
 def _start(mode: str) -> dict:
     ready = onboarding.readiness()
-    if not ready["can_start_any"]:
-        raise onboarding.OnboardingError(
-            "No interview backend is available — sign in to Claude Code, or configure "
-            "an LLM provider (a host agent can edit ~/.applypilot/.env directly).")
-    backend = "claude" if ready["can_start_claude"] else "llm"
+    if ready["can_start_any"]:
+        backend = "claude" if ready["can_start_claude"] else "llm"
+    else:
+        # No interview backend: the driving host agent supplies the
+        # intelligence instead (spec art_v7WOlPfz) — onboarding runs
+        # end-to-end with zero LLM calls, free-form chat stays gated.
+        backend = "host"
     existing = onboarding.load_state()
     if existing is None or existing.phase == onboarding.GATE:
         # Resume-first: intake before any agent turn; needs.resume says so.

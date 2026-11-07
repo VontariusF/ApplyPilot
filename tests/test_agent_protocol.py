@@ -340,11 +340,156 @@ def test_error_codes_are_semantic(app_dir, no_backend):
         assert result.stderr == "", argv
 
 
-def test_start_without_backend_errors_as_provider_setup(app_dir, no_backend):
+def test_start_without_backend_starts_host_mode(app_dir, no_backend):
+    """agent start no longer demands a backend (spec art_v7WOlPfz): intake
+    opens, and the second start runs the interview on the host backend —
+    needs.provider_setup stays true but is informational."""
+    payload = payload_of(run("start"))
+    assert payload["phase"] == "intake"
+    assert payload["backend"] is None or payload["backend"] == ""
     result = run("start")
+    assert result.exit_code == 0, result.stdout
+    payload = payload_of(result)
+    assert payload["phase"] == "interview"
+    assert payload["backend"] == "host"
+    assert payload["needs"]["provider_setup"] is True
+
+
+# ---------------------------------------------------------------------------
+# Host backend (spec art_v7WOlPfz): the driving agent IS the intelligence
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def exploding_backends(monkeypatch):
+    """Record-and-raise on every backend seam: any LLM or Claude call in
+    host mode fails the test loudly instead of passing by accident."""
+    calls: list[str] = []
+
+    def make(name):
+        class _Boom:
+            def __init__(self, *a, **k):
+                pass
+
+            def kickoff(self, *a, **k):
+                calls.append(f"{name}.kickoff")
+                raise AssertionError(f"{name}.kickoff ran in host mode")
+
+            def send(self, *a, **k):
+                calls.append(f"{name}.send")
+                raise AssertionError(f"{name}.send ran in host mode")
+
+        return _Boom
+
+    monkeypatch.setattr(onboarding, "LLMBackend", make("LLMBackend"))
+    monkeypatch.setattr(onboarding, "ClaudePrintBackend", make("ClaudePrintBackend"))
+    return calls
+
+
+def _drain_agenda():
+    """Walk the whole agenda using only what the next payload shows."""
+    for _ in range(len(onboarding.QUESTION_SPECS) + 1):
+        question = payload_of(run("next"))["current_question"]
+        if question is None:
+            return
+        if question["choices"]:
+            argv = ("answer", "--question", question["id"],
+                    "--choice", question["choices"][0]["value"])
+        elif question["allow_free_text"]:
+            argv = ("answer", "--question", question["id"],
+                    "--free-text", "Something reasonable")
+        else:
+            argv = ("answer", "--question", question["id"], "--skip")
+        result = run(*argv)
+        assert result.exit_code == 0, result.stdout
+    pytest.fail("the agenda never completed")
+
+
+def test_host_journey_runs_zero_backend_calls(app_dir, no_backend, exploding_backends, tmp_path):
+    """The zero-backend journey: start → resume → start → all guided answers
+    → confirm, with both backend classes patched to raise-and-record — the
+    journey completes (phase done, the three files written) and the recorded
+    backend call count is 0."""
+    from applypilot import config
+
+    resume_file = tmp_path / "resume.txt"
+    resume_file.write_text("Test Person — data engineer résumé.", encoding="utf-8")
+    assert payload_of(run("start"))["phase"] == "intake"
+    assert payload_of(run("resume", "--file", str(resume_file)))["phase"] == "intake"
+    payload = payload_of(run("start"))
+    assert payload["backend"] == "host"
+
+    _drain_agenda()
+    assert payload_of(run("next"))["phase"] == "review"
+    result = run("confirm")
+    assert result.exit_code == 0, result.stdout
+    payload = payload_of(result)
+    assert payload["phase"] == "done"
+    assert payload["written"]["profile"] == str(config.PROFILE_PATH)
+    assert config.PROFILE_PATH.exists()
+    assert config.PROFILE_MD_PATH.exists()
+    assert config.SEARCH_CONFIG_PATH.exists()
+    assert exploding_backends == []
+
+
+def test_host_answers_get_local_notes_not_backend_acks(app_dir, no_backend, exploding_backends, tmp_path):
+    """With backend host, an answer records and the transcript gains a local
+    note — no ack turn, no exception swallowed."""
+    resume_file = tmp_path / "resume.txt"
+    resume_file.write_text("Test Person — data engineer résumé.", encoding="utf-8")
+    run("start")
+    run("resume", "--file", str(resume_file))
+    run("start")
+    question = payload_of(run("next"))["current_question"]
+    if question["choices"]:
+        result = run("answer", "--question", question["id"],
+                     "--choice", question["choices"][0]["value"])
+    else:
+        result = run("answer", "--question", question["id"],
+                     "--free-text", "Something reasonable")
+    assert result.exit_code == 0, result.stdout
+    assert payload_of(result)["backend"] == "host"
+    state = onboarding.load_state()
+    notes = [m for m in state.messages if m["role"] == onboarding._ROLE_NOTE]
+    assert any("host-driven, no backend ack" in m["content"] for m in notes)
+    assert exploding_backends == []
+
+
+def test_send_in_host_mode_is_gated(app_dir, no_backend, exploding_backends):
+    """Free-form chat stays backend-only in host mode: provider_setup code,
+    guidance pointing at the answer/resume/review driving verbs."""
+    run("start")
+    run("start")
+    result = run("send", "--text", "hello there")
     assert result.exit_code != 0
     payload = payload_of(result)
     assert payload["error"]["code"] == "provider_setup"
+    assert "agent answer" in payload["error"]["message"]
+    assert "resume" in payload["error"]["message"]
+    assert "review" in payload["error"]["message"]
+
+
+def test_agent_led_on_in_host_mode_is_gated(app_dir, no_backend, exploding_backends):
+    """Agent-led mode is free-form chat's channel — gated in host mode like
+    send; agent-led off stays available (a pure local switch back)."""
+    run("start")
+    run("start")
+    result = run("agent-led", "on")
+    assert result.exit_code != 0
+    assert payload_of(result)["error"]["code"] == "provider_setup"
+    assert payload_of(run("agent-led", "off"))["mode"] == "choices"
+
+
+def test_redo_in_host_mode_is_a_pure_local_reset(app_dir, no_backend, exploding_backends):
+    """Start-over in host mode needs no backend: it clears and reopens on
+    host; with no state (the portal path) the backend gate stands."""
+    run("start")
+    run("start")
+    result = run("redo")
+    assert result.exit_code == 0, result.stdout
+    payload = payload_of(result)
+    assert payload["phase"] == "interview"
+    assert payload["backend"] == "host"
+    assert exploding_backends == []
 
 
 def test_start_never_wipes_an_active_interview(app_dir, fake_claude, signed_in, tmp_path):
