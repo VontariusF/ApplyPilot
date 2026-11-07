@@ -262,14 +262,19 @@ def test_score_refuses_unscoreable_targets(seeded_store):
     assert payload_of(result)["error"]["code"] == "not_scoreable"
 
 
-def test_job_next_rejects_unimplemented_stages(seeded_store):
-    """T1 implements score only; later spec PRs add the other stages."""
+def test_job_next_serves_all_spec_stages(seeded_store):
+    """T2: enrich/tailor/cover are implemented — an unknown stage still
+    gets the typed invalid_stage refusal."""
     for stage in ("enrich", "tailor", "cover"):
         result = run("job-next", "--stage", stage)
-        assert result.exit_code != 0
-        envelope = payload_of(result)
-        assert envelope["error"]["code"] == "invalid_stage"
-        assert envelope["error"]["details"]["stage"] == stage
+        assert result.exit_code == 0, result.stdout
+        assert payload_of(result)["stage"] == stage
+
+    result = run("job-next", "--stage", "bogus")
+    assert result.exit_code != 0
+    envelope = payload_of(result)
+    assert envelope["error"]["code"] == "invalid_stage"
+    assert envelope["error"]["details"]["stage"] == "bogus"
 
 
 # ---------------------------------------------------------------------------
