@@ -296,6 +296,50 @@ applypilot portal                       # Launch the localhost web portal
 
 ---
 
+## Onboarding by Agent (the `applypilot agent` protocol)
+
+Any shell-capable coding agent can drive onboarding through a pure-JSON
+protocol: every verb prints ONE JSON document (the authoritative "next"
+payload) or an `{"error": {"code", "message", "details"}}` envelope with a
+nonzero exit. The usual journey:
+
+```
+applypilot agent start                 # opens intake
+applypilot agent resume --file resume.txt
+applypilot agent start                 # opens the interview
+applypilot agent next --reveal         # question + the resume text, redacted by default
+applypilot agent answer --question <id> --choice <value> | --free-text <text> | --skip
+applypilot agent review --set email=you@example.com
+applypilot agent confirm               # writes profile.json / profile.md / searches.yaml
+```
+
+### Host mode — zero LLM calls
+
+When neither Claude Code is signed in nor an LLM provider is configured,
+`agent start` no longer refuses: the interview opens on the **host**
+backend, meaning the driving agent IS the intelligence. The service layer
+makes zero LLM or Claude calls for the entire journey — no kickoff turn, no
+draft extraction, no per-answer acknowledgements. The driver reads the
+resume itself (`agent next --reveal`) and answers every question with
+`agent answer`; review and confirm are pure local computation.
+
+Contract in host mode:
+
+- `next` reports `"backend": "host"` and `needs.provider_setup: true` —
+  the flag keeps its name but is **informational**: it means there is no
+  backend for free-form chat, and it blocks nothing.
+- `send` (free-form chat) stays backend-only: it exits nonzero with code
+  `provider_setup` and points the driver back to `agent answer / resume /
+  review`. There is no canned echo.
+- Start-over (`agent redo`) is a pure local reset.
+- Prefills are a backend (extraction) feature: none in host mode.
+
+When a backend IS configured, nothing changes: claude is preferred, then
+the LLM provider, and the portal keeps its readiness gate — human flows
+never select the host backend.
+
+---
+
 ## Local Web Portal
 
 A single-user web cockpit over the same store and config the CLI uses. The
