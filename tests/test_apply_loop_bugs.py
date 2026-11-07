@@ -351,3 +351,77 @@ def test_f3_chrome_launch_failure_refunds_the_attempt(queue, monkeypatch):
     assert row["apply_status"] is None  # unlocked, fully retryable
     # The job is still in the queue once the environment is fixed.
     assert launcher.acquire_job(min_score=1) is not None
+
+
+# ---------------------------------------------------------------------------
+# Distinct captcha status — terminal by decision (spec art_tBtaZIWB)
+# ---------------------------------------------------------------------------
+
+
+def test_captcha_verdict_persists_distinct_terminal_status(queue, monkeypatch):
+    """The worker loop persists the engine's CAPTCHA verdict as
+    apply_status='captcha' (not 'failed'), with the attempts ban pinned."""
+    _seed_job(queue, "https://x.com/jobs/captcha", fit_score=5)
+
+    monkeypatch.setattr(launcher, "launch_chrome", lambda *a, **k: None)
+    monkeypatch.setattr(launcher, "run_job",
+                        lambda job, **kwargs: ("captcha", 42))
+    monkeypatch.setattr(launcher, "cleanup_worker", lambda *a, **k: None)
+
+    applied, failed = launcher.worker_loop(limit=1, min_score=1, dry_run=True)
+    assert (applied, failed) == (0, 1)
+
+    row = queue.execute(
+        "SELECT apply_status, apply_error, apply_attempts FROM jobs "
+        "WHERE url = ?", ("https://x.com/jobs/captcha",)).fetchone()
+    assert row["apply_status"] == "captcha"
+    assert row["apply_error"] == "captcha"
+    assert row["apply_attempts"] == 99  # permanent: the belt-and-braces ban
+
+
+def test_captcha_job_is_never_acquired_by_the_queue(queue):
+    """Queue predicate copy 1 (acquire_job): captcha is terminal by decision —
+    never requeued, even with attempts far under any cap."""
+    _seed_job(queue, "https://x.com/jobs/captcha",
+              apply_status="captcha", apply_error="captcha", apply_attempts=99)
+    _seed_job(queue, "https://x.com/jobs/normal", fit_score=5)
+
+    assert launcher.acquire_job(min_score=1) is not None  # normal job flows
+    row = queue.execute(
+        "SELECT apply_status FROM jobs WHERE url = ?",
+        ("https://x.com/jobs/captcha",)).fetchone()
+    assert row["apply_status"] == "captcha"
+
+
+def test_captcha_job_is_not_in_the_derived_batch(queue):
+    """Queue predicate copy 2 (derive_batch): the plan preview never offers a
+    captcha-blocked job."""
+    _seed_job(queue, "https://x.com/jobs/captcha",
+              apply_status="captcha", apply_error="captcha", apply_attempts=99)
+    _seed_job(queue, "https://x.com/jobs/normal", fit_score=5)
+
+    batch = launcher.derive_batch(min_score=1)
+    urls = [job["url"] for job in batch]
+    assert urls == ["https://x.com/jobs/normal"]
+
+
+def test_reset_failed_leaves_captcha_rows_terminal(queue):
+    """The reset sweep keeps its behavior for failed rows but must not sweep
+    captcha rows back to retryable NULL — that would silently re-enqueue
+    blocked jobs."""
+    _seed_job(queue, "https://x.com/jobs/captcha",
+              apply_status="captcha", apply_error="captcha", apply_attempts=99)
+    _seed_job(queue, "https://x.com/jobs/failed",
+              apply_status="failed", apply_error="engine died", apply_attempts=2)
+
+    reset = launcher.reset_failed()
+    assert reset == 1  # only the failed row
+
+    rows = {row["url"]: dict(row) for row in queue.execute(
+        "SELECT url, apply_status, apply_error, apply_attempts FROM jobs")}
+    assert rows["https://x.com/jobs/captcha"]["apply_status"] == "captcha"
+    assert rows["https://x.com/jobs/captcha"]["apply_error"] == "captcha"
+    assert rows["https://x.com/jobs/captcha"]["apply_attempts"] == 99
+    assert rows["https://x.com/jobs/failed"]["apply_status"] is None
+    assert rows["https://x.com/jobs/failed"]["apply_attempts"] == 0
+

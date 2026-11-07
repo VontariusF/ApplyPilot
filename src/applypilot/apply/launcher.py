@@ -245,6 +245,8 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                   AND (apply_status IS NULL OR apply_status = 'failed'
                        OR (apply_status = 'in_progress' AND last_attempted_at IS NOT NULL
                            AND last_attempted_at <= ?))
+                  -- captcha is terminal by decision: a blocked job is never requeued
+                  AND COALESCE(apply_status, '') != 'captcha'
                   AND (apply_attempts IS NULL OR apply_attempts < ?)
                   AND fit_score >= ?
                   {filter_clauses}
@@ -320,6 +322,8 @@ def derive_batch(min_score: int = 7, limit: int = 1) -> list[dict]:
           AND (apply_status IS NULL OR apply_status = 'failed'
                OR (apply_status = 'in_progress' AND last_attempted_at IS NOT NULL
                    AND last_attempted_at <= ?))
+          -- captcha is terminal by decision: a blocked job is never requeued
+          AND COALESCE(apply_status, '') != 'captcha'
           AND (apply_attempts IS NULL OR apply_attempts < ?)
           AND fit_score >= ?
           {filter_clauses}
@@ -416,7 +420,7 @@ def mark_result(url: str, status: str, error: str | None = None,
     # outcome, record a neutral supersede note — not a user-blaming conflict.
     marker_to_keep = task_id if task_id is not None else ("reclaimed" if reclaimed else None)
     superseded_note = None
-    if reclaimed and row["apply_status"] in ("applied", "failed") and row["apply_status"] != status:
+    if reclaimed and row["apply_status"] in ("applied", "failed", "captcha") and row["apply_status"] != status:
         superseded_note = (
             f"A concurrent run reported '{row['apply_status']}' after this job's "
             f"stale lock was reclaimed; the latest report ('{status}') won."
@@ -619,6 +623,10 @@ def reset_failed() -> int:
     Stale in_progress locks (B4: a crashed worker never released its job)
     are cleared too; fresh locks are left alone.
 
+    captcha rows are skipped: a CAPTCHA block is terminal by decision
+    (the board is actively defending — the application never happened),
+    so this sweep must not silently re-enqueue it.
+
     Returns:
         Number of jobs reset.
     """
@@ -629,7 +637,8 @@ def reset_failed() -> int:
                        apply_task_id = NULL
         WHERE apply_status = 'failed'
           OR (apply_status IS NOT NULL AND apply_status != 'applied'
-              AND apply_status != 'in_progress')
+              AND apply_status != 'in_progress'
+              AND apply_status != 'captcha')
           OR (apply_status = 'in_progress' AND last_attempted_at IS NOT NULL
               AND last_attempted_at <= ?)
     """, (_stale_lock_cutoff(),))
@@ -1035,9 +1044,17 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
                              jobs_done=applied + failed)
             else:
                 reason = result.split(":", 1)[-1] if ":" in result else result
-                outcome = mark_result(job["url"], "failed", reason,
-                                      permanent=_is_permanent_failure(result),
-                                      duration_ms=duration_ms)
+                if result == "captcha":
+                    # Engine scanned RESULT:CAPTCHA: a distinct terminal
+                    # status, not a failure. permanent=True keeps the
+                    # attempts ban (99) as belt-and-braces terminal.
+                    outcome = mark_result(job["url"], "captcha", "captcha",
+                                          permanent=True,
+                                          duration_ms=duration_ms)
+                else:
+                    outcome = mark_result(job["url"], "failed", reason,
+                                          permanent=_is_permanent_failure(result),
+                                          duration_ms=duration_ms)
                 if outcome != "recorded":
                     add_event(f"[W{worker_id}] {_coordination_note(outcome, job)}")
                 failed += 1

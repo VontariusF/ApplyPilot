@@ -408,3 +408,91 @@ def test_busy_timeout_is_the_single_documented_budget(queue):
     conn = get_connection()
     row = conn.execute("PRAGMA busy_timeout").fetchone()
     assert row[0] == 10000
+
+
+# ---------------------------------------------------------------------------
+# Distinct captcha status — writer coordination (spec art_tBtaZIWB)
+# ---------------------------------------------------------------------------
+
+
+def test_captcha_result_writes_terminal_status_with_pinned_attempts(app_dir):
+    """The plain worker path persists the captcha verdict as its own status:
+    apply_status='captcha', apply_error='captcha', attempts pinned at 99."""
+    database.init_db()
+    url = seed_job(tailored_resume_path="/x/resume.txt",
+                   apply_status="in_progress", apply_attempts=0)
+    outcome = launcher.mark_result(url, "captcha", "captcha", permanent=True,
+                                   duration_ms=100)
+    assert outcome == "recorded"
+    row = job_row(url)
+    assert row["apply_status"] == "captcha"
+    assert row["apply_error"] == "captcha"
+    assert row["apply_attempts"] == 99
+
+
+def test_worker_captcha_after_manual_failed_supersedes(app_dir):
+    """captcha is a 'not applied' outcome: it matches a manual failed mark
+    (both agree the application did not happen), so it supersedes — the
+    user's record stands and the marker is cleared."""
+    database.init_db()
+    url = seed_job(tailored_resume_path="/x/resume.txt",
+                   apply_status="failed", apply_error="manual",
+                   apply_attempts=99, apply_task_id="manual-failed")
+    outcome = launcher.mark_result(url, "captcha", "captcha", permanent=True)
+    assert outcome == "superseded"
+    row = job_row(url)
+    assert row["apply_status"] == "failed"      # the user's mark stands
+    assert row["apply_error"] == "manual"
+    assert row["apply_attempts"] == 99
+    assert row["apply_task_id"] is None         # the marker is cleared
+
+
+def test_worker_captcha_after_manual_applied_records_conflict(app_dir):
+    """Mismatch: the user says applied, the run says captcha-blocked — no
+    clobber; the conflict note carries the captcha outcome."""
+    database.init_db()
+    url = seed_job(tailored_resume_path="/x/resume.txt",
+                   apply_status="applied",
+                   applied_at="2026-01-01T00:00:00+00:00",
+                   apply_task_id="manual-applied")
+    outcome = launcher.mark_result(url, "captcha", "captcha", permanent=True)
+    assert outcome == "conflict"
+    row = job_row(url)
+    assert row["apply_status"] == "applied"
+    assert row["applied_at"] == "2026-01-01T00:00:00+00:00"
+    assert "captcha" in row["apply_conflict"]
+
+
+def test_count_apply_eligible_excludes_captcha(queue):
+    """Queue predicate copy 3 (count_apply_eligible): captcha rows are
+    terminal by decision and are never counted as eligible."""
+    from applypilot.apply import launcher as launcher_mod
+
+    captcha_url = "https://jobs.example/blocked"
+    seed_job(url=captcha_url, application_url=captcha_url,
+             tailored_resume_path="/tmp/resume.pdf",
+             apply_status="captcha", apply_error="captcha", apply_attempts=99)
+    assert database.count_apply_eligible() == 0
+    # The worker agrees: nothing to acquire.
+    assert launcher_mod.acquire_job() is None
+    # A normal job alongside still counts.
+    seed_job(url="https://jobs.example/normal",
+             tailored_resume_path="/tmp/resume.pdf")
+    assert database.count_apply_eligible() == 1
+
+
+def test_get_stats_reports_captcha_separately_from_apply_errors(queue):
+    """status --json contract: captcha blocks are their own count and are not
+    folded into apply_errors (a captcha block is not an application failure)."""
+    database.init_db()
+    seed_job(url="https://jobs.example/captcha",
+             tailored_resume_path="/tmp/resume.pdf",
+             apply_status="captcha", apply_error="captcha", apply_attempts=99)
+    seed_job(url="https://jobs.example/failed",
+             tailored_resume_path="/tmp/resume.pdf",
+             apply_status="failed", apply_error="engine died", apply_attempts=1)
+
+    stats = database.get_stats()
+    assert stats["captcha"] == 1
+    assert stats["apply_errors"] == 1  # the failed row only
+

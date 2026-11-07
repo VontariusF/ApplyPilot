@@ -1,9 +1,9 @@
 
 # ApplyPilot agent-protocol dogfood transcript
 
-Product head under test: `91e385660276ce9b7744f056323e2c75fc64e324` (origin/main — the harness adds scripts only). Branch head: `80895c4d3fac8577f0d9b4ffefe38c4d49254bc6`.
+Product head under test: `5958cf06cb64102b99192760f4e7f1e665d0570e` (origin/main — the harness adds scripts only). Branch head: `374b2b22eb702c34497d1e1bc071b673a3c9b8fc`.
 
-Run directory (throwaway): `/home/user/work/dogfood-final` · fake claude: `/home/user/work/dogfood-final/bin/claude` · LLM stub: `http://127.0.0.1:42065/v1` · Chromium: `/home/user/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome`
+Run directory (throwaway): `/home/user/work/dogfood-run2` · fake claude: `/home/user/work/dogfood-run2/bin/claude` · LLM stub: `http://127.0.0.1:35217/v1` · Chromium: `/home/user/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome`
 
 
 
@@ -99,7 +99,7 @@ $ applypilot agent next
 - PASS: next → phase intake, no question
 
 ```bash
-$ applypilot agent resume --file /home/user/work/dogfood-final/resume.txt
+$ applypilot agent resume --file /home/user/work/dogfood-run2/resume.txt
 ```
 
 ```json
@@ -3385,9 +3385,9 @@ $ applypilot agent confirm
     "pending": false
   },
   "written": {
-    "profile": "/home/user/work/dogfood-final/applypilot/profile.json",
-    "profile_md": "/home/user/work/dogfood-final/applypilot/profile.md",
-    "searches_yaml": "/home/user/work/dogfood-final/applypilot/searches.yaml"
+    "profile": "/home/user/work/dogfood-run2/applypilot/profile.json",
+    "profile_md": "/home/user/work/dogfood-run2/applypilot/profile.md",
+    "searches_yaml": "/home/user/work/dogfood-run2/applypilot/searches.yaml"
   }
 }
 ```
@@ -3419,7 +3419,7 @@ $ applypilot run discover enrich score --min-score 7
 
 ======================================================================
   STAGE: discover — Job discovery (JobSpy + Workday + smart extract + Composio)
-  Started: 01:50:36
+  Started: 03:35:24
 ======================================================================
   JobSpy full crawl...
   Workday corporate scraper...
@@ -3430,17 +3430,17 @@ $ applypilot run discover enrich score --min-score 7
 
 ======================================================================
   STAGE: enrich — Detail enrichment (full descriptions + apply URLs)
-  Started: 01:50:36
+  Started: 03:35:24
 ======================================================================
 
   Stage 'enrich' completed in 0.0s — ok
 
 ======================================================================
   STAGE: score — LLM scoring (fit 1-10)
-  Started: 01:50:36
+  Started: 03:35:24
 ======================================================================
 
-  Stage 'score' completed in 0.0s — ok
+  Stage 'score' completed in 0.1s — ok
 
 ======================================================================
       Pipeline Summary      
@@ -3449,9 +3449,9 @@ $ applypilot run discover enrich score --min-score 7
 ┡━━━━━━━━━━╇━━━━━━━━╇━━━━━━┩
 │ discover │ ok     │ 0.0s │
 │ enrich   │ ok     │ 0.0s │
-│ score    │ ok     │ 0.0s │
+│ score    │ ok     │ 0.1s │
 │          │        │      │
-│ Total    │        │ 0.0s │
+│ Total    │        │ 0.1s │
 └──────────┴────────┴──────┘
 
   DB Final State:
@@ -3489,21 +3489,21 @@ $ applypilot run tailor cover pdf --min-score 7
 
 ======================================================================
   STAGE: tailor — Resume tailoring (LLM + validation)
-  Started: 01:50:36
+  Started: 03:35:24
 ======================================================================
 
-  Stage 'tailor' completed in 2.1s — ok
+  Stage 'tailor' completed in 2.4s — ok
 
 ======================================================================
   STAGE: cover — Cover letter generation
-  Started: 01:50:38
+  Started: 03:35:26
 ======================================================================
 
-  Stage 'cover' completed in 2.0s — ok
+  Stage 'cover' completed in 2.4s — ok
 
 ======================================================================
   STAGE: pdf — PDF conversion (tailored resumes + cover letters)
-  Started: 01:50:40
+  Started: 03:35:29
 ======================================================================
 
   Stage 'pdf' completed in 0.0s — ok
@@ -3513,11 +3513,11 @@ $ applypilot run tailor cover pdf --min-score 7
 ┏━━━━━━━━┳━━━━━━━━┳━━━━━━┓
 ┃ Stage  ┃ Status ┃ Time ┃
 ┡━━━━━━━━╇━━━━━━━━╇━━━━━━┩
-│ tailor │ ok     │ 2.1s │
-│ cover  │ ok     │ 2.0s │
+│ tailor │ ok     │ 2.4s │
+│ cover  │ ok     │ 2.4s │
 │ pdf    │ ok     │ 0.0s │
 │        │        │      │
-│ Total  │        │ 4.0s │
+│ Total  │        │ 4.8s │
 └────────┴────────┴──────┘
 
   DB Final State:
@@ -3624,15 +3624,15 @@ Ctrl+C = skip current job(s) | Ctrl+C x2 = stop
 │  │                                 │           │      │    │ TOTAL                │ 1 │  1 │ $0.0…
 └──┴─────────────────────────────────┴───────────┴──────┴────┴──────────────────────┴───┴────┴──────
 ╭───────────────────────────────────────── Recent Events ──────────────────────────────────────────╮
-│ 01:50:40 [W0] Launching Chrome...                                                                │
-│ 01:50:43 [W0] Starting: Data Engineer @ exampleboard                                             │
-│ 01:50:43 [W0] APPLIED (0s): Data Engineer                                                        │
-│ 01:50:43 [W0] Launching Chrome...                                                                │
-│ 01:50:46 [W0] Starting: Analytics Engineer @ exampleboard                                        │
-│ 01:50:46 [W0] CAPTCHA (0s): Analytics Engineer                                                   │
+│ 03:35:29 [W0] Launching Chrome...                                                                │
+│ 03:35:32 [W0] Starting: Data Engineer @ exampleboard                                             │
+│ 03:35:32 [W0] APPLIED (0s): Data Engineer                                                        │
+│ 03:35:32 [W0] Launching Chrome...                                                                │
+│ 03:35:35 [W0] Starting: Analytics Engineer @ exampleboard                                        │
+│ 03:35:35 [W0] CAPTCHA (0s): Analytics Engineer                                                   │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Done: 1 applied, 1 failed ($0.002)
-Logs: /home/user/work/dogfood-final/applypilot/logs
+Logs: /home/user/work/dogfood-run2/applypilot/logs
 ```
 
 - PASS: run events narrate APPLIED
@@ -3641,7 +3641,7 @@ Logs: /home/user/work/dogfood-final/applypilot/logs
 
 - PASS: staged plan consumed
 
-- engine run logs (2): claude_20261107_015043_w0_exampleboard.txt, claude_20261107_015046_w0_exampleboard.txt
+- engine run logs (2): claude_20261107_033532_w0_exampleboard.txt, claude_20261107_033535_w0_exampleboard.txt
 
 ```
 Opened the posting, completed the application form, and submitted. RESULT:APPLIED
@@ -3654,11 +3654,11 @@ Opened the posting, but a captcha blocked submission. RESULT:CAPTCHA — retry l
 
 - PASS: engine narrates RESULT:CAPTCHA
 
-- PASS: alpha recorded applied — {"url": "https://jobs.example/alpha", "apply_status": "applied", "applied_at": "2026-11-07T01:50:43.448646+00:00"}
+- PASS: alpha recorded applied — {"url": "https://jobs.example/alpha", "apply_status": "applied", "apply_error": null, "apply_attempts": 0, "applied_at": "2026-11-07T03:35:32.544704+00:00"}
 
-- PASS: beta terminal, not applied (CAPTCHA) — {"url": "https://jobs.example/beta", "apply_status": "failed", "applied_at": null}
+- PASS: beta terminal, not applied (CAPTCHA) — {"url": "https://jobs.example/beta", "apply_status": "captcha", "apply_error": "captcha", "apply_attempts": 99, "applied_at": null}
 
-> FLAGGED: launcher bookkeeping: the engine's CAPTCHA verdict is scanned, narrated as an event, and marked permanent (never retried), but it persists as apply_status='failed' with the reason in apply_error — the board shows 'failed', not a distinct captcha status. This is pre-existing launcher semantics, not a protocol-verb defect in this journey; disclosed here and in the PR body rather than silently accepted. A distinct terminal status would be a product decision (board displays, retry UX) outside this verification's scope.
+- PASS: beta persists distinct captcha status, attempts pinned — {"url": "https://jobs.example/beta", "apply_status": "captcha", "apply_error": "captcha", "apply_attempts": 99, "applied_at": null}
 
 ```bash
 $ applypilot status --json
@@ -3690,12 +3690,15 @@ $ applypilot status --json
   "with_cover_letter": 2,
   "cover_exhausted": 0,
   "applied": 1,
-  "apply_errors": 1,
+  "captcha": 1,
+  "apply_errors": 0,
   "ready_to_apply": 1
 }
 ```
 
 - PASS: status --json counts 1 applied — applied=1, total=2
+
+- PASS: status --json counts captcha separately from failures — captcha=1, apply_errors=0
 
 ```bash
 $ applypilot apply --i-confirm c1cb86bfdbd45d4b4fb8a0fe9cc63b5cdb8191ce746a7e956ead41cb64590937
@@ -3799,7 +3802,7 @@ $ applypilot agent next
 
 - provider calls by kind: `{"score": 2, "tailor": 2, "judge": 2, "cover_letter": 2}`
 
-- fake-claude turns logged: `/home/user/work/dogfood-final/claude-prompts.log`
+- fake-claude turns logged: `/home/user/work/dogfood-run2/claude-prompts.log`
 
 
 ## Verdict

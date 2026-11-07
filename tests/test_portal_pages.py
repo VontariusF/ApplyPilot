@@ -300,3 +300,56 @@ def test_log_page_renders_redacted_backfill(portal_client, portal_env):
     assert r.status_code == 200
     assert "secret-gemini-key" not in r.text
     assert "[REDACTED]" in r.text
+
+
+# ---------------------------------------------------------------------------
+# Distinct captcha status — board rendering (spec art_tBtaZIWB)
+# ---------------------------------------------------------------------------
+
+
+def test_captcha_renders_its_own_board_badge(portal_client):
+    client, _ = portal_client
+    seed_job(url="https://jobs.example/captcha",
+             apply_status="captcha", apply_error="captcha")
+    board = client.get("/jobs")
+    assert board.status_code == 200
+    assert 'badge captcha' in board.text
+    assert "captcha" in board.text
+
+
+def test_captcha_appears_in_the_status_filter_dropdown(portal_client):
+    """The dropdown is data-driven over distinct_apply_statuses(); a captcha
+    row must surface as a filterable status (verify, don't assume)."""
+    client, _ = portal_client
+    seed_job(url="https://jobs.example/captcha",
+             apply_status="captcha", apply_error="captcha")
+    board = client.get("/jobs")
+    assert board.status_code == 200
+    assert '<option value="captcha"' in board.text
+
+
+def test_captcha_filter_selects_captcha_rows(portal_client):
+    client, _ = portal_client
+    seed_job(url="https://jobs.example/captcha",
+             apply_status="captcha", apply_error="captcha")
+    seed_job(url="https://jobs.example/failed",
+             apply_status="failed", apply_error="engine died")
+    board = client.get("/jobs", params={"apply_status": "captcha"})
+    assert board.status_code == 200
+    assert "https://jobs.example/captcha" in board.text
+    assert "https://jobs.example/failed" not in board.text
+
+
+def test_captcha_not_counted_by_the_failed_chip(portal_client):
+    """The Needs-attention chip unions score_failed and apply_failed; a
+    captcha block is a distinct terminal status, not an apply failure."""
+    client, _ = portal_client
+    seed_job(url="https://jobs.example/captcha",
+             apply_status="captcha", apply_error="captcha")
+    seed_job(url="https://jobs.example/failed",
+             apply_status="failed", apply_error="engine died")
+    board = client.get("/jobs", params={"chip": "attention"})
+    assert board.status_code == 200
+    assert "https://jobs.example/failed" in board.text
+    assert "https://jobs.example/captcha" not in board.text
+
