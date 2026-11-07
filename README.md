@@ -338,6 +338,43 @@ When a backend IS configured, nothing changes: claude is preferred, then
 the LLM provider, and the portal keeps its readiness gate — human flows
 never select the host backend.
 
+### Scoring by Agent (host-driven pipeline, T1)
+
+The same protocol now covers the scoring stage: with no LLM provider key
+anywhere, a driving agent IS the scoring intelligence. It reads each job
+from the queue, judges fit against the resume it onboarded with, and
+persists the score through the same write path the LLM stage uses — one
+UPDATE, stamped `scored_by: 'host'` for provenance (provider-written
+scores carry the provider name; pre-provenance rows stay NULL).
+
+```
+applypilot agent job-next --stage score   # next pending job + rubric + progress
+applypilot agent job-next --stage score --reveal   # resume text + resume_facts
+applypilot agent score --url <url> --score 8 --keywords "python, sql" \
+    --reasoning "Direct experience across most requirements."
+applypilot agent score --url <url> --score 9 --reasoning "..." --rescore   # overwrite
+```
+
+The loop: `job-next` until its `job` is `null` (`progress.unscored == 0`).
+`agent score` returns the next pending payload, so one call per job
+drives the whole queue.
+
+- The `job-next` payload carries the exact 1-10 rubric text the LLM path
+  scores with, a description excerpt capped at the same 6000 chars the
+  LLM sees, and progress counts — including `pending_detail`, the count
+  of jobs that never captured a description (they cannot be scored until
+  an enrich pass captures one).
+- Validation matches the LLM path: scores outside 1-10 or empty
+  reasoning are refused with an `invalid_score` envelope; scoring an
+  already-scored job without `--rescore` returns `already_scored`.
+- Redaction is the PR #58 pattern: no resume text or `resume_facts` in a
+  default payload — `--reveal` opts in per call.
+- These verbs never touch the LLM tier gate: they run on a store with
+  zero provider configuration.
+- Later PRs of the same spec extend the pattern to enrich/tailor/cover
+  and the apply bookkeeping (`job-next --stage` refuses those values for
+  now with an `invalid_stage` envelope).
+
 ---
 
 ## Local Web Portal

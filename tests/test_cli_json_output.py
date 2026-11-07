@@ -34,6 +34,7 @@ STATS = {
     "captcha": 1,
     "apply_errors": 0,
     "score_distribution": [(7, 1), (5, 1)],
+    "score_provenance": {"host": 0, "provider": 2, "unattributed": 0},
 }
 
 STATS_AS_JSON = {

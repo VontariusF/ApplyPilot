@@ -269,6 +269,10 @@ _ALL_COLUMNS: dict[str, str] = {
     "scored_at": "TEXT",
     # Last scoring failure, cleared on the next successful score (E).
     "score_error": "TEXT",
+    # Score provenance (spec art_IMViYTMU): 'host' for protocol-written
+    # scores, the provider name for LLM-written ones, NULL for historical
+    # rows — never backfilled.
+    "scored_by": "TEXT",
     # Tailoring
     "tailored_resume_path": "TEXT",
     "tailored_at": "TEXT",
@@ -432,6 +436,22 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
         "GROUP BY fit_score ORDER BY fit_score DESC"
     ).fetchall()
     stats["score_distribution"] = [(row[0], row[1]) for row in dist_rows]
+
+    # Score provenance (spec art_IMViYTMU): host-written vs LLM-written
+    # vs pre-column rows. 'provider' buckets every non-host attribution
+    # (openai, gemini, local, ...); NULL scored_by is 'unattributed' —
+    # historical rows are never backfilled.
+    stats["score_provenance"] = {
+        "host": conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE scored_by = 'host'"
+        ).fetchone()[0],
+        "provider": conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE scored_by IS NOT NULL AND scored_by != 'host'"
+        ).fetchone()[0],
+        "unattributed": conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE fit_score IS NOT NULL AND scored_by IS NULL"
+        ).fetchone()[0],
+    }
 
     # Tailoring stage
     stats["tailored"] = conn.execute(

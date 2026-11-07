@@ -155,6 +155,34 @@ def score_job(resume_text: str, job: dict) -> dict:
     return {"score": 0, "keywords": "", "reasoning": error, "error": error}
 
 
+def _scored_by_provider() -> str:
+    """The provenance label for LLM-written scores (spec art_IMViYTMU).
+
+    The provider name the client advertises, or the generic 'llm' when
+    the client carries no name (test fakes, custom client classes). Host
+    protocol scores write 'host' instead; rows from before the column
+    exist keep NULL.
+    """
+    return getattr(get_client(), "provider_name", "") or "llm"
+
+
+def persist_score(conn, url: str, score: int, keywords: str, reasoning: str,
+                  scored_by: str, when: str) -> None:
+    """Write one job's score — the single UPDATE shared by the LLM path
+    and the host protocol (spec art_IMViYTMU: no parallel write path).
+
+    Clears any prior score_error; `scored_by` stamps provenance ('host'
+    for protocol writes, the provider name for LLM ones). The stored
+    blob is `keywords\\nreasoning` — split_score_reasoning depends on
+    that shape. Callers commit.
+    """
+    conn.execute(
+        "UPDATE jobs SET fit_score = ?, score_reasoning = ?, scored_at = ?, "
+        "score_error = NULL, scored_by = ? WHERE url = ?",
+        (score, f"{keywords}\n{reasoning}", when, scored_by, url),
+    )
+
+
 def _record_score_errors(conn, urls: list[str], error: str) -> None:
     """Persist a scoring failure per job so the portal can show it (E).
 
@@ -254,20 +282,20 @@ def run_scoring(limit: int = 0, rescore: bool = False, url: str | None = None) -
             completed, len(jobs), result["score"], (job.get("title") or "?")[:60],
         )
 
-    # Write scores to DB — successful scores clear any prior score_error (E);
-    # errored jobs get the failure recorded instead.
+    # Write scores to DB — successful scores clear any prior score_error (E)
+    # and stamp provenance (spec art_IMViYTMU): the provider name for
+    # LLM-written scores, 'host' for protocol-written ones; errored jobs
+    # get the failure recorded instead.
     now = datetime.now(timezone.utc).isoformat()
+    scored_by = _scored_by_provider()
     for r in results:
         if r.get("error"):
             conn.execute(
                 "UPDATE jobs SET score_error = ? WHERE url = ?", (r["error"], r["url"])
             )
             continue
-        conn.execute(
-            "UPDATE jobs SET fit_score = ?, score_reasoning = ?, scored_at = ?, "
-            "score_error = NULL WHERE url = ?",
-            (r["score"], f"{r['keywords']}\n{r['reasoning']}", now, r["url"]),
-        )
+        persist_score(conn, r["url"], r["score"], r["keywords"], r["reasoning"],
+                      scored_by, now)
     conn.commit()
 
     elapsed = time.time() - t0
