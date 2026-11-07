@@ -1,9 +1,9 @@
 
 # ApplyPilot agent-protocol dogfood transcript
 
-Product head under test: `5958cf06cb64102b99192760f4e7f1e665d0570e` (origin/main — the harness adds scripts only). Branch head: `5958cf06cb64102b99192760f4e7f1e665d0570e`.
+Product head under test: `5958cf06cb64102b99192760f4e7f1e665d0570e` (origin/main — the harness adds scripts only). Branch head: `374b2b22eb702c34497d1e1bc071b673a3c9b8fc`.
 
-Run directory (throwaway): `/home/user/work/dogfood-run` · fake claude: `/home/user/work/dogfood-run/bin/claude` · LLM stub: `http://127.0.0.1:33613/v1` · Chromium: `/home/user/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome`
+Run directory (throwaway): `/home/user/work/dogfood-run2` · fake claude: `/home/user/work/dogfood-run2/bin/claude` · LLM stub: `http://127.0.0.1:35217/v1` · Chromium: `/home/user/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome`
 
 
 
@@ -99,7 +99,7 @@ $ applypilot agent next
 - PASS: next → phase intake, no question
 
 ```bash
-$ applypilot agent resume --file /home/user/work/dogfood-run/resume.txt
+$ applypilot agent resume --file /home/user/work/dogfood-run2/resume.txt
 ```
 
 ```json
@@ -3385,9 +3385,9 @@ $ applypilot agent confirm
     "pending": false
   },
   "written": {
-    "profile": "/home/user/work/dogfood-run/applypilot/profile.json",
-    "profile_md": "/home/user/work/dogfood-run/applypilot/profile.md",
-    "searches_yaml": "/home/user/work/dogfood-run/applypilot/searches.yaml"
+    "profile": "/home/user/work/dogfood-run2/applypilot/profile.json",
+    "profile_md": "/home/user/work/dogfood-run2/applypilot/profile.md",
+    "searches_yaml": "/home/user/work/dogfood-run2/applypilot/searches.yaml"
   }
 }
 ```
@@ -3419,7 +3419,7 @@ $ applypilot run discover enrich score --min-score 7
 
 ======================================================================
   STAGE: discover — Job discovery (JobSpy + Workday + smart extract + Composio)
-  Started: 03:33:27
+  Started: 03:35:24
 ======================================================================
   JobSpy full crawl...
   Workday corporate scraper...
@@ -3430,17 +3430,17 @@ $ applypilot run discover enrich score --min-score 7
 
 ======================================================================
   STAGE: enrich — Detail enrichment (full descriptions + apply URLs)
-  Started: 03:33:27
+  Started: 03:35:24
 ======================================================================
 
   Stage 'enrich' completed in 0.0s — ok
 
 ======================================================================
   STAGE: score — LLM scoring (fit 1-10)
-  Started: 03:33:27
+  Started: 03:35:24
 ======================================================================
 
-  Stage 'score' completed in 0.0s — ok
+  Stage 'score' completed in 0.1s — ok
 
 ======================================================================
       Pipeline Summary      
@@ -3449,7 +3449,7 @@ $ applypilot run discover enrich score --min-score 7
 ┡━━━━━━━━━━╇━━━━━━━━╇━━━━━━┩
 │ discover │ ok     │ 0.0s │
 │ enrich   │ ok     │ 0.0s │
-│ score    │ ok     │ 0.0s │
+│ score    │ ok     │ 0.1s │
 │          │        │      │
 │ Total    │        │ 0.1s │
 └──────────┴────────┴──────┘
@@ -3489,21 +3489,21 @@ $ applypilot run tailor cover pdf --min-score 7
 
 ======================================================================
   STAGE: tailor — Resume tailoring (LLM + validation)
-  Started: 03:33:27
+  Started: 03:35:24
 ======================================================================
 
   Stage 'tailor' completed in 2.4s — ok
 
 ======================================================================
   STAGE: cover — Cover letter generation
-  Started: 03:33:30
+  Started: 03:35:26
 ======================================================================
 
   Stage 'cover' completed in 2.4s — ok
 
 ======================================================================
   STAGE: pdf — PDF conversion (tailored resumes + cover letters)
-  Started: 03:33:32
+  Started: 03:35:29
 ======================================================================
 
   Stage 'pdf' completed in 0.0s — ok
@@ -3624,15 +3624,15 @@ Ctrl+C = skip current job(s) | Ctrl+C x2 = stop
 │  │                                 │           │      │    │ TOTAL                │ 1 │  1 │ $0.0…
 └──┴─────────────────────────────────┴───────────┴──────┴────┴──────────────────────┴───┴────┴──────
 ╭───────────────────────────────────────── Recent Events ──────────────────────────────────────────╮
-│ 03:33:32 [W0] Launching Chrome...                                                                │
-│ 03:33:35 [W0] Starting: Data Engineer @ exampleboard                                             │
-│ 03:33:35 [W0] APPLIED (0s): Data Engineer                                                        │
-│ 03:33:35 [W0] Launching Chrome...                                                                │
-│ 03:33:38 [W0] Starting: Analytics Engineer @ exampleboard                                        │
-│ 03:33:38 [W0] CAPTCHA (0s): Analytics Engineer                                                   │
+│ 03:35:29 [W0] Launching Chrome...                                                                │
+│ 03:35:32 [W0] Starting: Data Engineer @ exampleboard                                             │
+│ 03:35:32 [W0] APPLIED (0s): Data Engineer                                                        │
+│ 03:35:32 [W0] Launching Chrome...                                                                │
+│ 03:35:35 [W0] Starting: Analytics Engineer @ exampleboard                                        │
+│ 03:35:35 [W0] CAPTCHA (0s): Analytics Engineer                                                   │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 Done: 1 applied, 1 failed ($0.002)
-Logs: /home/user/work/dogfood-run/applypilot/logs
+Logs: /home/user/work/dogfood-run2/applypilot/logs
 ```
 
 - PASS: run events narrate APPLIED
@@ -3641,7 +3641,7 @@ Logs: /home/user/work/dogfood-run/applypilot/logs
 
 - PASS: staged plan consumed
 
-- engine run logs (2): claude_20261107_033335_w0_exampleboard.txt, claude_20261107_033338_w0_exampleboard.txt
+- engine run logs (2): claude_20261107_033532_w0_exampleboard.txt, claude_20261107_033535_w0_exampleboard.txt
 
 ```
 Opened the posting, completed the application form, and submitted. RESULT:APPLIED
@@ -3654,7 +3654,7 @@ Opened the posting, but a captcha blocked submission. RESULT:CAPTCHA — retry l
 
 - PASS: engine narrates RESULT:CAPTCHA
 
-- PASS: alpha recorded applied — {"url": "https://jobs.example/alpha", "apply_status": "applied", "apply_error": null, "apply_attempts": 0, "applied_at": "2026-11-07T03:33:35.777427+00:00"}
+- PASS: alpha recorded applied — {"url": "https://jobs.example/alpha", "apply_status": "applied", "apply_error": null, "apply_attempts": 0, "applied_at": "2026-11-07T03:35:32.544704+00:00"}
 
 - PASS: beta terminal, not applied (CAPTCHA) — {"url": "https://jobs.example/beta", "apply_status": "captcha", "apply_error": "captcha", "apply_attempts": 99, "applied_at": null}
 
@@ -3802,7 +3802,7 @@ $ applypilot agent next
 
 - provider calls by kind: `{"score": 2, "tailor": 2, "judge": 2, "cover_letter": 2}`
 
-- fake-claude turns logged: `/home/user/work/dogfood-run/claude-prompts.log`
+- fake-claude turns logged: `/home/user/work/dogfood-run2/claude-prompts.log`
 
 
 ## Verdict
