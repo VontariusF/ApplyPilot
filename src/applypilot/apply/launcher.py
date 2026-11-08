@@ -25,6 +25,7 @@ from applypilot import config
 from applypilot.database import (
     KIND_COVER_LETTER,
     KIND_RESUME,
+    TERMINAL_APPLY_STATUSES,
     get_connection,
     resolve_version_id,
 )
@@ -156,12 +157,16 @@ def _resolve_target_rows(target_url: str, core: str, rows: list) -> dict | None:
 
 
 def _queue_filters(params: list, min_score: int) -> str:
-    """The queue's blocked-site/URL WHERE tail, shared by acquire_job and
-    derive_batch so the plan preview can never describe a batch the worker
-    would refuse (count_apply_eligible documents the same sync rule).
+    """The queue's blocked-site/URL and manual-ATS WHERE tail, shared by
+    acquire_job and derive_batch so the plan preview can never describe a
+    batch the worker would refuse (count_apply_eligible documents the same
+    sync rule — B8: the manual-ATS exclusion used to live only there and
+    in acquire_job's post-selection check, so a plan could stage a job the
+    worker then refused).
 
     Appends the leading filter params (stale cutoff, attempt cap, min_score)
-    and then the blocked-site/URL params to `params`, in SQL order.
+    and then the blocked-site/URL and manual-ATS params to `params`, in
+    SQL order.
     """
     params.extend([_stale_lock_cutoff(),
                    config.DEFAULTS["max_apply_attempts"],
@@ -176,7 +181,116 @@ def _queue_filters(params: list, min_score: int) -> str:
     if blocked_patterns:
         url_clauses = " ".join("AND url NOT LIKE ?" for _ in blocked_patterns)
         params.extend(blocked_patterns)
-    return f"{site_clause} {url_clauses}"
+    # B8: the queue never picks a manual-ATS URL — the same
+    # lowercased-containment match count_apply_eligible encodes in SQL and
+    # config.is_manual_ats applies post-selection. Carrying it here keeps
+    # derive_batch/count_eligible/acquire_job on one selection truth.
+    ats_clauses = ""
+    manual_domains = config.load_sites_config().get("manual_ats", [])
+    if manual_domains:
+        ats_clauses = " ".join(
+            "AND COALESCE(application_url, url) NOT LIKE ?" for _ in manual_domains)
+        params.extend(f"%{domain.lower()}%" for domain in manual_domains)
+    return f"{site_clause} {url_clauses} {ats_clauses}"
+
+
+def _queue_where(min_score: int) -> tuple[str, list]:
+    """The apply queue's full WHERE clause and its binds — the one
+    selection truth. acquire_job's non-target branch, derive_batch, and
+    count_eligible all run this exact predicate; count_apply_eligible (the
+    scheduler count) mirrors it and documents the sync rule.
+
+    Exposes the predicate as data so exclusion diagnostics (S3) can run
+    COUNT queries against the same queue shape.
+    """
+    params: list = []
+    filter_clauses = _queue_filters(params, min_score)
+    where = f"""
+        WHERE tailored_resume_path IS NOT NULL
+          AND (apply_status IS NULL OR apply_status = 'failed'
+               OR (apply_status = 'in_progress' AND last_attempted_at IS NOT NULL
+                   AND last_attempted_at <= ?))
+          -- captcha is terminal by decision: a blocked job is never requeued
+          AND COALESCE(apply_status, '') != 'captcha'
+          AND (apply_attempts IS NULL OR apply_attempts < ?)
+          AND fit_score >= ?
+          {filter_clauses}
+    """
+    return where, params
+
+
+def count_eligible(min_score: int = 7) -> int:
+    """How many jobs the apply queue would run right now — the exact
+    _queue_where predicate as a COUNT. Feeds the plan payload's
+    eligible_total (S3): batch size under the cap is then comparable to
+    the real queue size in one payload.
+    """
+    conn = get_connection()
+    where, params = _queue_where(min_score)
+    return conn.execute(
+        f"SELECT COUNT(*) FROM jobs {where}", params).fetchone()[0]
+
+
+def count_queue_exclusions(min_score: int = 7) -> dict[str, int]:
+    """Per-reason counts of unapplied jobs the apply queue excludes (S3) —
+    the plan payload's `excluded` diagnostics, so "why didn't it batch X?"
+    is answerable from the payload alone.
+
+    Buckets are independent, not a partition: a row failing two conditions
+    counts in both. Statuses the plan vocabulary doesn't bucket here
+    (expired, login_issue, manual, fresh in_progress locks) appear in
+    neither bucket nor queue.
+    """
+    conn = get_connection()
+    max_attempts = config.DEFAULTS["max_apply_attempts"]
+    # Otherwise-ready-but-unapplied, without the score predicate — the
+    # score_below_min bucket is defined against this (a fragment that
+    # already required fit >= min would make the bucket a contradiction).
+    ready_core = ("tailored_resume_path IS NOT NULL AND applied_at IS NULL "
+                  "AND full_description IS NOT NULL "
+                  "AND length(full_description) > 0")
+    ready_scored = f"{ready_core} AND fit_score >= ?"
+    counters: list[tuple[str, str, list]] = [
+        ("not_tailored",
+         "tailored_resume_path IS NULL AND applied_at IS NULL", []),
+        ("score_below_min",
+         f"{ready_core} AND (fit_score IS NULL OR fit_score < ?)",
+         [min_score]),
+        ("attempt_capped",
+         f"{ready_scored} AND (apply_status IS NULL OR apply_status = 'failed') "
+         "AND COALESCE(apply_attempts, 0) >= ?",
+         [min_score, max_attempts]),
+        ("captcha", "applied_at IS NULL AND apply_status = 'captcha'", []),
+    ]
+
+    blocked_sites, blocked_patterns = _load_blocked()
+    blocked_conds, blocked_params = [], []
+    if blocked_sites:
+        blocked_conds.append(f"site IN ({','.join('?' * len(blocked_sites))})")
+        blocked_params.extend(sorted(blocked_sites))
+    if blocked_patterns:
+        blocked_conds.extend("url LIKE ?" for _ in blocked_patterns)
+        blocked_params.extend(blocked_patterns)
+    if blocked_conds:
+        counters.append((
+            "blocked",
+            f"{ready_scored} AND ({' OR '.join(blocked_conds)})",
+            [min_score, *blocked_params]))
+
+    manual_domains = config.load_sites_config().get("manual_ats", [])
+    if manual_domains:
+        ats_conds = " OR ".join(
+            "COALESCE(application_url, url) LIKE ?" for _ in manual_domains)
+        counters.append((
+            "manual_ats",
+            f"{ready_scored} AND ({ats_conds})",
+            [min_score, *(f"%{d.lower()}%" for d in manual_domains)]))
+
+    excluded: dict[str, int] = {}
+    for name, condition, params in counters:
+        excluded[name] = conn.execute(
+            f"SELECT COUNT(*) FROM jobs WHERE {condition}", params).fetchone()[0]
+    return excluded
 
 
 def acquire_job(target_url: str | None = None, min_score: int = 7,
@@ -225,13 +339,11 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                   target_url, core, target_url, core)).fetchall()
             row = _resolve_target_rows(target_url, core, rows)
         else:
-            # Build parameterized filters to avoid SQL injection.
             # B4: an in_progress lock whose last_attempted_at predates the
             # stale cutoff is reclaimable (the owning worker crashed).
-            params: list = []
-            filter_clauses = _queue_filters(params, min_score)
             # Gate 2: a confirmed batch pins acquisition to the planned
             # URLs — the pin only narrows the queue, never widens it.
+            where, params = _queue_where(min_score)
             pin_clause = ""
             if allowed_urls is not None:
                 pin_clause = f"AND url IN ({','.join('?' * len(allowed_urls))})"
@@ -241,15 +353,7 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                        fit_score, location, full_description, cover_letter_path,
                        apply_status
                 FROM jobs
-                WHERE tailored_resume_path IS NOT NULL
-                  AND (apply_status IS NULL OR apply_status = 'failed'
-                       OR (apply_status = 'in_progress' AND last_attempted_at IS NOT NULL
-                           AND last_attempted_at <= ?))
-                  -- captcha is terminal by decision: a blocked job is never requeued
-                  AND COALESCE(apply_status, '') != 'captcha'
-                  AND (apply_attempts IS NULL OR apply_attempts < ?)
-                  AND fit_score >= ?
-                  {filter_clauses}
+                {where}
                   {pin_clause}
                 ORDER BY fit_score DESC, url
                 LIMIT 1
@@ -259,7 +363,11 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
             conn.rollback()
             return None
 
-        # Skip manual ATS sites (unsolvable CAPTCHAs)
+        # Manual-ATS skip for explicit --url lookups: the queue branch now
+        # excludes manual-ATS domains in SQL (B8, one selection truth with
+        # derive_batch and count_apply_eligible), but a targeted lookup
+        # bypasses the queue filters — the row is marked 'manual' so the
+        # skip is visible rather than silent.
         from applypilot.config import is_manual_ats
         apply_url = row["application_url"] or row["url"]
         if is_manual_ats(apply_url):
@@ -277,10 +385,21 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
         # original worker finally reports (a lost race, not a conflict).
         # SQLite reads apply_status pre-UPDATE here, so the CASE fires only
         # on a genuine stale-lock reclaim.
+        # B4: reclaiming a crashed worker's lock also consumes one of the
+        # dead worker's attempts — SIGKILL/OS-crash deaths never reach
+        # mark_result, so without this the reclaim→crash→reclaim cycle on
+        # one job is unbounded and the attempt budget never applies. A
+        # fresh claim leaves attempts untouched: the reported outcome
+        # (mark_result) counts that attempt, so a normal failed cycle
+        # costs exactly one, and the F-3 refund reverses a reclaim
+        # increment on an environment failure.
         conn.execute("""
             UPDATE jobs SET apply_status = 'in_progress',
                            agent_id = ?,
                            last_attempted_at = ?,
+                           apply_attempts = CASE WHEN apply_status = 'in_progress'
+                                                 THEN COALESCE(apply_attempts, 0) + 1
+                                                 ELSE apply_attempts END,
                            apply_task_id = CASE WHEN apply_status = 'in_progress'
                                                 THEN 'reclaimed'
                                                 ELSE apply_task_id END
@@ -305,28 +424,21 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
 def derive_batch(min_score: int = 7, limit: int = 1) -> list[dict]:
     """Read-only preview of the batch the apply queue would run (Gate 2).
 
-    Same queue predicate as acquire_job's non-target branch (shared
-    _queue_filters — one selection truth), but a plain SELECT: no BEGIN
-    IMMEDIATE, no lock, no write of any kind. Ordered the way the worker
-    picks (fit_score DESC, url) and cut at the plan's batch size.
+    The queue's exact predicate (_queue_where — one selection truth with
+    acquire_job's non-target branch and count_eligible), but a plain
+    SELECT: no BEGIN IMMEDIATE, no lock, no write of any kind. Ordered the
+    way the worker picks (fit_score DESC, url) and cut at the plan's batch
+    size. B8: the predicate carries the manual-ATS exclusion, so the plan
+    can no longer stage a job the worker refuses at acquire time.
     """
     conn = get_connection()
-    params: list = []
-    filter_clauses = _queue_filters(params, min_score)
+    where, params = _queue_where(min_score)
     rows = conn.execute(f"""
         SELECT url, title, site, application_url, tailored_resume_path,
                fit_score, location, full_description, cover_letter_path,
                apply_status
         FROM jobs
-        WHERE tailored_resume_path IS NOT NULL
-          AND (apply_status IS NULL OR apply_status = 'failed'
-               OR (apply_status = 'in_progress' AND last_attempted_at IS NOT NULL
-                   AND last_attempted_at <= ?))
-          -- captcha is terminal by decision: a blocked job is never requeued
-          AND COALESCE(apply_status, '') != 'captcha'
-          AND (apply_attempts IS NULL OR apply_attempts < ?)
-          AND fit_score >= ?
-          {filter_clauses}
+        {where}
         ORDER BY fit_score DESC, url
         LIMIT ?
     """, [*params, limit]).fetchall()
@@ -438,7 +550,7 @@ def mark_result(url: str, status: str, error: str | None = None,
         """, (now, superseded_note, duration_ms, marker_to_keep,
               resume_version_id, cover_version_id, url))
     else:
-        attempts = 99 if permanent else "COALESCE(apply_attempts, 0) + 1"
+        attempts = _ATTEMPTS_BAN if permanent else "COALESCE(apply_attempts, 0) + 1"
         conn.execute(f"""
             UPDATE jobs SET apply_status = ?, apply_error = ?,
                            apply_attempts = {attempts}, agent_id = NULL,
@@ -461,11 +573,14 @@ def release_lock(url: str) -> None:
 
 
 def _refund_attempt(url: str) -> None:
-    """Undo acquire_job's attempt increment for an environment failure (F-3).
+    """Step the attempt count back for an environment failure (F-3).
 
     Infra-class failures never consume an attempt (P1-1 discipline in the
     tailor/cover paths): the job stays fully retryable when the environment
-    recovers. acquire_job already incremented, so refund it here.
+    recovers. On a reclaimed claim this exactly undoes acquire_job's B4
+    reclaim increment; on a fresh claim (acquire never incremented) it is
+    deliberately lenient — a row left with prior failures gets one back.
+    Bounded at 0 so a row that never held a count can't go negative.
     """
     conn = get_connection()
     conn.execute(
@@ -527,8 +642,11 @@ def gen_prompt(target_url: str, min_score: int = 7,
 
     prompt = prompt_mod.build_prompt(job=job, tailored_resume=resume_text)
 
-    # Release the lock so the job stays available
+    # Release the lock so the job stays available. --gen is a preview, not
+    # an application: refund the attempt acquire_job consumed (B4) so a
+    # debugging prompt never burns the retry budget.
     release_lock(job["url"])
+    _refund_attempt(job["url"])
 
     # Write prompt file
     config.ensure_dirs()
@@ -610,10 +728,10 @@ def mark_job(url: str, status: str, reason: str | None = None) -> None:
     else:
         conn.execute("""
             UPDATE jobs SET apply_status = 'failed', apply_error = ?,
-                           apply_attempts = 99, agent_id = NULL,
+                           apply_attempts = ?, agent_id = NULL,
                            apply_task_id = 'manual-failed'
             WHERE url = ?
-        """, (reason or "manual", url))
+        """, (reason or "manual", _ATTEMPTS_BAN, url))
     conn.commit()
 
 
@@ -623,25 +741,31 @@ def reset_failed() -> int:
     Stale in_progress locks (B4: a crashed worker never released its job)
     are cleared too; fresh locks are left alone.
 
-    captcha rows are skipped: a CAPTCHA block is terminal by decision
-    (the board is actively defending — the application never happened),
-    so this sweep must not silently re-enqueue it.
+    Terminal states are skipped (B6/M4):
+      - captcha: terminal by decision (the board is actively defending —
+        the application never happened), so this sweep must not silently
+        re-enqueue it;
+      - expired / login_issue: the launcher classifies them permanent and
+        the apply-result vocabulary records them terminal — an expired
+        posting can never be applied to, and re-running it burns an
+        attempt and a browser session before reporting expired again;
+      - manual: the user's own terminal mark (manual-ATS skips, manual
+        fail marks) — a sweep must not silently undo a human decision.
 
     Returns:
         Number of jobs reset.
     """
     conn = get_connection()
-    cursor = conn.execute("""
+    protected = ["applied", "in_progress", "manual", *TERMINAL_APPLY_STATUSES]
+    marks = ",".join("?" * len(protected))
+    cursor = conn.execute(f"""
         UPDATE jobs SET apply_status = NULL, apply_error = NULL,
                        apply_attempts = 0, agent_id = NULL,
                        apply_task_id = NULL
-        WHERE apply_status = 'failed'
-          OR (apply_status IS NOT NULL AND apply_status != 'applied'
-              AND apply_status != 'in_progress'
-              AND apply_status != 'captcha')
+        WHERE (apply_status IS NOT NULL AND apply_status NOT IN ({marks}))
           OR (apply_status = 'in_progress' AND last_attempted_at IS NOT NULL
               AND last_attempted_at <= ?)
-    """, (_stale_lock_cutoff(),))
+    """, (*protected, _stale_lock_cutoff()))
     conn.commit()
     return cursor.rowcount
 
@@ -889,6 +1013,24 @@ PERMANENT_PREFIXES: tuple[str, ...] = ("site_blocked", "cloudflare", "blocked_by
 # teaches nothing — the user fixes the environment and starts again.
 _MAX_LAUNCH_FAILURES = 3
 
+# B4: consecutive engine-signal deaths (the worker loop's "skipped"
+# outcome) before the run stops loudly. The skipped branch used to release
+# the lock and continue without counting toward the limit, so a
+# deterministic engine death (OOM-kill on a heavy page) re-acquired the
+# same queue-head job forever. Same shape as _MAX_LAUNCH_FAILURES and the
+# pipeline's _MAX_ERROR_PASSES; the acquire-side attempt increment bounds
+# the same loop when the run is restarted.
+_MAX_CONSECUTIVE_SKIPS = 3
+
+# M6: the terminal-failure attempts sentinel. mark_result's permanent
+# branch and the manual-fail mark pin attempts to this so the queue
+# predicate (apply_attempts < max_apply_attempts, a configurable cap
+# currently 5) keeps the row out even if a later sweep touches attempts —
+# a named constant instead of a magic 99 surviving visibly in row
+# updates. A dedicated apply_banned flag would be cleaner; that needs a
+# schema-touching PR.
+_ATTEMPTS_BAN = 99
+
 
 def _is_permanent_failure(result: str) -> bool:
     """Determine if a failure should never be retried."""
@@ -953,6 +1095,7 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
     jobs_done = 0
     empty_polls = 0
     launch_failures = 0  # F-3: consecutive Chrome launch failures (env class)
+    consecutive_skips = 0  # B4: consecutive engine-signal deaths (poison job)
     port = BASE_CDP_PORT + worker_id
     engine_obj = make_engine(engine)
 
@@ -1030,8 +1173,22 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
                                           engine=engine_obj)
 
             if result == "skipped":
+                # Engine process died by signal. B4: this branch used to
+                # release the lock and continue without counting toward the
+                # limit — the job stayed queue-head and a deterministic
+                # engine death re-acquired the same job forever (the
+                # acquire-side attempt increment now bounds it too). Three
+                # consecutive deaths stop the run loudly instead.
                 release_lock(job["url"])
+                consecutive_skips += 1
                 add_event(f"[W{worker_id}] Skipped: {_job_title(job)[:30]}")
+                if consecutive_skips >= _MAX_CONSECUTIVE_SKIPS:
+                    add_event(
+                        f"[W{worker_id}] Stopping: the engine died "
+                        f"{consecutive_skips} consecutive times on the same "
+                        "queue head (a poison job or a dying engine — fix "
+                        "the environment, then start the run again)")
+                    break
                 continue
             elif result == "applied":
                 outcome = mark_result(job["url"], "applied", duration_ms=duration_ms,
@@ -1060,6 +1217,10 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
                 failed += 1
                 update_state(worker_id, jobs_failed=failed,
                              jobs_done=applied + failed)
+            # A completed outcome (applied or reported-failed) breaks the
+            # consecutive-skip streak — only back-to-back signal deaths
+            # trip the B4 cap.
+            consecutive_skips = 0
 
         except KeyboardInterrupt:
             release_lock(job["url"])

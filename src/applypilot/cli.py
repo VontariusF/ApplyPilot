@@ -297,7 +297,12 @@ def regenerate(
 def apply(
     limit: Optional[int] = typer.Option(None, "--limit", "-l", help="Max applications to submit."),
     workers: int = typer.Option(1, "--workers", "-w", help="Number of parallel browser workers."),
-    min_score: int = typer.Option(7, "--min-score", help="Minimum fit score for job selection."),
+    min_score: Optional[int] = typer.Option(
+        None, "--min-score",
+        help=("Minimum fit score for job selection (default: 7). On "
+              "--i-confirm, omitting the flag runs the staged plan's "
+              "threshold."),
+    ),
     engine: Optional[str] = typer.Option(
         None, "--engine",
         help=("Auto-apply engine: 'claude' (Claude Code, default) or 'droid' (Factory "
@@ -362,6 +367,15 @@ def apply(
 
         model = default_apply_model()
 
+    # B3: the run's threshold — the flag when given, the config default
+    # otherwise. The raw Optional rides into verify_confirm alone: None
+    # there means "the staged plan's min_score" (the natural confirm);
+    # an explicit int must agree with the staged plan.
+    from applypilot import config as _config
+
+    effective_min_score = (min_score if min_score is not None
+                           else _config.DEFAULTS["min_score"])
+
     # --- Gate 2/3 (spec art_A71wyYS4): plan-then-confirm for externally
     # driven batches. --plan is a read-only preview that stages the
     # per-batch token; --i-confirm verifies the token on a second
@@ -386,9 +400,11 @@ def apply(
 
     if plan:
         try:
+            # B2: an omitted --limit sizes the batch to min(headroom,
+            # eligible) inside stage_batch_plan — no silent LIMIT 1.
             payload = stage_batch_plan(
-                min_score=min_score,
-                limit=limit if limit is not None else 1,
+                min_score=effective_min_score,
+                limit=limit,
                 explicit_cap=daily_cap,
             )
         except PlanError as exc:
@@ -399,9 +415,10 @@ def apply(
     planned: Optional[dict] = None
     if i_confirm is not None:
         try:
-            # limit stays None when the flag is absent — the planned batch
-            # defines the run size, so only an explicit --limit can
-            # disagree with it.
+            # Selection flags stay None when absent — the planned batch
+            # defines the run (size and threshold), so only an explicit
+            # flag can disagree with it (B3: min_score rides in raw; None
+            # inherits the staged plan's threshold).
             planned = verify_confirm(
                 i_confirm,
                 explicit_cap=daily_cap,
@@ -474,7 +491,7 @@ def apply(
         if not target:
             console.print("[red]--gen requires --url to specify which job.[/red]")
             raise typer.Exit(code=1)
-        generated = gen_prompt(target, min_score=min_score, model=model, engine=engine_name)
+        generated = gen_prompt(target, min_score=effective_min_score, model=model, engine=engine_name)
         if not generated:
             console.print("[red]No matching job found for that URL.[/red]")
             raise typer.Exit(code=1)
@@ -510,7 +527,9 @@ def apply(
     apply_main(
         limit=effective_limit,
         target_url=url,
-        min_score=min_score,
+        # B3: the confirmed run filters at the STAGED threshold — the
+        # queue predicate and the plan's selection can never disagree.
+        min_score=planned["min_score"] if planned else effective_min_score,
         headless=headless,
         model=model,
         dry_run=dry_run,

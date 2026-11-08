@@ -87,6 +87,26 @@ def _load_location_config(search_cfg: dict) -> tuple[list[str], list[str]]:
 
 # -- DB storage (JobSpy DataFrame -> SQLite) ---------------------------------
 
+def _clean_cell(value) -> str | None:
+    """Normalize one JobSpy DataFrame cell to (text | SQL NULL) — B1.
+
+    pandas leaks missing values as the *string* "nan" (float-NaN cells),
+    and object-dtype columns hold Python None, which str(None) turns into
+    the literal "None" — a string that passed every `!= "nan"` guard and
+    was persisted into application_url (and any other column) as text.
+    None, '', and the nan/none sentinel family (case-insensitive) are all
+    "missing": SQL NULL, never a sentinel string. (The 'null'/'n/a'
+    variants are junk-normalized at the persist_description layer and by
+    the store's startup repair — see database.normalize_polluted_urls.)
+    """
+    if value is None:
+        return None
+    text = str(value)
+    if not text or text.lower() in ("nan", "none"):
+        return None
+    return text
+
+
 def store_jobspy_results(conn: sqlite3.Connection, df, source_label: str) -> tuple[int, int]:
     """Store JobSpy DataFrame results into the DB. Returns (new, existing)."""
     now = datetime.now(timezone.utc).isoformat()
@@ -94,13 +114,13 @@ def store_jobspy_results(conn: sqlite3.Connection, df, source_label: str) -> tup
     existing = 0
 
     for _, row in df.iterrows():
-        url = str(row.get("job_url", ""))
-        if not url or url == "nan":
+        url = _clean_cell(row.get("job_url"))
+        if not url:
             continue
 
-        title = str(row.get("title", "")) if str(row.get("title", "")) != "nan" else None
-        company = str(row.get("company", "")) if str(row.get("company", "")) != "nan" else None
-        location_str = str(row.get("location", "")) if str(row.get("location", "")) != "nan" else None
+        title = _clean_cell(row.get("title"))
+        company = _clean_cell(row.get("company"))
+        location_str = _clean_cell(row.get("location"))
 
         # Build salary string from min/max
         # B10: one malformed salary cell must not abort the whole batch —
@@ -108,8 +128,8 @@ def store_jobspy_results(conn: sqlite3.Connection, df, source_label: str) -> tup
         salary = None
         min_amt = row.get("min_amount")
         max_amt = row.get("max_amount")
-        interval = str(row.get("interval", "")) if str(row.get("interval", "")) != "nan" else ""
-        currency = str(row.get("currency", "")) if str(row.get("currency", "")) != "nan" else ""
+        interval = _clean_cell(row.get("interval")) or ""
+        currency = _clean_cell(row.get("currency")) or ""
         try:
             if min_amt and str(min_amt) != "nan":
                 if max_amt and str(max_amt) != "nan":
@@ -122,8 +142,8 @@ def store_jobspy_results(conn: sqlite3.Connection, df, source_label: str) -> tup
             log.debug("Skipping unparseable salary for %s: min=%r max=%r", url, min_amt, max_amt)
             salary = None
 
-        description = str(row.get("description", "")) if str(row.get("description", "")) != "nan" else None
-        site_name = str(row.get("site", source_label))
+        description = _clean_cell(row.get("description"))
+        site_name = _clean_cell(row.get("site")) or source_label
         is_remote = row.get("is_remote", False)
 
         site_label = f"{site_name}"
@@ -139,8 +159,9 @@ def store_jobspy_results(conn: sqlite3.Connection, df, source_label: str) -> tup
             full_description = description
             detail_scraped_at = now
 
-        # Extract apply URL if JobSpy provided it
-        apply_url = str(row.get("job_url_direct", "")) if str(row.get("job_url_direct", "")) != "nan" else None
+        # Extract apply URL if JobSpy provided it (B1: a None cell stores
+        # SQL NULL, never the literal 'None' string).
+        apply_url = _clean_cell(row.get("job_url_direct"))
 
         try:
             conn.execute(
@@ -247,7 +268,7 @@ def _run_one_search(
     # Filter by location before storing
     before = len(df)
     df = df[df.apply(lambda row: _location_ok(
-        str(row.get("location", "")) if str(row.get("location", "")) != "nan" else None,
+        _clean_cell(row.get("location")),
         accept_locs, reject_locs,
     ), axis=1)]
     filtered = before - len(df)

@@ -22,7 +22,12 @@ from rich.panel import Panel
 from rich.table import Table
 
 from applypilot.config import load_env, ensure_dirs
-from applypilot.database import init_db, get_connection, get_stats
+from applypilot.database import (
+    SKIP_DETAIL_CLAUSE,
+    get_connection,
+    get_stats,
+    init_db,
+)
 from applypilot.scoring.pdf import PDF_MAX_ATTEMPTS
 
 log = logging.getLogger(__name__)
@@ -258,9 +263,18 @@ class _StageTracker:
             return dict(self._results)
 
 
-# SQL to count pending work for each stage
+# SQL to count pending work for each stage. Counts must match the stage's
+# runner queue (H2) and skip-list policy (H3) exactly: a pending count that
+# includes work no runner will ever do spins `run --stream` forever and
+# trips the B6 settle-guard.
 _PENDING_SQL: dict[str, str] = {
-    "enrich": "SELECT COUNT(*) FROM jobs WHERE detail_scraped_at IS NULL",
+    # H3: skip-site rows are never scraped by the CLI enrich runner (the
+    # runner's own WHERE excludes them) — they must not count as pending
+    # here either, or the streaming enrich stage never settles.
+    "enrich": (
+        "SELECT COUNT(*) FROM jobs WHERE detail_scraped_at IS NULL "
+        f"AND {SKIP_DETAIL_CLAUSE}"
+    ),
     "score":  "SELECT COUNT(*) FROM jobs WHERE full_description IS NOT NULL AND fit_score IS NULL",
     "tailor": (
         "SELECT COUNT(*) FROM jobs WHERE fit_score >= ? "
@@ -268,10 +282,15 @@ _PENDING_SQL: dict[str, str] = {
         "AND tailored_resume_path IS NULL "
         "AND COALESCE(tailor_attempts, 0) < 5"
     ),
+    # H2: the cover runner selects via STAGE_CONDITIONS['pending_cover'] —
+    # score threshold included. The pending count must match, or a row
+    # rescored below the threshold is pending forever and B6 fails the
+    # stage on three consecutive settle-nothing passes.
     "cover": (
         "SELECT COUNT(*) FROM jobs WHERE tailored_resume_path IS NOT NULL "
         "AND (cover_letter_path IS NULL OR cover_letter_path = '') "
-        "AND COALESCE(cover_attempts, 0) < 5"
+        "AND COALESCE(cover_attempts, 0) < 5 "
+        "AND fit_score >= ?"
     ),
     "pdf": (
         "SELECT COUNT(*) FROM jobs WHERE tailored_resume_path IS NOT NULL "
