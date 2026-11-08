@@ -989,3 +989,262 @@ def cover_cmd(
     if not text:
         _fail("invalid_usage", "--text is required")
     _verb(lambda: _host_cover(url, text, reveal))
+
+# ---------------------------------------------------------------------------
+# Apply bookkeeping (the launcher's acquire/mark seams, host-driven, T3)
+#
+# These two verbs are bookkeeping ONLY: the per-job lock and the outcome
+# record. The driving agent performs the real browser work itself (its own
+# Chrome/Playwright tooling against the live board) — no verb here launches
+# an engine, opens a browser, or touches a job board. The plan-then-confirm
+# guardrail (PR #54) is required upstream of any real submission and is
+# neither staged nor consumed here: these verbs never plan, never pin a
+# batch, and never lift the 5/day external default.
+# ---------------------------------------------------------------------------
+
+# The PR #57 status vocabulary (engines.scan_result's RESULT markers plus
+# failed:<reason> collapsed to failed) — the only outcomes apply-result
+# records.
+_APPLY_STATUSES = ("applied", "failed", "expired", "captcha", "login_issue")
+
+# Outcomes the launcher classifies permanent (_is_permanent_failure):
+# recorded with the attempts ban (99) so the queue predicate keeps them
+# out even if a later sweep touches attempts.
+_TERMINAL_APPLY_STATUSES = ("expired", "captcha", "login_issue")
+
+
+def _apply_progress() -> dict:
+    """The cap block every apply verb carries: the external-driver daily
+    cap (planning.AGENT_DEFAULT_DAILY_CAP, 5 — not liftable at the verb,
+    by the guardrail), live-from-DB applied count, and the headroom."""
+    from applypilot.apply.planning import AGENT_DEFAULT_DAILY_CAP
+    from applypilot.database import count_applications_on
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    applied_today = count_applications_on(today)
+    return {
+        "cap": AGENT_DEFAULT_DAILY_CAP,
+        "applied_today": applied_today,
+        "headroom": max(AGENT_DEFAULT_DAILY_CAP - applied_today, 0),
+    }
+
+
+def _apply_guardrails() -> dict:
+    """The guardrail block: what these verbs deliberately do NOT do."""
+    return {
+        "plan_then_confirm": (
+            "required upstream of any real submission — 'applypilot apply "
+            "--plan' / '--i-confirm <hash>' stages, pins, and consumes the "
+            "batch token; these verbs neither stage nor consume it"),
+        "browser_work": (
+            "the driving agent performs the real submission with its own "
+            "Chrome/Playwright tooling — no verb launches an engine or "
+            "opens a browser"),
+        "submission": (
+            "an apply-result 'applied' records YOUR completed submission — "
+            "the verb never submits anything itself"),
+    }
+
+
+def _locked_urls(conn) -> list[str]:
+    """URLs under a fresh (non-stale) in_progress lock — the queue_busy
+    signal distinguishing 'other loops hold the work' from 'queue empty'."""
+    from applypilot.apply.launcher import _stale_lock_cutoff
+
+    rows = conn.execute(
+        "SELECT url FROM jobs WHERE apply_status = 'in_progress' "
+        "AND last_attempted_at IS NOT NULL AND last_attempted_at > ?",
+        (_stale_lock_cutoff(),),
+    ).fetchall()
+    return [row["url"] for row in rows]
+
+
+def _host_apply_acquire(min_score_raw: str | None, reveal: bool) -> dict:
+    """Take the per-job apply lock on the next eligible job.
+
+    A thin wrapper over acquire_job (the launcher's own BEGIN IMMEDIATE
+    lock path, agent_label='host') with the live daily-cap recheck in
+    front of it — the same live-from-DB guard the worker run runs, so
+    applications recorded by any path count. Refusals are envelopes:
+    cap_reached, queue_busy (fresh locks hold every candidate), or
+    no_eligible_job — never a fabricated job.
+    """
+    from applypilot.apply.launcher import acquire_job
+    from applypilot.database import get_connection
+
+    min_score = _validated_min_score(min_score_raw, default=7)
+
+    if _daily_cap_reached_planning_cap():
+        _fail("cap_reached",
+              "the daily application cap is reached — no lock is taken; "
+              "real submissions are also human-gated upstream by the "
+              "plan-then-confirm loop",
+              {"apply": _apply_progress()})
+
+    conn = get_connection()
+    job = acquire_job(min_score=min_score, worker_id=0, agent_label="host")
+    if job is None:
+        locked = _locked_urls(conn)
+        if locked:
+            _fail("queue_busy",
+                  "every candidate is under a fresh in_progress lock — "
+                  "retry when the lock holders report or go stale",
+                  {"locked": locked, "apply": _apply_progress()})
+        _fail("no_eligible_job",
+              "no job passes the apply queue's filters (tailored, scored "
+              f">= {min_score}, unlocked, under the attempt limit) — run "
+              "the discover/enrich/score/tailor stages first",
+              {"min_score": min_score, "apply": _apply_progress()})
+
+    # The full row (salary included — acquire_job's SELECT omits it), so
+    # the payload shape matches the job-next stages.
+    row = _load_job(conn, job["url"])
+    payload: dict = {
+        "stage": "apply",
+        "job": _job_block(row),
+        "application_url": job.get("application_url"),
+        "resume_path": job.get("tailored_resume_path"),
+        "cover_letter_path": job.get("cover_letter_path"),
+        "acquired_by": "host-worker-0",
+        "apply": _apply_progress(),
+        "progress": _pipeline_progress(conn),
+        "resume": _scoring_resume_block(reveal),
+        "guardrails": _apply_guardrails(),
+    }
+    if reveal:
+        # The driver judges and submits: the profile's facts ride the
+        # payload only behind --reveal, as on every stage payload.
+        facts = _resume_facts()
+        if facts:
+            payload["resume_facts"] = facts
+    return payload
+
+
+def _daily_cap_reached_planning_cap() -> bool:
+    """The live daily-cap recheck against the external-driver default."""
+    from applypilot.apply.launcher import _daily_cap_reached
+    from applypilot.apply.planning import AGENT_DEFAULT_DAILY_CAP
+
+    return _daily_cap_reached(AGENT_DEFAULT_DAILY_CAP)
+
+
+def _validated_min_score(min_score_raw: str | None, default: int) -> int:
+    if min_score_raw is None:
+        return default
+    raw = str(min_score_raw).strip()
+    if not raw.lstrip("-").isdigit():
+        _fail("invalid_min_score",
+              f"--min-score must be a non-negative integer, got {min_score_raw!r}",
+              {"min_score": min_score_raw})
+    return int(raw)
+
+
+def _host_apply_result(url: str, status: str, reason: str | None,
+                       min_score_raw: str | None) -> dict:
+    """Record one apply outcome through mark_result and release the lock.
+
+    The URL must be under this loop's lock (apply-acquire took it):
+    apply-result is the worker's own report path, not a mark override —
+    human corrections go through the portal board or `apply
+    --mark-applied/--mark-failed`, which carry the launcher's own
+    coordination rules. A refused outcome writes nothing.
+    """
+    from applypilot.apply.launcher import (
+        derive_batch,
+        mark_result,
+        resolve_version_id,
+    )
+    from applypilot.database import (
+        KIND_COVER_LETTER,
+        KIND_RESUME,
+        get_connection,
+    )
+
+    if status not in _APPLY_STATUSES:
+        _fail("invalid_status",
+              f"--status must be one of {', '.join(_APPLY_STATUSES)} "
+              "(the PR #57 vocabulary), got " + repr(status),
+              {"status": status, "valid": list(_APPLY_STATUSES)})
+    min_score = _validated_min_score(min_score_raw, default=7)
+
+    conn = get_connection()
+    job = _load_job(conn, url)
+    if job is None:
+        _fail("unknown_job", f"no job at {url}", {"url": url})
+    if job["apply_status"] != "in_progress":
+        _fail("not_acquired",
+              f"{url} is not under an apply lock — acquire it with "
+              "`agent apply-acquire` first; apply-result records outcomes "
+              "for acquired jobs only",
+              {"url": url, "apply_status": job["apply_status"]})
+
+    # The apply-time snapshot (spec D3): the document versions the job's
+    # materials point at — resolved at result time the way a manual mark
+    # resolves them. NULL stays NULL for pre-history documents.
+    outcome = mark_result(
+        url, status,
+        error=(reason or status) if status in _TERMINAL_APPLY_STATUSES else reason,
+        permanent=status in _TERMINAL_APPLY_STATUSES,
+        resume_version_id=resolve_version_id(
+            conn, url, KIND_RESUME, job["tailored_resume_path"]),
+        cover_version_id=resolve_version_id(
+            conn, url, KIND_COVER_LETTER, job["cover_letter_path"]),
+    )
+
+    next_rows = derive_batch(min_score=min_score, limit=1)
+    next_job = next_rows[0] if next_rows else None
+    return {
+        "stage": "apply",
+        "recorded": {
+            "url": url,
+            "status": status,
+            "outcome": outcome,  # recorded | superseded | conflict — honest coordination
+            "reason": reason,
+            "terminal": status in _TERMINAL_APPLY_STATUSES,
+        },
+        "apply": _apply_progress(),
+        "next_eligible": (
+            {"url": next_job["url"], "title": next_job.get("title"),
+             "fit_score": next_job.get("fit_score")}
+            if next_job else None),
+        "progress": _pipeline_progress(conn),
+        "guardrails": _apply_guardrails(),
+    }
+
+
+@agent_app.command("apply-acquire")
+def apply_acquire_cmd(
+    min_score: Optional[str] = typer.Option(
+        None, "--min-score",
+        help="Minimum fit_score to apply to (default 7 — the apply queue's default)."),
+    reveal: bool = typer.Option(
+        False, "--reveal",
+        help="Include the resume text and resume_facts (redacted by "
+             "default — stdout lands in host chat logs)."),
+) -> None:
+    """Take the per-job apply lock on the next eligible job (bookkeeping only)."""
+    _prepare_db()
+    _verb(lambda: _host_apply_acquire(min_score, reveal))
+
+
+@agent_app.command("apply-result")
+def apply_result_cmd(
+    url: Optional[str] = typer.Option(
+        None, "--url", help="Job URL from the apply-acquire payload."),
+    status: Optional[str] = typer.Option(
+        None, "--status",
+        help="One of applied, failed, expired, captcha, login_issue (the "
+             "PR #57 vocabulary; captcha is terminal)."),
+    reason: Optional[str] = typer.Option(
+        None, "--reason", help="Failure reason (stored as apply_error)."),
+    min_score: Optional[str] = typer.Option(
+        None, "--min-score",
+        help="Selection for the returned next-eligible summary (default 7)."),
+) -> None:
+    """Record one apply outcome and release the lock (bookkeeping only)."""
+    _prepare_db()
+    if not url:
+        _fail("invalid_usage", "--url is required")
+    if not status:
+        _fail("invalid_usage", "--status is required")
+    _verb(lambda: _host_apply_result(url, status, reason, min_score))

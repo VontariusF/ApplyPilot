@@ -371,8 +371,6 @@ drives the whole queue.
   default payload — `--reveal` opts in per call.
 - These verbs never touch the LLM tier gate: they run on a store with
   zero provider configuration.
-- Apply bookkeeping is a later PR of the same spec (`agent apply-acquire`
-  / `apply-result`); the plan-then-confirm guardrails are unchanged.
 
 ### Enrich, Tailor, and Cover by Agent (host-driven pipeline, T2)
 
@@ -424,6 +422,57 @@ applypilot agent cover --url <url> --text "..."
   queue and those jobs re-enter the score queue.
 - Like the scoring verbs, none of these touch the LLM tier gate — they
   run on a store with zero provider configuration.
+
+### Apply Bookkeeping by Agent (host-driven pipeline, T3)
+
+The same protocol now covers submission bookkeeping. `agent apply-acquire`
+takes the launcher's per-job lock on the next eligible job (the same
+`acquire_job` path a worker run uses, stamped `host-worker-0`), with the
+live daily-cap recheck in front — the 5/day external default applies and
+cannot be lifted at the verb. `agent apply-result` records the outcome
+through the same `mark_result` write the worker loop uses, releases the
+lock, and reports the remaining cap headroom.
+
+```
+applypilot agent apply-acquire                        # next eligible job, locked
+applypilot agent apply-acquire --min-score 8          # raise the fit threshold
+applypilot agent apply-acquire --reveal               # resume text + resume_facts
+applypilot agent apply-result --url <url> --status applied
+applypilot agent apply-result --url <url> --status captcha --reason "blocked"
+```
+
+**Guardrails — read before driving a real submission:**
+
+- **The verbs are bookkeeping only.** They take a lock and record an
+  outcome. No verb invokes an apply engine, launches Chrome, or touches a
+  job board: the driving agent performs the real browser work itself, with
+  its own tooling, after acquiring the job.
+- **Plan-then-confirm stays required upstream.** These verbs do NOT plan,
+  stage, or consume the PR #54 token: a real submission batch must still
+  go through `applypilot apply --plan` and `--i-confirm <hash>` (same-day,
+  sha256-pinned, consumed on use). A confirmed plan pins the batch; the
+  verbs honor the pin because they sit inside the same lock and cap
+  machinery — they do not bypass it.
+- **The cap is not liftable at the verb.** `apply-acquire` checks the
+  daily count live (applications recorded by any path — portal, CLI,
+  protocol — all count) and refuses with `cap_reached` once the 5/day
+  external default is hit.
+- **Status vocabulary is the PR #57 set, exactly:** `applied`, `failed`,
+  `expired`, `captcha`, `login_issue`. `captcha` (like `expired` and
+  `login_issue`) is recorded terminal — attempts banned, the job never
+  requeues. Unknown values are refused with `invalid_status`.
+- **Lock discipline.** `apply-result` reports only acquired jobs: a
+  non-acquired URL is refused (`not_acquired`), and a locked queue
+  answers `queue_busy` instead of fabricating work. Human corrections
+  belong on the portal board or `apply --mark-applied/--mark-failed`,
+  which carry the launcher's coordination rules.
+
+Refusal envelopes: `cap_reached` (daily cap hit, no lock taken),
+`no_eligible_job` (nothing passes the queue's filters),
+`queue_busy` (fresh locks hold every candidate — retry later),
+`not_acquired` (apply-result without a held lock), `invalid_status`,
+`invalid_min_score`.
+
 
 ---
 
