@@ -8,9 +8,21 @@ transcript (art_Kc1yCL3A section 4) draws it —
     → answer xN → review --set → keep-editing → agent-led off → confirm
     → run discover enrich score → run tailor cover pdf
     → apply --plan → apply --i-confirm → status --json
-
 ...plus every remaining protocol verb (agent-led on/off, keep-editing,
 redo) and two negative probes that demonstrate the JSON error envelope.
+
+And the host-driven pipeline journey (spec art_IMViYTMU, T4 close-out): a
+second onboarding on the host backend (readiness forced to "nothing
+ready" — the keyless driver's condition), then the whole pipeline through
+agent verbs with ZERO provider and claude calls —
+
+    fresh host onboarding → run discover / enrich (seams stubbed, one
+    job left stranded) → score loop (agent job-next --stage score +
+    agent score, terminating on unscored == 0) → enrich the pending_detail
+    straggler → score it → tailor loop → cover loop → apply --plan →
+    apply-acquire / apply-result bookkeeping loop with cap headroom.
+
+The ledger at the end proves the journey added zero provider calls.
 
 Rig (the deterministic stub-provider rig of the merged suites, art_M7Xt2rnH):
 
@@ -423,9 +435,10 @@ def main() -> int:
         conn = database.get_connection()
         for job in JOBS:
             conn.execute(
-                "UPDATE jobs SET full_description = ?, application_url = ? WHERE url = ?",
+                "UPDATE jobs SET full_description = ?, application_url = ?, "
+                "detail_scraped_at = ? WHERE url = ?",
                 (f"Full posting for {job['title']}: Python, SQL, Airflow, dbt.",
-                 job["url"], job["url"]))
+                 job["url"], "2026-11-07T00:05:00+00:00", job["url"]))
         conn.commit()
 
     mp.setattr(detail, "run_enrichment", fill_descriptions)
@@ -726,7 +739,260 @@ def main() -> int:
             p["phase"] == "interview" and p["progress"]["answered"] == 0)
 
     # =====================================================================
-    t.h(2, "7 · Provider call ledger")
+    t.h(2, "7 · Host-driven pipeline journey: score → enrich → tailor → "
+           "cover → apply, zero provider calls")
+    # =====================================================================
+
+    # The zero-LLM proof is a ledger delta: record both call counters now
+    # (the stub server's HTTP ledger and the fake claude's argv log) and
+    # assert neither moved by the end of the section.
+    provider_calls_before = len(STUB.calls)
+    claude_log = RUN_DIR / "claude-prompts.log"
+    claude_turns_before = (len(claude_log.read_text().splitlines())
+                           if claude_log.exists() else 0)
+
+    # Force the host backend: readiness reports "nothing ready" — exactly
+    # the condition a keyless driver meets (no claude sign-in, no LLM
+    # provider). The patch rides pytest.MonkeyPatch like every other seam.
+    mp.setattr(onboarding, "readiness", lambda: {
+        "claude": None, "llm_ready": False, "can_start_claude": False,
+        "can_start_llm": False, "can_start_any": False})
+
+    # A fresh interview: the state file is the harness's throwaway store,
+    # so clearing it here is the same thing a new driver gets.
+    config.ONBOARDING_STATE_PATH.unlink(missing_ok=True)
+
+    # --- Host onboarding: intake → resume → interview, zero agent turns.
+    out = run(["agent", "start"])
+    p = payload(out)
+    t.check("journey start → phase intake (no backend chosen yet)",
+            p["phase"] == "intake" and p["backend"] == "",
+            f"phase={p['phase']}, backend={p['backend']!r}")
+    run(["agent", "resume", "--file", str(resume_file)])
+    out = run(["agent", "start"])
+    p = payload(out)
+    t.check("journey interview opens on host (no kickoff turn)",
+            p["phase"] == "interview" and p["backend"] == "host")
+
+    for _ in range(len(onboarding.QUESTION_SPECS) + 1):
+        q = payload(run(["agent", "next"], compact=True))["current_question"]
+        if q is None:
+            break
+        if q["choices"]:
+            argv = ["agent", "answer", "--question", q["id"],
+                    "--choice", q["choices"][0]["value"]]
+        elif q["allow_free_text"]:
+            argv = ["agent", "answer", "--question", q["id"],
+                    "--free-text", "Something reasonable"]
+        else:
+            argv = ["agent", "answer", "--question", q["id"], "--skip"]
+        run(argv, compact=True)
+    out = run(["agent", "confirm"])
+    t.check("journey onboarding confirms (host-written profile)",
+            payload(out)["phase"] == "done")
+
+    # --- Seed the journey's data through the real discover stage; the
+    # enrichment stub fills gamma and epsilon but leaves delta WITHOUT a
+    # description — the pending_detail straggler the host loop must
+    # surface rather than drop.
+    JOURNEY_JOBS = [
+        {"url": "https://jobs.example/gamma", "title": "Data Engineer",
+         "site": "exampleboard"},
+        {"url": "https://jobs.example/delta", "title": "Analytics Engineer",
+         "site": "exampleboard"},
+        {"url": "https://jobs.example/epsilon", "title": "Data Engineer",
+         "site": "exampleboard"},
+    ]
+
+    def seed_journey_jobs(results_per_site=None):
+        conn = database.get_connection()
+        for job in JOURNEY_JOBS:
+            conn.execute(
+                "INSERT INTO jobs (url, title, site, discovered_at) VALUES (?, ?, ?, ?)",
+                (job["url"], job["title"], job["site"],
+                 "2026-11-08T00:00:00+00:00"))
+        conn.commit()
+
+    def enrich_two(workers=1, limit=100):
+        conn = database.get_connection()
+        for job in JOURNEY_JOBS:
+            if job["url"].endswith("delta"):
+                continue  # delta strands in pending_detail
+            conn.execute(
+                "UPDATE jobs SET full_description = ?, application_url = ?, "
+                "detail_scraped_at = ? WHERE url = ?",
+                (f"Full posting for {job['title']}: Python, SQL, Airflow, dbt.",
+                 job["url"], "2026-11-08T00:05:00+00:00", job["url"]))
+        conn.commit()
+
+    mp.setattr(jobspy, "run_discovery", seed_journey_jobs)
+    mp.setattr(detail, "run_enrichment", enrich_two)
+    run(["run", "discover"], compact=True)
+    run(["run", "enrich"], compact=True)
+
+    # --- The scoring loop: job-next → agent score, terminating when
+    # status reports unscored == 0. First payload in full (rubric +
+    # redaction shape on the record), the rest compact.
+    out = run(["agent", "job-next", "--stage", "score"])
+    p = payload(out)
+    t.check("job-next carries the 1-10 rubric", "You are a job fit evaluator" in p["rubric"])
+    t.check("default payload carries no resume text",
+            "text" not in p["resume"] and "resume_facts" not in p)
+    t.check("straggler visible: pending_detail == 1",
+            p["progress"]["pending_detail"] == 1,
+            json.dumps(p["progress"]))
+
+    scored_now = 0
+    while True:
+        p = payload(run(["agent", "job-next", "--stage", "score"], compact=True))
+        if p["progress"]["unscored"] == 0 or p["job"] is None:
+            break
+        url = p["job"]["url"]
+        t.note(f"- scoring `{url}` ({p['progress']['unscored']} unscored)")
+        run(["agent", "score", "--url", url, "--score", "9",
+             "--keywords", "python, sql, airflow",
+             "--reasoning",
+             "Host journey judgment: the posting's pipeline skills match "
+             "the profile directly."], compact=True)
+        scored_now += 1
+    t.check("score loop terminated on unscored == 0",
+            p["progress"]["unscored"] == 0)
+    t.check("two queue jobs scored through the host path", scored_now == 2,
+            f"scored {scored_now}")
+
+    # Negative probes: the score verb's validation envelope.
+    run_probe(["agent", "score", "--url", "https://jobs.example/gamma",
+               "--score", "11", "--reasoning", "out of range"], "invalid_score")
+    run_probe(["agent", "score", "--url", "https://jobs.example/gamma",
+               "--score", "9", "--reasoning", "double-score without --rescore"],
+              "already_scored")
+
+    # --- Enrich the straggler: delta enters the score queue, gets scored,
+    # and the loop's termination signal holds for the WHOLE pipeline.
+    out = run(["agent", "job-next", "--stage", "enrich"])
+    p = payload(out)
+    delta_url = p["job"]["url"]
+    t.check("enrich queue serves the stranded job", delta_url
+            == "https://jobs.example/delta", delta_url)
+    run(["agent", "enrich", "--url", delta_url, "--full-description",
+         "Full posting for Analytics Engineer: Python, SQL, Airflow, dbt.",
+         "--application-url", delta_url], compact=True)
+    out = run(["agent", "score", "--url", delta_url, "--score", "8",
+               "--keywords", "python, sql",
+               "--reasoning",
+               "Host journey judgment: close match, one gap in orchestration "
+               "depth."], compact=True)
+    out = run(["agent", "job-next", "--stage", "score"])
+    p = payload(out)
+    t.check("after enrich + score: unscored == 0 AND pending_detail == 0",
+            p["progress"]["unscored"] == 0
+            and p["progress"]["pending_detail"] == 0,
+            json.dumps(p["progress"]))
+
+    # --- Tailor loop: the agent authors the resume JSON; the CLI runs the
+    # lenient local validator + assembler (judge skipped). One negative
+    # probe first: a fabrication is refused, retryable, nothing persisted.
+    bad = dict(TAILOR_JSON)
+    bad["skills"] = {"Languages": "Python, SQL, Rust, Go, Scala"}
+    run_probe(["agent", "tailor", "--url", "https://jobs.example/gamma",
+               "--data", json.dumps(bad)], "invalid_resume_data")
+
+    for stage, verb_flag, materials in (
+            ("tailor", "--data", json.dumps(TAILOR_JSON)),
+            ("cover", "--text", COVER_LETTER)):
+        while True:
+            p = payload(run(["agent", "job-next", "--stage", stage], compact=True))
+            if p["job"] is None:
+                break
+            url = p["job"]["url"]
+            t.note(f"- writing {stage} materials for `{url}`")
+            run(["agent", stage, "--url", url, verb_flag, materials], compact=True)
+    out = run(["agent", "job-next", "--stage", "cover"])
+    t.check("tailor + cover queues drained", payload(out)["job"] is None)
+
+    # --- Apply bookkeeping loop. apply --plan is the guardrail upstream:
+    # pure JSON, staged token, live cap headroom. The confirm-and-run step
+    # (apply --i-confirm) launches the worker-engine batch — section 5
+    # covers that path with the fake engine. In the host-driven flow the
+    # driver performs the REAL browser work itself; nothing in this
+    # harness browses, so the outcomes below are recorded verdicts, not
+    # observed submissions — disclosed here, not hidden.
+    out = run(["apply", "--plan", "--min-score", "7", "--limit", "3"])
+    plan = payload(out)
+    t.check("journey plan batch == 3", plan.get("batch_size") == 3,
+            json.dumps({k: plan.get(k) for k in ("batch_size", "cap", "headroom")}))
+    t.check("plan headroom reflects the day's earlier application",
+            plan.get("headroom") == planning.AGENT_DEFAULT_DAILY_CAP - 1,
+            f"headroom={plan.get('headroom')}")
+
+    # Negative probe: report an outcome for a job never acquired.
+    run_probe(["agent", "apply-result", "--url", "https://jobs.example/gamma",
+               "--status", "applied"], "not_acquired")
+
+    # The loop: acquire (lock + live cap recheck) → the driver's browser
+    # work would happen here → apply-result with the PR #57 vocabulary.
+    applied_now = 0
+    while True:
+        result = runner.invoke(app, ["agent", "apply-acquire"])
+        if result.exit_code != 0:
+            t.cmd(["agent", "apply-acquire"], result.output, result.exit_code)
+            code = json.loads(result.output)["error"]["code"]
+            t.check("loop ends on a refusal, not a fabricated job",
+                    code == "no_eligible_job", f"got {code!r}")
+            break
+        p = json.loads(result.output)
+        url = p["job"]["url"]
+        t.cmd(["agent", "apply-acquire"], result.output, 0)
+        t.check(f"acquire carries cap headroom for {url}",
+                p["apply"]["headroom"] >= 0
+                and p["apply"]["cap"] == planning.AGENT_DEFAULT_DAILY_CAP,
+                json.dumps(p["apply"]))
+        verdict = ("applied" if applied_now == 0
+                   else "captcha" if applied_now == 1 else "expired")
+        t.note(f"- [simulated browser work: the driving agent submits] "
+               f"→ recording {verdict} for `{url}`")
+        run(["agent", "apply-result", "--url", url, "--status", verdict],
+            compact=True)
+        applied_now += 1
+        if applied_now > 5:  # harness bound — never loop forever
+            t.flag("apply loop exceeded 5 iterations; breaking")
+            break
+    t.check("three acquired jobs recorded through the host path",
+            applied_now == 3, f"recorded {applied_now}")
+
+    out = run(["status", "--json"])
+    stats = json.loads(out)
+    t.check("status --json: one more application recorded today",
+            stats.get("applied") == 2, f"applied={stats.get('applied')}")
+    t.check("status --json: captcha separate; expired counts as the one apply error",
+            stats.get("captcha") == 2 and stats.get("apply_errors") == 1,
+            f"captcha={stats.get('captcha')}, "
+            f"apply_errors={stats.get('apply_errors')}")
+    conn4 = database.get_connection()
+    outcomes = {r["url"]: dict(r) for r in conn4.execute(
+        "SELECT url, apply_status, applied_at FROM jobs WHERE url LIKE '%example/%'").fetchall()}
+    journey_rows = {u: r for u, r in outcomes.items()
+                    if u != "https://jobs.example/alpha"
+                    and u != "https://jobs.example/beta"}
+    t.check("journey outcomes cover the vocabulary: applied, captcha, expired",
+            sorted(r["apply_status"] for r in journey_rows.values())
+            == ["applied", "captcha", "expired"],
+            json.dumps({u: r["apply_status"] for u, r in journey_rows.items()}))
+    t.check("only the applied journey job has applied_at",
+            sum(1 for r in journey_rows.values() if r["applied_at"]) == 1)
+
+    # The zero-LLM proof, closed: neither ledger moved.
+    claude_turns_after = (len(claude_log.read_text().splitlines())
+                          if claude_log.exists() else 0)
+    t.check("journey made zero provider calls",
+            len(STUB.calls) == provider_calls_before,
+            f"{provider_calls_before} → {len(STUB.calls)}")
+    t.check("journey made zero claude engine calls",
+            claude_turns_after == claude_turns_before,
+            f"{claude_turns_before} → {claude_turns_after}")
+
+    # =====================================================================
+    t.h(2, "8 · Provider call ledger")
     # =====================================================================
     kinds = {}
     for call in STUB.calls:
@@ -742,7 +1008,14 @@ def main() -> int:
     else:
         t.note("All checks passed — every protocol verb ran end-to-end; every error")
         t.note("in this transcript is an intentional, labeled probe of the error")
-        t.note("envelope (unknown-question refusal, burned-token replay refusal).")
+        t.note("envelope: the onboarding unknown-question refusal, the burned-token")
+        t.note("replay refusal, the score verb's invalid_score / already_scored")
+        t.note("refusals, the tailor validator's retryable invalid_resume_data")
+        t.note("envelope, and the apply loop's not_acquired / no_eligible_job")
+        t.note("refusals. The host-driven pipeline journey (section 7) ran the")
+        t.note("whole pipeline — score, enrich, tailor, cover, apply bookkeeping")
+        t.note("— with zero provider and zero claude calls, proven by the ledger")
+        t.note("deltas in its closing checks.")
 
     server.shutdown()
 
