@@ -473,6 +473,93 @@ Refusal envelopes: `cap_reached` (daily cap hit, no lock taken),
 `not_acquired` (apply-result without a held lock), `invalid_status`,
 `invalid_min_score`.
 
+---
+
+## Driving ApplyPilot as an agent
+
+Every feature in ApplyPilot is reachable from a shell — which means every
+feature is drivable by a host coding agent with **zero LLM provider keys**.
+The division of labor is fixed: the driving agent supplies the intelligence
+(judgments, text, browser work); ApplyPilot owns state, validation,
+persistence, and guardrails. The `agent` protocol verbs and the plain CLI
+are two surfaces over the same store — nothing below requires a provider
+credential unless its row says so.
+
+| Feature | Agent-CLI path | Notes |
+|---------|----------------|-------|
+| Onboarding / init | `agent start` → `agent resume --file` → `agent start` → `agent next` / `agent answer` / `agent send` → `agent review --set` → `agent confirm` | Host backend when nothing is ready — zero LLM calls. `agent keep-editing`, `agent redo`, `agent agent-led on\|off` round out the interview. |
+| Discover | `run --stage discover` | Plain CLI, LLM-free (jobspy/Workday sources; Composio optional). Not a protocol verb — plain-CLI reachability is the mapping. The optional smartextract strategy uses an LLM, but is never required. |
+| Enrich | `run --stage enrich` (HTML tier, LLM-free) · fallback: `agent job-next --stage enrich` + `agent enrich --url … --full-description …` | The host verb is the fallback tier: it captures descriptions the HTML tier missed and moves the job into the score queue. |
+| Score | `agent job-next --stage score` + `agent score --url … --score N --reasoning …` | The 1-10 rubric rides the job-next payload; writes go through the same UPDATE as the LLM path, stamped `scored_by: 'host'`. |
+| Rescore | `agent score --url … --rescore` (host) · `run rescore` (provider) | Same overwrite semantics both paths; `--rescore` without the flag on a scored job is refused (`already_scored`). |
+| Tailor | `agent job-next --stage tailor` + `agent tailor --url … --data '<resume JSON>'` | Lenient local validator + assembler; the LLM judge is skipped. Validator failures return a retryable envelope carrying the errors as avoid-notes. |
+| Cover letter | `agent job-next --stage cover` + `agent cover --url … --text …` | Local `validate_cover_letter` after the same sanitization the LLM path applies. |
+| PDF | `run --stage pdf` | Pure local rendering — plain CLI, no protocol verb needed. |
+| Regenerate documents | `regenerate <url> [--cover]` | Plain CLI: clears tailoring state and re-enqueues; existing files stay on disk (history). |
+| Pipeline status / loop termination | `status --json` | `progress.unscored == 0` terminates the scoring loop; `progress.pending_detail` counts stranded jobs (no captured description) on every payload. |
+| Diagnostics | `doctor --json` | Plain CLI, machine-readable. |
+| Apply planning (guardrail) | `apply --plan [--min-score N] [--limit N]` | Pure JSON: plan hash (sha256, same-day validity), cap, live headroom. Stages the token; commits nothing. |
+| Apply run (worker-engine path) | `apply --i-confirm <hash>` | Consumes the token and runs the batch through a Tier-3 engine (Claude Code / Droid) — needs the engine credential and local Chrome. |
+| Apply bookkeeping (host path) | `agent apply-acquire` / `agent apply-result --url … --status applied\|failed\|expired\|captcha\|login_issue [--reason …]` | Takes/releases the per-job lock through the launcher's own seams, with the live daily-cap recheck. Bookkeeping only — the real browser work is the driving agent's, and plan-then-confirm stays required upstream. |
+| Apply corrections | `apply --mark-applied <url>` / `--mark-failed <url>` / `--reset-failed` | Plain CLI (human corrections; the launcher's coordination rules apply). |
+| Portal | `portal` | Separate surface; its routes keep their provider gates — out of host scope this round. |
+
+### The two host loops
+
+The scoring loop — terminates when `status --json` (or any payload's
+`progress`) reports `unscored == 0`:
+
+```
+loop:
+  payload = agent job-next --stage score
+  if payload.progress.unscored == 0: break
+  # read url/title/site/location/salary + the description excerpt
+  # (6000-char cap) and judge fit against the onboarded profile
+  agent score --url <url> --score <1-10> --keywords <…> --reasoning <…>
+  # → the same UPDATE as the LLM path, scored_by='host'; the response
+  #   carries the next pending payload, so one call per job drains the queue
+
+stragglers: payload.progress.pending_detail > 0
+  → agent job-next --stage enrich → agent enrich --url X --full-description …
+  → those jobs re-enter the score queue
+```
+
+The apply bookkeeping loop — plan-then-confirm is required upstream and
+un-bypassable; the real browser work stays with the driving agent:
+
+```
+apply --plan --min-score N          # pure JSON: plan hash, cap headroom
+apply --i-confirm <hash>            # pins the batch (same-day, consumed on use)
+
+loop:
+  job = agent apply-acquire         # per-job lock + live daily-cap recheck
+  # the driving agent performs the REAL browser work itself (its own
+  # Chrome/Playwright tooling against the live board) — no verb fakes this
+  agent apply-result --url <url> --status applied|failed|captcha|… --reason …
+```
+
+Tailor and cover sit between the two: the same loop shape as scoring, with
+the validator returning retryable error envelopes (avoid-notes) instead of
+the queue moving on.
+
+### Operational notes
+
+- **Scoring has no per-job lock — deliberate.** A host scoring loop racing
+  a streaming `run --stage score` can double-score a job last-write-wins.
+  Benign at this scale (both writes are valid scores over the same inputs)
+  and documented here rather than engineered: apply keeps its lock
+  machinery; scoring stays lock-free.
+- **`scored_by` semantics.** Host-written scores carry `'host'`;
+  provider-written scores carry the provider name; rows scored before the
+  column existed carry NULL and render exactly as they always did (no
+  backfill). `status --json` reports the provenance split, and the summary
+  label reads the column instead of assuming every score came from an LLM.
+- **Redaction defaults.** Protocol stdout lands in host chat logs, so
+  payloads are redacted by default: the description is excerpt-capped at
+  the same 6000 chars the LLM path sees, the resume travels as metadata
+  only, and `resume_facts` are withheld. `--reveal` opts in per call —
+  pass it when the driver genuinely needs the text to judge, author, or
+  validate.
 
 ---
 
