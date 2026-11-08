@@ -38,6 +38,7 @@ from typing import Callable, Optional
 import typer
 
 from applypilot import config, onboarding
+from applypilot.database import TERMINAL_APPLY_STATUSES
 
 agent_app = typer.Typer(
     name="agent",
@@ -777,6 +778,11 @@ def _host_enrich(url: str, full_description: str | None,
     scrape loop runs for a fallback-tier capture (spec: no parallel schema
     for host data) — so the job enters the score queue exactly as if the
     LLM tier had succeeded.
+
+    B7: an explicitly non-URL --application-url is a typed refusal, never
+    a silent write — junk sentinels ('None'/'n/a') are exactly how the B1
+    pollution class entered the store. An omitted or empty flag means
+    "no URL captured" and preserves whatever the row already carries.
     """
     from applypilot.database import get_connection, get_jobs_by_stage
     from applypilot.enrichment.detail import persist_description
@@ -786,6 +792,15 @@ def _host_enrich(url: str, full_description: str | None,
         _fail("invalid_description",
               "--full-description is required — an empty capture never "
               "moves a job into the score queue")
+
+    if application_url is not None:
+        candidate = application_url.strip()
+        if candidate and not candidate.lower().startswith(("http://", "https://")):
+            _fail("invalid_application_url",
+                  f"--application-url {application_url!r} is not an http(s) "
+                  "URL — pass the apply-button URL, or omit the flag when "
+                  "the posting exposes none",
+                  {"url": url, "given": application_url})
 
     conn = get_connection()
     job = _load_job(conn, url)
@@ -1007,10 +1022,10 @@ def cover_cmd(
 # records.
 _APPLY_STATUSES = ("applied", "failed", "expired", "captcha", "login_issue")
 
-# Outcomes the launcher classifies permanent (_is_permanent_failure):
-# recorded with the attempts ban (99) so the queue predicate keeps them
-# out even if a later sweep touches attempts.
-_TERMINAL_APPLY_STATUSES = ("expired", "captcha", "login_issue")
+# The apply-status vocabulary's terminal set — canonical in database.py
+# (one source of truth: reset_failed's sweep reads the same tuple, so the
+# protocol's permanent recording and the sweep's carve-out cannot drift).
+_TERMINAL_APPLY_STATUSES = TERMINAL_APPLY_STATUSES
 
 
 def _apply_progress() -> dict:

@@ -117,27 +117,50 @@ def _estimate_seconds() -> int:
     return int(config.DEFAULTS["apply_timeout"])
 
 
-def stage_batch_plan(min_score: int, limit: int,
+def stage_batch_plan(min_score: int, limit: Optional[int],
                      explicit_cap: Optional[int]) -> dict:
     """Derive the batch read-only, stage the token, return the payload.
 
     Nothing in the job store is written: the batch comes from a plain
     SELECT (launcher.derive_batch) and the only file touched is the token.
-    """
-    from applypilot.apply.launcher import derive_batch
 
-    batch = derive_batch(min_score=min_score, limit=limit)
-    if not batch:
-        raise PlanEmptyError(
-            "Nothing to apply — no job passes the apply queue's filters. "
-            "Run the discover/enrich/score/tailor stages first.")
+    B2: a None limit — the CLI's omitted --limit — sizes the batch to
+    everything the daily cap allows, min(headroom, eligible_total),
+    instead of silently truncating to the apply run's default of 1 (the
+    apply RUN default is untouched). The payload carries limit_applied,
+    eligible_total, and per-reason exclusion counts (S3), so truncation
+    and exclusion are never silent — an operator reading the plan can
+    tell "only one job is eligible" from "the batch was capped".
+    """
+    from applypilot.apply.launcher import (
+        count_eligible,
+        count_queue_exclusions,
+        derive_batch,
+    )
 
     cap, cap_source = ((explicit_cap, "explicit") if explicit_cap is not None
                        else (AGENT_DEFAULT_DAILY_CAP, "default"))
     day = utc_today()
+    applied_today = count_applications_on(day)
+    headroom = max(cap - applied_today, 0)
+    eligible_total = count_eligible(min_score=min_score)
+    excluded = count_queue_exclusions(min_score)
+    # An explicit --limit is honored exactly, even when it over-requests
+    # (derive_batch's LIMIT simply returns what exists).
+    limit_applied = min(headroom, eligible_total) if limit is None else limit
+
+    batch = derive_batch(min_score=min_score, limit=limit_applied)
+    if not batch:
+        raise PlanEmptyError(
+            "Nothing to apply — no job passes the apply queue's filters. "
+            "Run the discover/enrich/score/tailor stages first.",
+            details={"eligible_total": eligible_total,
+                     "headroom": headroom,
+                     "requested_limit": limit,
+                     "excluded": excluded})
+
     urls = [job["url"] for job in batch]
     digest = plan_hash(_plan_core(day, min_score, cap, urls))
-    applied_today = count_applications_on(day)
     estimate = _estimate_seconds()
 
     payload = {
@@ -149,7 +172,14 @@ def stage_batch_plan(min_score: int, limit: int,
         "cap": cap,
         "cap_source": cap_source,
         "applied_today": applied_today,
-        "headroom": max(cap - applied_today, 0),
+        "headroom": headroom,
+        # B2/S3: batch sizing and exclusion diagnostics — the plan can
+        # only say what is IN the batch, so it also says what is not,
+        # and why.
+        "limit_applied": limit_applied,
+        "eligible_total": eligible_total,
+        "excluded": excluded,
+        "skipped_manual_ats": excluded.get("manual_ats", 0),
         "estimate_basis": f"apply_timeout={estimate}s per job "
                           "(the run's watchdog budget — an upper bound)",
         "jobs": [
@@ -193,13 +223,18 @@ def consume_staged_plan() -> None:
 
 
 def verify_confirm(given_hash: str, explicit_cap: Optional[int],
-                   min_score: int, limit: Optional[int]) -> dict:
+                   min_score: Optional[int], limit: Optional[int]) -> dict:
     """Check a --i-confirm token against the staged plan and the live queue.
 
     Refusal order is most-truthful-first: nothing staged → stale (wrong
     UTC day) → edited on disk → wrong token → cap disagreement → flag
     disagreement → drift (the live queue no longer matches the plan).
     On success returns {"urls", "cap", "min_score"} for the pinned run.
+
+    B3: an OMITTED --min-score (None) inherits the staged plan's threshold
+    — the natural confirm (no flags repeated) must not drift-refuse just
+    because the CLI's default (7) rode along when the plan staged a
+    different one. An explicitly given value must still agree.
 
     The live-set comparison re-derives with the STAGED selection, never
     the confirm invocation's flags — the natural confirm (no flags
@@ -240,8 +275,9 @@ def verify_confirm(given_hash: str, explicit_cap: Optional[int],
     planned_urls = list(stored.get("urls", []))
     planned_min = stored.get("min_score")
     # The confirm contract is "same flags as the --plan run": a selection
-    # flag that disagrees with the plan describes a different batch.
-    if min_score != planned_min:
+    # flag that disagrees with the plan describes a different batch. B3:
+    # an omitted flag (None) inherits the staged value instead.
+    if min_score is not None and min_score != planned_min:
         raise PlanDriftError(
             "--min-score differs from the staged plan's selection — plan "
             "again; a confirmed batch is the batch that runs.",

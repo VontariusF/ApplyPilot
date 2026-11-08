@@ -18,7 +18,7 @@ from pathlib import Path
 from rich.console import Console
 
 from applypilot.config import APP_DIR, DB_PATH
-from applypilot.database import get_connection
+from applypilot.database import get_connection, get_stats
 
 console = Console()
 
@@ -36,18 +36,14 @@ def generate_dashboard(output_path: str | None = None) -> str:
 
     conn = get_connection()
 
-    # Stats
-    total = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
-    ready = conn.execute(
-        "SELECT COUNT(*) FROM jobs "
-        "WHERE full_description IS NOT NULL AND application_url IS NOT NULL"
-    ).fetchone()[0]
-    scored = conn.execute(
-        "SELECT COUNT(*) FROM jobs WHERE fit_score IS NOT NULL"
-    ).fetchone()[0]
-    high_fit = conn.execute(
-        "SELECT COUNT(*) FROM jobs WHERE fit_score >= 7"
-    ).fetchone()[0]
+    # Stats — get_stats() is the single source of readiness numbers (M5):
+    # the header used its own SQL whose "ready" disagreed with `status
+    # --json` and counted the B1 literal-'None' URLs as ready.
+    stats = get_stats(conn)
+    total = stats["total"]
+    ready = stats["ready_to_apply"]
+    scored = stats["scored"]
+    high_fit = sum(count for score, count in stats["score_distribution"] if score >= 7)
 
     # Score distribution
     score_dist: dict[int, int] = {}
@@ -91,6 +87,11 @@ def generate_dashboard(output_path: str | None = None) -> str:
         "indeed": "#2164f3", "linkedin": "#0a66c2",
         "Dice": "#eb1c26", "Glassdoor": "#0caa41",
     }
+    # Case-insensitive lookup (M5): the jobspy writer stores lowercase
+    # board names ("glassdoor"), other writers store display names
+    # ("RemoteOK") — exact-string keys sent glassdoor cards and bars to
+    # the gray fallback.
+    colors_by_lower = {name.lower(): color for name, color in colors.items()}
 
     # Score distribution bar chart
     score_bars = ""
@@ -112,7 +113,7 @@ def generate_dashboard(output_path: str | None = None) -> str:
     site_rows = ""
     for s in site_stats:
         site = s["site"] or "?"
-        color = colors.get(site, "#6b7280")
+        color = colors_by_lower.get(site.lower(), "#6b7280")
         avg = s["avg_score"] or 0
         site_rows += f"""
         <div class="site-row">
@@ -151,8 +152,13 @@ def generate_dashboard(output_path: str | None = None) -> str:
         salary = escape(j["salary"] or "")
         location = escape(j["location"] or "")
         site = escape(j["site"] or "")
-        site_color = colors.get(j["site"] or "", "#6b7280")
-        apply_url = escape(j["application_url"] or "")
+        site_color = colors_by_lower.get((j["site"] or "").lower(), "#6b7280")
+        # M5/B9: only a real http(s) URL renders an Apply link — the B1
+        # literal 'None' (truthy) used to render <a href="None">, which
+        # browsers resolve as a relative link into the dashboard's own
+        # directory.
+        raw_apply = j["application_url"] or ""
+        apply_url = escape(raw_apply) if raw_apply.startswith(("http://", "https://")) else ""
 
         # Parse keywords and reasoning from score_reasoning
         reasoning_raw = j["score_reasoning"] or ""

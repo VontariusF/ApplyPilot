@@ -24,7 +24,12 @@ from playwright.sync_api import sync_playwright
 
 from applypilot import config
 from applypilot.config import DB_PATH
-from applypilot.database import get_connection, init_db, ensure_columns
+from applypilot.database import (
+    SKIP_DETAIL_CLAUSE,
+    get_connection,
+    init_db,
+    ensure_columns,
+)
 from applypilot.enrichment.remote import infer_remote
 from applypilot.llm import get_client
 
@@ -32,8 +37,11 @@ log = logging.getLogger(__name__)
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
-# Sites that block scraping -- skip detail extraction entirely
-SKIP_DETAIL_SITES = {"glassdoor", "google", "Workopolis"}
+# Sites that block scraping -- skip detail extraction entirely. Canonical
+# in database.SKIP_DETAIL_SITES: the scraper's WHERE, the pending_detail
+# stat, the streaming enrich count, and the portal stage filter share one
+# clause, so a skip-site row never counts as pending detail work in any
+# surface (H3).
 
 # Module-level proxy config (set from CLI or caller)
 _PROXY_CONFIG: dict | None = None
@@ -620,6 +628,26 @@ def scrape_detail_page(page, url: str) -> dict:
     return result
 
 
+def _valid_http_url(value: str) -> bool:
+    """True only for a real http(s) URL (the B7 validity bar)."""
+    return value.startswith(("http://", "https://"))
+
+
+def _clean_apply_url(value: str | None) -> str | None:
+    """Junk-normalize a caller-supplied application URL (B7).
+
+    '' and the sentinel family ('none'/'null'/'n/a', case-insensitive —
+    the B1 pollution class) mean "no URL given": NULL, so the write's
+    COALESCE preserves whatever good URL the row already carries.
+    """
+    if value is None:
+        return None
+    text = value.strip()
+    if not text or text.lower() in ("none", "null", "n/a"):
+        return None
+    return text
+
+
 def persist_description(conn: sqlite3.Connection, url: str,
                         full_description: str | None,
                         application_url: str | None, title: str | None) -> None:
@@ -630,13 +658,35 @@ def persist_description(conn: sqlite3.Connection, url: str,
     The scrape loop (below) and the host enrich verb (spec art_IMViYTMU)
     both land here — the host path writes through the same UPDATE the
     fallback tier's result would, so no parallel schema for host data.
+
+    Field semantics (B7/M1):
+      - application_url is preserve-on-absent: a call without the URL
+        never clobbers an existing stored one (the host verb may omit it,
+        a partial scrape never has one), junk sentinels normalize to
+        NULL, and any other non-http(s) value is refused rather than
+        written.
+      - a NULL full_description stamps detail_error='no description
+        extracted' instead of a clean settle — the row stays visible in
+        detail_errors instead of vanishing from every queue and counter.
     """
+    normalized_url = _clean_apply_url(application_url)
+    if normalized_url is not None and not _valid_http_url(normalized_url):
+        raise ValueError(
+            f"persist_description: refusing non-http(s) application_url "
+            f"{application_url!r} for {url} — pass the apply URL or None"
+        )
+
     conn.execute(
-        "UPDATE jobs SET full_description = ?, application_url = ?, "
-        "detail_scraped_at = ?, detail_error = NULL, is_remote = ? "
+        "UPDATE jobs SET full_description = ?, "
+        "application_url = COALESCE(?, application_url), "
+        "detail_scraped_at = ?, "
+        "detail_error = CASE WHEN ? IS NULL "
+        "THEN COALESCE(detail_error, 'no description extracted') ELSE NULL END, "
+        "is_remote = ? "
         "WHERE url = ?",
-        (full_description, application_url,
+        (full_description, normalized_url,
          datetime.now(timezone.utc).isoformat(),
+         full_description,
          1 if infer_remote(title or "", full_description) else 0,
          url),
     )
@@ -737,7 +787,7 @@ def _run_detail_scraper(
 
     Returns aggregate stats dict.
     """
-    skip_filter = " AND ".join(f"site != '{s}'" for s in SKIP_DETAIL_SITES)
+    skip_filter = SKIP_DETAIL_CLAUSE
     where = f"WHERE detail_scraped_at IS NULL AND {skip_filter}"
     rows = conn.execute(
         f"SELECT url, title, site FROM jobs {where} ORDER BY site"
@@ -849,7 +899,7 @@ def stream_detail(
 
     try:
         while True:
-            skip_filter = " AND ".join(f"site != '{s}'" for s in SKIP_DETAIL_SITES)
+            skip_filter = SKIP_DETAIL_CLAUSE
             rows = conn.execute(
                 "SELECT url, title, site FROM jobs "
                 f"WHERE detail_scraped_at IS NULL AND {skip_filter} "

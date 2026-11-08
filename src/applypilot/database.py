@@ -99,6 +99,33 @@ def close_connection(db_path: Path | str | None = None) -> None:
             conn.close()
 
 
+def normalize_polluted_urls(conn: sqlite3.Connection | None = None) -> int:
+    """Idempotent startup repair for the B1 pollution class — no migration.
+
+    The pre-_clean_cell discovery writer could persist the literal strings
+    'None'/'null'/'n/a' into application_url, and enrichment/detail.py's
+    relative-URL fixer could then fabricate a plausible '<base>/None' URL
+    from such a row. Both are garbage every reader treated as a real apply
+    target; NULL them. Runs on every init_db: cheap (a LIKE scan that
+    matches nothing on a clean store) and a no-op once clean, so old rows
+    heal without a schema migration (the repo's no-unnecessary-migration
+    precedent). Returns the number of repaired rows.
+    """
+    if conn is None:
+        conn = get_connection()
+    cursor = conn.execute(
+        "UPDATE jobs SET application_url = NULL "
+        "WHERE lower(application_url) IN ('none', 'null', 'n/a') "
+        "OR application_url LIKE '%/None'"
+    )
+    # Commit unconditionally: in legacy isolation mode even a 0-row UPDATE
+    # auto-opens a transaction, and leaving it open on the thread-cached
+    # connection breaks the caller's next explicit BEGIN IMMEDIATE with
+    # "cannot start a transaction within a transaction".
+    conn.commit()
+    return cursor.rowcount
+
+
 def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
     """Create the full jobs table with all columns from every pipeline stage.
 
@@ -212,6 +239,9 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
     # Run migrations for any columns added after initial schema
     ensure_columns(conn)
     backfill_is_remote(conn)
+    # B1: idempotent repair of the pre-_clean_cell 'None'/'n/a' URL class
+    # (no migration — see normalize_polluted_urls).
+    normalize_polluted_urls(conn)
 
     return conn
 
@@ -406,9 +436,12 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
     ).fetchall()
     stats["by_site"] = [(row[0], row[1]) for row in rows]
 
-    # Enrichment stage
+    # Enrichment stage. H3: skip-site rows are settled by policy (the
+    # scraper refuses them) — they must not count as pending enrichment
+    # work the CLI runner will never do.
     stats["pending_detail"] = conn.execute(
-        "SELECT COUNT(*) FROM jobs WHERE detail_scraped_at IS NULL"
+        "SELECT COUNT(*) FROM jobs WHERE detail_scraped_at IS NULL "
+        f"AND {SKIP_DETAIL_CLAUSE}"
     ).fetchone()[0]
 
     stats["with_description"] = conn.execute(
@@ -461,7 +494,11 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
     stats["untailored_eligible"] = conn.execute(
         "SELECT COUNT(*) FROM jobs "
         "WHERE fit_score >= 7 AND full_description IS NOT NULL "
-        "AND tailored_resume_path IS NULL"
+        "AND tailored_resume_path IS NULL "
+        # M3a: the queue never tailors an attempts-exhausted row — the
+        # stat must not count one as pending tailoring.
+        "AND COALESCE(tailor_attempts, 0) < ?",
+        (config.DEFAULTS["max_tailor_attempts"],),
     ).fetchone()[0]
 
     stats["tailor_exhausted"] = conn.execute(
@@ -498,11 +535,16 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
         "AND COALESCE(apply_status, '') != 'captcha'"
     ).fetchone()[0]
 
+    # B9/M3b: readiness carries the queue's URL-validity and min-score
+    # guards — a literal 'None' URL is not ready, and a row rescored below
+    # the threshold is not pending apply.
     stats["ready_to_apply"] = conn.execute(
         "SELECT COUNT(*) FROM jobs "
         "WHERE tailored_resume_path IS NOT NULL "
         "AND applied_at IS NULL "
-        "AND application_url IS NOT NULL"
+        f"AND {APPLY_URL_VALID_SQL} "
+        "AND fit_score >= ?",
+        (config.DEFAULTS["min_score"],),
     ).fetchone()[0]
 
     return stats
@@ -544,11 +586,36 @@ def store_jobs(conn: sqlite3.Connection, jobs: list[dict],
     return new, existing
 
 
+# --- Shared vocabulary and queue predicates (one source of truth) -----------
+
+# The apply-status vocabulary's terminal set (agent_protocol's apply-result
+# records these with the attempts ban via the launcher's permanent
+# classification): once a row carries one of these statuses it is retired,
+# and reset_failed must never resurrect it. Canonical here — the lowest
+# module both the launcher and the agent protocol import — so the two
+# cannot drift.
+TERMINAL_APPLY_STATUSES = ("expired", "captcha", "login_issue")
+
+# Sites the detail scraper never scrapes (they block it). Canonical here so
+# the scraper's WHERE, the pending_detail stat, the streaming enrich count,
+# and the portal's stage filter agree (H3): a skip-site row with no scraped
+# description is settled by policy, never "pending work nobody will do".
+SKIP_DETAIL_SITES = {"glassdoor", "google", "Workopolis"}
+SKIP_DETAIL_CLAUSE = (
+    "site NOT IN (" + ", ".join(f"'{s}'" for s in sorted(SKIP_DETAIL_SITES)) + ")"
+)
+
+# A stored application_url counts as real only if it is an http(s) URL (B9):
+# the pre-_clean_cell writer could store the literal 'None' string, which is
+# truthy and passed `IS NOT NULL` while pointing the browser at nothing.
+APPLY_URL_VALID_SQL = "application_url LIKE 'http%'"
+
+
 # Stage -> WHERE condition, shared by get_jobs_by_stage and the portal's
 # filtered_jobs (spec PR D). "?" placeholders are min-score binds.
 STAGE_CONDITIONS: dict[str, str] = {
     "discovered": "1=1",
-    "pending_detail": "detail_scraped_at IS NULL",
+    "pending_detail": f"detail_scraped_at IS NULL AND {SKIP_DETAIL_CLAUSE}",
     "enriched": "full_description IS NOT NULL",
     "pending_score": "full_description IS NOT NULL AND fit_score IS NULL",
     "scored": "fit_score IS NOT NULL",
@@ -569,7 +636,9 @@ STAGE_CONDITIONS: dict[str, str] = {
     ),
     "pending_apply": (
         "tailored_resume_path IS NOT NULL AND applied_at IS NULL "
-        "AND application_url IS NOT NULL"
+        # B9/M3b: a literal-'None' URL is not ready, and a row rescored
+        # below the threshold is not pending apply — the queue's guards.
+        f"AND {APPLY_URL_VALID_SQL} AND fit_score >= ?"
     ),
     "applied": "applied_at IS NOT NULL",
 }
