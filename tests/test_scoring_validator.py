@@ -25,7 +25,7 @@ def _data(**overrides):
         "projects": [
             {"header": "Payments", "bullets": ["Built a ledger."]},
         ],
-        "education": [{"header": "State University"}],
+        "education": "State University, BSc.",  # a string (F3 type gate)
     }
     data.update(overrides)
     return data

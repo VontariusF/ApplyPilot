@@ -13,22 +13,21 @@ import json
 import logging
 import re
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 from applypilot.config import RESUME_PATH, TAILORED_DIR, history_enabled, load_profile
 from applypilot.database import (
     KIND_RESUME,
+    claim_document_version,
     get_connection,
     get_jobs_by_stage,
-    next_document_version,
-    record_document_version,
 )
 from applypilot.llm import get_client, is_infra_error
 from applypilot.scoring import docs
 from applypilot.scoring.validator import (
     BANNED_WORDS,
     FABRICATION_WATCHLIST,
+    assert_resume_data_shape,
     sanitize_text,
     validate_json_fields,
     validate_tailored_resume,
@@ -263,7 +262,14 @@ def assemble_resume_text(data: dict, profile: dict) -> str:
 
     Returns:
         Formatted resume text.
+
+    Raises:
+        ValueError: `data` is not the validated shape (audit F3 defense in
+            depth — validation and assembly must never disagree about what
+            a field is; a wrong-typed `skills` once rendered an empty
+            TECHNICAL SKILLS section with no warning).
     """
+    assert_resume_data_shape(data)
     personal = profile.get("personal", {})
     lines: list[str] = []
 
@@ -497,32 +503,45 @@ def persist_tailored(conn, job: dict, tailored_text: str, report: dict) -> dict:
     the host verb writes through the same files and UPDATE as the LLM
     loop, no parallel schema for host data).
 
-    Writes the tailored text, the job-description sidecar, and the
-    validation report; generates the PDF best-effort; records the version
-    row (spec D2) when history is on; updates the jobs pointer and the
-    attempt counter; commits. Returns the result dict the batch loop logs.
+    Claim-first (audit F2): the version row and the jobs pointer are
+    reserved inside one BEGIN IMMEDIATE transaction BEFORE any file is
+    written, so two concurrent writers cannot interleave file bytes
+    behind one version number — the loser of the race gets
+    DocumentClaimConflict and writes nothing. Writes the tailored text,
+    the job-description sidecar, and the validation report to the claimed
+    path; generates the PDF best-effort. Returns the result dict the
+    batch loop logs.
     """
     TAILORED_DIR.mkdir(parents=True, exist_ok=True)
     prefix = docs.output_prefix(job)
 
     # History on (D1/D2): every generation is a new version at a
-    # _v{N} stem; a pre-history legacy file is backfilled as version 1
-    # by next_document_version and never touched. History off: the
-    # exact pre-history overwrite behavior at the bare prefix.
+    # _v{N} stem reserved by the claim (the pre-history legacy file is
+    # backfilled as version 1 inside the claim transaction and never
+    # touched). History off: the exact pre-history overwrite behavior
+    # at the bare prefix.
     history_on = history_enabled()
-    if history_on:
-        version = next_document_version(
-            conn, job["url"], KIND_RESUME,
-            legacy_path=TAILORED_DIR / f"{prefix}.txt")
-        stem = docs.versioned_stem(prefix, version)
-    else:
-        stem = prefix
 
-    txt_path = TAILORED_DIR / f"{stem}.txt"
+    def _path_for(version: int) -> str:
+        stem = docs.versioned_stem(prefix, version) if history_on else prefix
+        return str(TAILORED_DIR / f"{stem}.txt")
+
+    claim = claim_document_version(
+        conn, job["url"], KIND_RESUME,
+        path_for=_path_for,
+        legacy_path=TAILORED_DIR / f"{prefix}.txt" if history_on else None,
+        validation_status=report["status"],
+        pointer_column="tailored_resume_path",
+        stamp_column="tailored_at",
+        attempts_column="tailor_attempts",
+        history_on=history_on,
+    )
+
+    txt_path = Path(claim.file_path)
     txt_path.write_text(tailored_text, encoding="utf-8")
 
     # Save job description for traceability
-    job_path = TAILORED_DIR / f"{stem}_JOB.txt"
+    job_path = txt_path.with_name(txt_path.stem + "_JOB.txt")
     job_desc = (
         f"Title: {job['title']}\n"
         f"Company: {job['site']}\n"
@@ -534,7 +553,7 @@ def persist_tailored(conn, job: dict, tailored_text: str, report: dict) -> dict:
     job_path.write_text(job_desc, encoding="utf-8")
 
     # Save validation report
-    report_path = TAILORED_DIR / f"{stem}_REPORT.json"
+    report_path = txt_path.with_name(txt_path.stem + "_REPORT.json")
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
     # Generate PDF for approved resumes (best-effort)
@@ -547,22 +566,6 @@ def persist_tailored(conn, job: dict, tailored_text: str, report: dict) -> dict:
         except Exception:
             log.debug("PDF generation failed for %s", txt_path, exc_info=True)
 
-    # Record the version row (spec D2): file path + validation outcome
-    # for every written document, approved or not.
-    version_id = None
-    if history_on:
-        version_id = record_document_version(
-            conn, job["url"], KIND_RESUME, version, str(txt_path),
-            validation_status=report["status"],
-        )
-
-    conn.execute(
-        "UPDATE jobs SET tailored_resume_path=?, tailored_at=?, "
-        "tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
-        (str(txt_path), datetime.now(timezone.utc).isoformat(), job["url"]),
-    )
-    conn.commit()
-
     return {
         "url": job["url"],
         "path": str(txt_path),
@@ -571,7 +574,7 @@ def persist_tailored(conn, job: dict, tailored_text: str, report: dict) -> dict:
         "site": job["site"],
         "status": report["status"],
         "attempts": report["attempts"],
-        "version_id": version_id,
+        "version_id": claim.version_id,
     }
 
 

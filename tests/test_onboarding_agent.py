@@ -265,9 +265,14 @@ def test_state_file_is_0600(app_dir, fake_llm):
     assert mode == 0o600
 
 
-def test_unreadable_state_starts_fresh(app_dir):
+def test_unreadable_state_is_an_error_not_a_fresh_store(app_dir):
+    """Audit F1: a corrupt state file used to masquerade as a fresh
+    store — `agent next` answered 'gate' with exit 0 and a following
+    `start` silently destroyed the interview. load_state now raises; a
+    missing file is still the only fresh-store signal."""
     config.ONBOARDING_STATE_PATH.write_text("not json{")
-    assert onboarding.load_state() is None
+    with pytest.raises(onboarding.OnboardingError, match="corrupt"):
+        onboarding.load_state()
 
 
 # ---------------------------------------------------------------------------

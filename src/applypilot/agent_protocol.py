@@ -33,12 +33,15 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, NoReturn, Optional
 
 import typer
+from typer._click.exceptions import NoArgsIsHelpError  # typer 0.28 vendors click here; no public re-export
+from typer.core import TyperGroup  # built on the vendored click
 
 from applypilot import config, onboarding
-from applypilot.database import TERMINAL_APPLY_STATUSES
+from applypilot.database import DocumentClaimConflict, TERMINAL_APPLY_STATUSES
+from applypilot.scoring.validator import COVER_WORD_HARD_CAP, COVER_WORD_TARGET
 
 agent_app = typer.Typer(
     name="agent",
@@ -81,6 +84,60 @@ def _fail(code: str, message: str, details: dict | None = None) -> None:
     raise typer.Exit(code=1)
 
 
+class _ProtocolUsageGroup(TyperGroup):
+    """Keep click/typer usage errors inside the JSON wire contract (audit F9).
+
+    Usage errors — unknown option, missing option value, unknown command —
+    are raised by the argument parser before any verb body runs, so _verb
+    never sees them: they used to render Rich-boxed usage prose with
+    nothing on stdout, the one wire-contract violation reachable through
+    pure user error. Converting here fixes every verb at once.
+
+    Typer 0.28 vendors its click under typer._click, and TyperGroup is
+    built on it; the exception types have no public re-export, so the
+    single private-module import is the NoArgsIsHelpError pass-through and
+    everything else is caught as the public typer.exceptions.TyperException
+    base (MissingParameter, NoSuchOption, UsageError all subclass it).
+
+    A nested sub-app never runs its own main() — the parent group's main
+    owns the process — so the conversion sits on make_context (group-level
+    parsing) and invoke (leaf parsing + command resolution), and exits via
+    SystemExit rather than typer.Exit: nothing above this layer converts a
+    typer.Exit raised outside a verb body.
+
+    Bare invocation keeps click's no_args_is_help help page (exit 2): a
+    documented affordance for the human running `applypilot agent`, not a
+    host path — the protocol's host always passes a verb.
+    """
+
+    def make_context(self, info_name, args, parent=None, **extra):
+        try:
+            return super().make_context(info_name, args, parent=parent, **extra)
+        except NoArgsIsHelpError:
+            raise
+        except typer.exceptions.TyperException as exc:
+            _usage_fail(exc.format_message())
+
+    def invoke(self, ctx):
+        try:
+            return super().invoke(ctx)
+        except NoArgsIsHelpError:
+            raise
+        except typer.exceptions.TyperException as exc:
+            _usage_fail(exc.format_message())
+
+
+def _usage_fail(message: str) -> NoReturn:
+    """Emit the invalid_usage envelope and exit 1 (audit F9).
+
+    Runs outside any verb body — the parser raised before the callback —
+    so this emits directly and raises SystemExit; _fail's typer.Exit has
+    no handler above a nested group.
+    """
+    _emit({"error": {"code": "invalid_usage", "message": message, "details": None}})
+    raise SystemExit(1)
+
+
 # Service-layer messages are stable user-facing strings (the portal chat
 # shows the same text), so each maps to a protocol code the host agent can
 # branch on. First match wins; anything unmatched stays onboarding_error.
@@ -105,6 +162,10 @@ _ERROR_CODE_RULES: tuple[tuple[str, str], ...] = (
     ("no resume content", "empty_resume"),
     ("nothing from your resume", "nothing_to_clear"),
     ("empty message", "empty_message"),
+    # Corrupt persisted interview state (audit F1): the file exists but
+    # cannot be trusted — never silently treated as a fresh store.
+    # Retrying the same verb cannot help; `agent redo` clears it.
+    ("onboarding state file is corrupt", "state_corrupt"),
 )
 
 
@@ -129,6 +190,10 @@ def _verb(body: Callable[[], dict]) -> None:
         raise
     except onboarding.OnboardingError as exc:
         _fail(_classify(str(exc)), str(exc))
+    except DocumentClaimConflict as exc:
+        # A lost document-claim race (audit F2) is retryable by design —
+        # before the RuntimeError clause would file it under backend_error.
+        _fail("conflict", str(exc), {"retryable": True})
     except RuntimeError as exc:
         _fail("backend_error", f"{type(exc).__name__}: {exc}",
               {"exception_type": type(exc).__name__})
@@ -405,9 +470,53 @@ def answer_cmd(
         question_id, value=choice or "", free_text=free_text or "", skip=skip)))
 
 
+_RESUME_MAX_BYTES = 5 * 1024 * 1024  # the upload cap (audit F10): nothing
+# downstream reads the file before this check, and a multi-GB --file used
+# to be read fully into memory before any validation at all.
+
+# Magic bytes of binary formats a text resume can never be (audit F10):
+# zip containers (docx/odt/rtf-zip), images, gzip, native executables.
+# The probe set mirrors common document/executable formats; any NUL byte
+# in the head is disqualifying on its own — no text resume contains one.
+_BINARY_HEAD_MAGICS: tuple[bytes, ...] = (
+    b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08",
+    b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a",
+    b"\x1f\x8b", b"\x7fELF", b"MZ",
+)
+
+
+def _resume_head_is_binary(head: bytes) -> bool:
+    """True when the first bytes mark a binary format (audit F10). Pure."""
+    if b"\x00" in head:
+        return True
+    return any(head.startswith(magic) for magic in _BINARY_HEAD_MAGICS)
+
+
 def _resume_upload(path: Path) -> onboarding.InterviewState:
-    if path.suffix.lower() == ".pdf":
+    """Queue a resume upload with a type sniff and a size cap (audit F10).
+
+    A file of ZIP bytes named fake.docx used to be read as text
+    (errors="replace") and stored as THE resume — mangled byte-soup every
+    downstream stage consumed, exit 0. Non-text/non-PDF is now a typed
+    invalid_resume refusal, the size is capped before anything is read,
+    and the PDF path keeps its existing honest extraction fallback
+    (add_resume says so when the PDF yields no text).
+    """
+    size = path.stat().st_size
+    if size > _RESUME_MAX_BYTES:
+        _fail("invalid_resume",
+              f"resume file is {size:,} bytes — the cap is "
+              f"{_RESUME_MAX_BYTES // (1024 * 1024)} MB; export a smaller file",
+              {"path": str(path), "size": size})
+    with path.open("rb") as f:
+        head = f.read(512)
+    if path.suffix.lower() == ".pdf" or head.startswith(b"%PDF"):
         return onboarding.add_resume(pdf_bytes=path.read_bytes(), filename=path.name)
+    if _resume_head_is_binary(head):
+        _fail("invalid_resume",
+              f"{path.name} is not a text resume or PDF (binary content) — "
+              "upload the .txt export or a PDF",
+              {"path": str(path)})
     return onboarding.add_resume(text=path.read_text(encoding="utf-8", errors="replace"),
                                  filename=path.name)
 
@@ -525,11 +634,13 @@ _ENRICH_INSTRUCTIONS = (
 )
 
 _COVER_REQUIREMENTS = (
-    "3 short paragraphs, under 250 words. Start with 'Dear Hiring "
-    "Manager,' and end with the sign-off name. No em or en dashes "
-    "(auto-fixed on receipt). No meta-commentary. Validation runs in "
-    "lenient mode: banned filler words are ignored, but LLM self-talk "
-    "and a missing 'Dear' opening are hard errors."
+    f"3 short paragraphs, under {COVER_WORD_TARGET} words. Start with "
+    "'Dear Hiring Manager,' and end with the sign-off name. No em or en "
+    "dashes (auto-fixed on receipt). No meta-commentary. Validation runs "
+    "in lenient mode: banned filler words are ignored, but LLM self-talk, "
+    "a missing 'Dear' opening, and a length over "
+    f"{COVER_WORD_HARD_CAP} words (the hard cap — every validation mode "
+    "refuses longer letters and reports word_count) are hard errors."
 )
 
 
@@ -872,6 +983,16 @@ def _host_tailor(url: str, data_raw: str, reveal: bool) -> dict:
               "--data is not the tailored-resume JSON object — return to "
               "the data_template shape and retry",
               {"errors": ["No valid JSON found in --data"], "retryable": True})
+    if not isinstance(data, dict):
+        # F6: 'null'/scalars/arrays parse fine but are not the resume-data
+        # object — a typed refusal here replaces the internal_error a
+        # TypeError deeper in validation ("NoneType is not iterable",
+        # "sequence item 0: expected str instance") would raise.
+        _fail("invalid_resume_data",
+              f"--data must be the tailored-resume JSON object, got "
+              f"{type(data).__name__} — return to the data_template shape and retry",
+              {"errors": [f"Expected a JSON object, got {type(data).__name__}"],
+               "retryable": True})
 
     conn = get_connection()
     job = _load_job(conn, url)
@@ -956,6 +1077,9 @@ def _host_cover(url: str, text: str, reveal: bool) -> dict:
               {"errors": validation["errors"],
                "warnings": validation["warnings"],
                "avoid_notes": validation["errors"],
+               # Surfaced (audit F7) so a too-long refusal can show the
+               # driver exactly how far over the cap the letter is.
+               "word_count": validation["word_count"],
                "retryable": True})
 
     conn = get_connection()
@@ -1147,7 +1271,11 @@ def _validated_min_score(min_score_raw: str | None, default: int) -> int:
     if min_score_raw is None:
         return default
     raw = str(min_score_raw).strip()
-    if not raw.lstrip("-").isdigit():
+    # ^\d+$ — digits only (audit F5). The old lstrip("-") check admitted
+    # negative integers ("-5" → "5"), contradicting this function's own
+    # error message and silently disabling the queue's quality gate: the
+    # fit_score >= ? predicate would admit every scored job in the store.
+    if not re.fullmatch(r"\d+", raw):
         _fail("invalid_min_score",
               f"--min-score must be a non-negative integer, got {min_score_raw!r}",
               {"min_score": min_score_raw})

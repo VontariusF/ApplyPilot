@@ -3,6 +3,8 @@
 import os
 import platform
 import shutil
+import tempfile
+from contextlib import suppress
 from pathlib import Path
 
 from applypilot import engine_auth
@@ -143,6 +145,34 @@ def write_secret_text(path: Path, text: str) -> None:
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(text)
+    _tighten_file(path)
+
+
+def write_secret_text_atomic(path: Path, text: str) -> None:
+    """write_secret_text with no torn-read window (audit F1).
+
+    The in-place truncate-and-write of write_secret_text is invisible to a
+    concurrent reader except mid-write, when it sees a truncated or
+    half-written document — how a torn onboarding-state.json once reset a
+    live interview. This writes a sibling temp file, fsyncs it, then
+    os.replace()s it over the target: a reader sees the whole old file or
+    the whole new one, never a partial one. Same 0600 semantics
+    (mkstemp creates 0600; the replace carries it onto the target; the
+    explicit tighten still upgrades files a previous version left loose).
+    """
+    _ensure_secret_parent(path)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        with suppress(OSError):
+            os.unlink(tmp_name)
+        raise
     _tighten_file(path)
 
 

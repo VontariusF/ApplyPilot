@@ -8,8 +8,10 @@ without migration ordering issues.
 import logging
 import sqlite3
 import threading
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 
 from applypilot import config
 from applypilot.config import DB_PATH, history_enabled
@@ -703,6 +705,64 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+class DocumentClaimConflict(RuntimeError):
+    """A document write lost the claim race (audit F2).
+
+    The job's version slot was reserved by a concurrent writer between
+    this caller's read and its claim, or the store's write lock was busy
+    past the busy_timeout. Typed and retryable: the protocol renders it
+    as a conflict envelope, never an internal_error — the losing writer
+    of a parallel tailor/cover race must be able to branch on it.
+    """
+
+
+@dataclass
+class DocumentClaim:
+    """A reserved version slot (audit F2): the row is inserted and the
+    job pointer flipped inside one immediate transaction BEFORE any file
+    is written, so concurrent writers can no longer interleave file
+    bytes behind one version number. version/version_id are None when
+    document history is off (spec D1) — the claim still owns the pointer.
+    """
+
+    version: int | None
+    version_id: int | None
+    file_path: str
+
+
+def _backfill_legacy_version(conn: sqlite3.Connection, job_url: str, kind: str,
+                             legacy_path: str | Path | None) -> bool:
+    """Insert the legacy backfill row for a pre-history document, if any.
+
+    No commit — callers own the transaction (spec D2): a job whose
+    document predates history has its file at the deterministic legacy
+    path; the first versioned write backfills that file as version 1
+    (status 'legacy') and the legacy file itself is never touched.
+    """
+    if legacy_path and Path(legacy_path).exists():
+        conn.execute(
+            "INSERT INTO document_versions "
+            "(job_url, kind, version, file_path, validation_status, created_at) "
+            "VALUES (?, ?, 1, ?, 'legacy', ?)",
+            (job_url, kind, str(legacy_path), _utc_now()),
+        )
+        return True
+    return False
+
+
+def _next_version_core(conn: sqlite3.Connection, job_url: str, kind: str,
+                       legacy_path: str | Path | None = None) -> int:
+    """next_document_version without a commit — callers own the transaction."""
+    row = conn.execute(
+        "SELECT MAX(version) FROM document_versions WHERE job_url = ? AND kind = ?",
+        (job_url, kind),
+    ).fetchone()
+    max_version = row[0] if row else None
+    if max_version is None and _backfill_legacy_version(conn, job_url, kind, legacy_path):
+        return 2
+    return (max_version or 0) + 1
+
+
 def next_document_version(conn: sqlite3.Connection, job_url: str, kind: str,
                           legacy_path: str | Path | None = None) -> int:
     """Return the next version number for a job's document kind.
@@ -714,22 +774,14 @@ def next_document_version(conn: sqlite3.Connection, job_url: str, kind: str,
     jobs pointer before the tailor stage runs, so the legacy file on disk is
     the durable signal, not the pointer. A job with no prior document starts
     at version 1.
+
+    Committing: use claim_document_version for the write paths — a version
+    number taken outside the claim's immediate transaction is a TOCTOU race
+    (audit F2).
     """
-    row = conn.execute(
-        "SELECT MAX(version) FROM document_versions WHERE job_url = ? AND kind = ?",
-        (job_url, kind),
-    ).fetchone()
-    max_version = row[0] if row else None
-    if max_version is None and legacy_path and Path(legacy_path).exists():
-        conn.execute(
-            "INSERT INTO document_versions "
-            "(job_url, kind, version, file_path, validation_status, created_at) "
-            "VALUES (?, ?, 1, ?, 'legacy', ?)",
-            (job_url, kind, str(legacy_path), _utc_now()),
-        )
-        conn.commit()
-        return 2
-    return (max_version or 0) + 1
+    version = _next_version_core(conn, job_url, kind, legacy_path)
+    conn.commit()
+    return version
 
 
 def record_document_version(conn: sqlite3.Connection, job_url: str, kind: str,
@@ -754,6 +806,91 @@ def record_document_version(conn: sqlite3.Connection, job_url: str, kind: str,
     )
     conn.commit()
     return int(cur.lastrowid)
+
+
+def claim_document_version(
+    conn: sqlite3.Connection,
+    job_url: str,
+    kind: str,
+    *,
+    path_for: Callable[[int], str],
+    legacy_path: str | Path | None,
+    validation_status: str | None,
+    pointer_column: str,
+    stamp_column: str,
+    attempts_column: str,
+    history_on: bool,
+) -> DocumentClaim:
+    """Reserve a document's version slot and flip the job pointer atomically.
+
+    The write-path counterpart of acquire_job's BEGIN IMMEDIATE discipline
+    (audit F2): parallel tailor/cover processes on the same job once raced
+    through MAX(version)+1 and a post-hoc pointer check, doubled the version
+    INSERT into an IntegrityError, and let the loser's file writes (which
+    preceded the INSERT) clobber the winner's bytes on disk. Here one
+    BEGIN IMMEDIATE transaction re-checks the pointer, allocates the
+    version, inserts the version row, and updates the pointer — and the
+    caller writes files only after the claim commits, to the path the
+    claim returned. The transaction is the claim: a concurrent second
+    writer sees the first's pointer flip and gets DocumentClaimConflict
+    instead of an IntegrityError.
+
+    Column names come from the two persist paths' literals, never from
+    input. The caller's connection must have no open implicit transaction
+    with uncommitted work it expects to survive independently — any is
+    committed at entry to start the claim from a clean boundary (both
+    call sites persist only after their generation loop closed).
+    """
+    # Commit first: in legacy isolation mode even a read-only statement
+    # sequence can leave an implicit transaction open, and starting
+    # BEGIN IMMEDIATE under one raises "cannot start a transaction within
+    # a transaction" (the pattern _repair_bad_application_urls documents).
+    conn.commit()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+    except sqlite3.OperationalError as exc:
+        raise DocumentClaimConflict(
+            f"{kind} claim for {job_url} lost the store's write lock — "
+            "retry once the concurrent writer finishes") from exc
+    try:
+        pointer = conn.execute(
+            f"SELECT {pointer_column} FROM jobs WHERE url = ?", (job_url,)
+        ).fetchone()
+        if pointer is None:
+            conn.rollback()
+            raise ValueError(f"claim_document_version: no job row at {job_url}")
+        if pointer[0]:
+            conn.rollback()
+            raise DocumentClaimConflict(
+                f"{kind} slot for {job_url} was just claimed by a concurrent "
+                f"writer ({pointer[0]}) — drain the queue again for the next job")
+        if history_on:
+            version = _next_version_core(conn, job_url, kind, legacy_path)
+            file_path = path_for(version)
+            cur = conn.execute(
+                "INSERT INTO document_versions "
+                "(job_url, kind, version, file_path, validation_status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (job_url, kind, version, file_path, validation_status, _utc_now()),
+            )
+            claim = DocumentClaim(version=version, version_id=int(cur.lastrowid),
+                                  file_path=file_path)
+        else:
+            # History off (spec D1): no version row; the claim still owns
+            # the pointer. path_for is called with 0 and should return the
+            # unversioned path.
+            file_path = path_for(0)
+            claim = DocumentClaim(version=None, version_id=None, file_path=file_path)
+        conn.execute(
+            f"UPDATE jobs SET {pointer_column}=?, {stamp_column}=?, "
+            f"{attempts_column}=COALESCE({attempts_column},0)+1 WHERE url=?",
+            (file_path, _utc_now(), job_url),
+        )
+        conn.commit()
+        return claim
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def get_document_versions(conn: sqlite3.Connection | None = None,
