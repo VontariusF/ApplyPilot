@@ -283,8 +283,11 @@ def test_min_score_filters_the_queue(seeded_apply_store):
     assert payload_of(result)["next_eligible"] is None
 
 
-def test_invalid_min_score_is_a_typed_refusal(seeded_apply_store):
-    result = run("apply-acquire", "--min-score", "banana")
+@pytest.mark.parametrize("bad", ["banana", "-5", "--5"])
+def test_invalid_min_score_is_a_typed_refusal(seeded_apply_store, bad):
+    # "-5"/"--5" are audit F5: the old lstrip("-") digit check admitted
+    # them, and a negative threshold disabled the queue's quality gate.
+    result = run("apply-acquire", "--min-score", bad)
     assert result.exit_code != 0
     envelope = payload_of(result)
     assert envelope["error"]["code"] == "invalid_min_score"

@@ -110,6 +110,79 @@ def sanitize_text(text: str) -> str:
 
 # ── JSON Field Validation ─────────────────────────────────────────────────
 
+def _entry_list_type_errors(key: str, entries: object) -> list[str]:
+    """Type-check one resume section's entries (audit F3).
+
+    The assembler-renderable shape: a list of objects whose `header` is a
+    required string and whose `subtitle`/`bullets`, when present, are a
+    string and a list of strings. Missing `subtitle` renders as absent;
+    a wrong-typed one renders as a broken line, and a non-list `bullets`
+    poisons every consumer that iterates it — both are refused.
+    """
+    if not isinstance(entries, list):
+        return [f"Invalid type for field '{key}': expected a list, "
+                f"got {type(entries).__name__}"]
+    errors: list[str] = []
+    for i, entry in enumerate(entries):
+        label = f"{key}[{i}]"
+        if not isinstance(entry, dict):
+            errors.append(f"Invalid type for field '{label}': expected an object, "
+                          f"got {type(entry).__name__}")
+            continue
+        if "header" not in entry or not isinstance(entry["header"], str):
+            errors.append(f"Invalid type for field '{label}.header': "
+                          "a string header is required")
+        if "subtitle" in entry and not isinstance(entry["subtitle"], str):
+            errors.append(f"Invalid type for field '{label}.subtitle': "
+                          f"expected a string, got {type(entry['subtitle']).__name__}")
+        if "bullets" in entry:
+            bullets = entry["bullets"]
+            if not isinstance(bullets, list) or not all(isinstance(b, str) for b in bullets):
+                errors.append(f"Invalid type for field '{label}.bullets': "
+                              "expected a list of strings")
+    return errors
+
+
+def _field_type_errors(data: dict) -> list[str]:
+    """Type-check the required resume fields (audit F3): strings for
+    title/summary/education, skills as an object of string to string, and
+    experience/projects via _entry_list_type_errors — the TAILOR_DATA_TEMPLATE
+    shape the assembler renders. Named and exported from validate_json_fields
+    so a type violation is an invalid_resume_data error naming the field
+    instead of a silent skip of the security checks downstream.
+    """
+    errors: list[str] = []
+    for key in ("title", "summary", "education"):
+        if not isinstance(data[key], str):
+            errors.append(f"Invalid type for field '{key}': expected a string, "
+                          f"got {type(data[key]).__name__}")
+    skills = data["skills"]
+    if not isinstance(skills, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in skills.items()
+    ):
+        errors.append(f"Invalid type for field 'skills': expected an object of "
+                      f"string to string, got {type(skills).__name__}")
+    for key in ("experience", "projects"):
+        errors.extend(_entry_list_type_errors(key, data[key]))
+    return errors
+
+
+def assert_resume_data_shape(data: object) -> None:
+    """Defense-in-depth gate (audit F3): raise ValueError unless `data` is
+    the validated resume-data shape — a JSON object passing every field-type
+    gate. Lets the assembler refuse to render data that validation would
+    reject, so validation and assembly can never disagree about what a
+    field is.
+    """
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"resume data must be a JSON object, got {type(data).__name__}")
+    errors = _field_type_errors(data)
+    if errors:
+        raise ValueError(
+            "resume data does not match the validated shape: " + "; ".join(errors))
+
+
 def validate_json_fields(data: dict, profile: dict, mode: str = "normal") -> dict:
     """Validate individual JSON fields from an LLM-generated tailored resume.
 
@@ -143,6 +216,15 @@ def validate_json_fields(data: dict, profile: dict, mode: str = "normal") -> dic
             errors.append(f"Missing required field: {key}")
     if errors:
         return {"passed": False, "errors": errors, "warnings": warnings}
+
+    # Field types — always checked regardless of mode (audit F3). These
+    # gates make the per-field isinstance guards below unconditional: a
+    # wrong-typed `skills` or `experience` used to silently skip the
+    # fabrication and preserved-company checks — the exact failure the
+    # "always enforced" comment promised could not happen.
+    type_errors = _field_type_errors(data)
+    if type_errors:
+        return {"passed": False, "errors": errors + type_errors, "warnings": warnings}
 
     # Collect all text for bulk checks
     all_text_parts: list[str] = [data["summary"]]
@@ -324,6 +406,12 @@ def validate_tailored_resume(text: str, profile: dict, original_text: str = "") 
 
 # ── Cover Letter Validation ──────────────────────────────────────────────
 
+# Cover letter word budget (audit F7): the documented target, and the hard
+# cap lenient mode now enforces (2x the target) — every validation mode.
+COVER_WORD_TARGET = 250
+COVER_WORD_HARD_CAP = 2 * COVER_WORD_TARGET
+
+
 def validate_cover_letter(text: str, mode: str = "normal") -> dict:
     """Programmatic validation of a cover letter.
 
@@ -332,10 +420,10 @@ def validate_cover_letter(text: str, mode: str = "normal") -> dict:
         mode: Validation strictness — "strict", "normal", or "lenient".
               strict  → banned words are errors (trigger retries); word limit enforced
               normal  → banned words are warnings; word limit is soft (+25 words)
-              lenient → banned words ignored; word count not checked
+              lenient → banned words ignored; only the hard word cap is enforced
 
     Returns:
-        {"passed": bool, "errors": list[str], "warnings": list[str]}
+        {"passed": bool, "errors": list[str], "warnings": list[str], "word_count": int}
     """
     errors: list[str] = []
     warnings: list[str] = []
@@ -357,11 +445,18 @@ def validate_cover_letter(text: str, mode: str = "normal") -> dict:
 
     # 3. Word count
     words = len(text.split())
-    if mode == "strict" and words > 250:
-        errors.append(f"Too long ({words} words). Max 250.")
-    elif mode == "normal" and words > 275:
-        warnings.append(f"Long ({words} words). Target 250.")
-    # lenient: no word count check
+    if words > COVER_WORD_HARD_CAP:
+        # Hard cap in EVERY mode (audit F7): lenient once checked no length
+        # at all, so a 363-word letter persisted against the documented
+        # 250-word target — and nothing bounded the file that reaches PDF
+        # conversion. A generous cap (2x the target) still bounds the file.
+        errors.append(
+            f"Too long ({words} words). Hard cap {COVER_WORD_HARD_CAP} words "
+            f"(2x the {COVER_WORD_TARGET}-word target) applies in every validation mode.")
+    elif mode == "strict" and words > COVER_WORD_TARGET:
+        errors.append(f"Too long ({words} words). Max {COVER_WORD_TARGET}.")
+    elif mode == "normal" and words > COVER_WORD_TARGET + 25:
+        warnings.append(f"Long ({words} words). Target {COVER_WORD_TARGET}.")
 
     # 4. LLM self-talk — always an error regardless of mode
     found_leaks = [p for p in LLM_LEAK_PHRASES if p in text_lower]
@@ -373,4 +468,7 @@ def validate_cover_letter(text: str, mode: str = "normal") -> dict:
     if not stripped.lower().startswith("dear"):
         errors.append("Must start with 'Dear Hiring Manager,'")
 
-    return {"passed": len(errors) == 0, "errors": errors, "warnings": warnings}
+    # word_count is surfaced (audit F7) so a refusal can tell the driver
+    # exactly how far over the letter is.
+    return {"passed": len(errors) == 0, "errors": errors, "warnings": warnings,
+            "word_count": words}

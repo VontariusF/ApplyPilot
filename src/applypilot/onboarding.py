@@ -45,6 +45,7 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
@@ -52,6 +53,11 @@ from datetime import datetime, timezone
 import yaml
 
 from applypilot import config, engine_auth
+
+try:
+    import fcntl  # POSIX: cross-process interview-turn lock (audit F1)
+except ImportError:  # Windows: no flock — the in-process lock still guards
+    fcntl = None
 
 log = logging.getLogger(__name__)
 
@@ -104,20 +110,72 @@ _STATE_BUSY_MESSAGE = (
     "an interview turn is already running on another surface — "
     "wait for it to finish and try again")
 
+# Sibling of onboarding-state.json (see _state_lock_path) — resolved at
+# call time so APPLYPILOT_DIR picked up after import still applies.
+
+def _state_lock_path():
+    """Path of the cross-process turn lock (audit F1).
+
+    A sibling of onboarding-state.json, not the file itself: the state
+    file is replaced atomically on every save (write_secret_text_atomic),
+    which would silently orphan a flock taken on the old inode and
+    re-expose the lost-update race. Derived from the state path at call
+    time so APPLYPILOT_DIR set after import still applies.
+    """
+    return config.ONBOARDING_STATE_PATH.parent / "onboarding-state.lock"
+
+
+@contextmanager
+def _cross_process_state_lock():
+    """flock a sibling lock file for one interview turn (audit F1).
+
+    threading.Lock cannot exclude a second `applypilot agent` process —
+    every verb invocation is its own process — so the spec's single-session
+    promise (first turn wins, second gets busy) needs a lock the kernel
+    arbitrates. flock on a sibling file is the cheapest correct option for
+    a single-user, local-disk store. On platforms without fcntl (Windows)
+    the in-process lock still guards the portal's threads.
+    """
+    if fcntl is None:
+        yield
+        return
+    fd = os.open(str(_state_lock_path()), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        deadline = time.monotonic() + STATE_TURN_TIMEOUT
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise OnboardingError(_STATE_BUSY_MESSAGE) from None
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
 
 @contextmanager
 def _state_turn():
-    """Hold _STATE_LOCK for one state-mutating turn, refusing when busy.
+    """Hold the interview lock for one state-mutating turn, refusing when busy.
 
-    Same mutual exclusion as the bare lock; the acquire carries a grace
-    timeout so contention between the two front doors resolves as the
-    busy error the portal already renders (every OnboardingError catch
-    site) instead of blocking a request thread for a whole agent turn.
+    Mutual exclusion runs on two levels (audit F1): the in-process
+    threading.Lock serializes the portal's request threads with a grace
+    timeout so contention between the two front doors resolves as the busy
+    error the portal already renders (every OnboardingError catch site)
+    instead of blocking a request thread for a whole agent turn; the
+    cross-process flock beneath it extends the same first-wins/second-busy
+    promise to concurrent `applypilot agent` processes, which share no
+    memory.
     """
     if not _STATE_LOCK.acquire(timeout=STATE_TURN_TIMEOUT):
         raise OnboardingError(_STATE_BUSY_MESSAGE)
     try:
-        yield
+        with _cross_process_state_lock():
+            yield
     finally:
         _STATE_LOCK.release()
 
@@ -167,24 +225,53 @@ class InterviewState:
 
 
 def load_state() -> InterviewState | None:
-    """Load persisted interview state; None for a fresh (never-started) one."""
+    """Load persisted interview state; None for a fresh (never-started) one.
+
+    An UNPARSEABLE state file is not a fresh store (audit F1): it once
+    returned None, so the next `agent start` silently rewrote the file as
+    a new INTAKE — destroying a REVIEW-phase interview with exit 0 and no
+    error signal. A missing file stays None; anything present that cannot
+    be read (permissions, I/O error), parsed, or shaped as an interview
+    raises OnboardingError, which the protocol surfaces as a typed
+    state_corrupt envelope and the redo path may deliberately catch to
+    clear the dead state and restart.
+    """
     path = config.ONBOARDING_STATE_PATH
     if not path.exists():
         return None
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        log.warning("Onboarding state unreadable, starting fresh: %s", exc)
-        return None
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise OnboardingError(
+            "onboarding state file is corrupt: cannot read "
+            f"{config.ONBOARDING_STATE_PATH}: {exc}") from exc
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise OnboardingError(
+            f"onboarding state file is corrupt: {config.ONBOARDING_STATE_PATH} "
+            f"is not valid JSON ({exc}) — run `applypilot agent redo` to start "
+            "over, or restore the file from a backup") from exc
+    if not isinstance(data, dict):
+        raise OnboardingError(
+            f"onboarding state file is corrupt: {config.ONBOARDING_STATE_PATH} "
+            f"holds {type(data).__name__}, not a JSON object — run "
+            "`applypilot agent redo` to start over")
     known = {f for f in InterviewState.__dataclass_fields__}
-    return InterviewState(**{k: v for k, v in raw.items() if k in known})
+    return InterviewState(**{k: v for k, v in data.items() if k in known})
 
 
 def save_state(state: InterviewState) -> None:
-    """Persist state at 0600 (it carries resume text and preferences)."""
+    """Persist state at 0600 (it carries resume text and preferences).
+
+    Atomic via temp file + os.replace (audit F1): a concurrent reader —
+    the protocol or a second portal worker — must never observe a torn
+    state document between the truncate and the write of the legacy
+    in-place writer.
+    """
     state.seq += 1
     state.updated_at = datetime.now(timezone.utc).isoformat()
-    config.write_secret_text(
+    config.write_secret_text_atomic(
         config.ONBOARDING_STATE_PATH,
         json.dumps(asdict(state), indent=2, ensure_ascii=False),
     )
@@ -2289,12 +2376,27 @@ def redo_interview() -> InterviewState:
     # interview needs no backend, so start-over there is a pure local
     # reset that reopens on "host" — only a live host interview unlocks
     # this path (a fresh store keeps the portal's backend gate).
-    existing = load_state()
+    try:
+        existing = load_state()
+    except OnboardingError:
+        # A corrupt state file is precisely what redo is for (audit F1):
+        # load_state surfaces unparseable state as an error so `agent
+        # next` can never mistake it for a fresh store, but the reset
+        # path deliberately swallows that one error — it is about to
+        # discard the dead file and restart the interview.
+        existing = None
+        had_corrupt = True
+    else:
+        had_corrupt = False
     if existing is not None and existing.backend == "host":
         clear_state()
         return start_interview("host")
     ready = readiness()
     if not ready["can_start_any"]:
+        if had_corrupt:
+            # Discard the dead file even without a backend: redo on a
+            # corrupt store must always leave a recoverable fresh store.
+            clear_state()
         raise OnboardingError(
             "Start over needs an interview backend — sign in to Claude Code "
             "or add an AI provider on the Settings page first.")

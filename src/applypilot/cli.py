@@ -11,7 +11,7 @@ from rich.console import Console
 from rich.table import Table
 
 from applypilot import __version__
-from applypilot.agent_protocol import agent_app
+from applypilot.agent_protocol import _ProtocolUsageGroup, agent_app
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,11 +32,14 @@ VALID_STAGES = ("discover", "enrich", "score", "tailor", "cover", "pdf")
 
 # The `agent` sub-app: the JSON protocol any shell-capable coding agent
 # drives (spec art_A71wyYS4). A separate module keeps its pure-stdout
-# contract clear of the Rich helpers above.
+# contract clear of the Rich helpers above. _ProtocolUsageGroup converts
+# click/typer usage errors into the JSON envelope (audit F9) — a nested
+# sub-app never runs its own main(), so the group class is the hook point.
 app.add_typer(
     agent_app,
     name="agent",
     help="JSON onboarding protocol for host coding agents (any-agent chat mode).",
+    cls=_ProtocolUsageGroup,
 )
 
 

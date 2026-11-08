@@ -9,15 +9,14 @@ import json
 import logging
 import re
 import time
-from datetime import datetime, timezone
+from pathlib import Path
 
 from applypilot.config import COVER_LETTER_DIR, RESUME_PATH, history_enabled, load_profile
 from applypilot.database import (
     KIND_COVER_LETTER,
+    claim_document_version,
     get_connection,
     get_jobs_by_stage,
-    next_document_version,
-    record_document_version,
 )
 from applypilot.llm import get_client, is_infra_error
 from applypilot.scoring import docs
@@ -198,41 +197,46 @@ def persist_cover_letter(conn, job: dict, letter: str,
     persistence path for a validated letter (spec art_IMViYTMU: the host
     verb writes through the same files and UPDATE as the LLM loop).
 
-    Writes the letter file, re-validates what is actually persisted,
-    records the version row (spec D2) when history is on, generates the
-    PDF best-effort, updates the jobs pointer and the attempt counter,
-    and commits. Returns (result dict, final validation).
+    Claim-first (audit F2): the letter is validated (pure function), then
+    the version row and the jobs pointer are reserved inside one BEGIN
+    IMMEDIATE transaction BEFORE the file is written — the loser of a
+    concurrent-writer race gets DocumentClaimConflict and writes nothing.
+    Writes the letter file to the claimed path, generates the PDF
+    best-effort. Returns (result dict, final validation).
     """
     COVER_LETTER_DIR.mkdir(parents=True, exist_ok=True)
     prefix = docs.output_prefix(job)
-
-    # History on (D1/D2): every generation is a new version at a
-    # _v{N} stem; a pre-history legacy file is backfilled as version 1
-    # by next_document_version and never touched. History off: the
-    # exact pre-history overwrite behavior at the bare prefix.
-    history_on = history_enabled()
-    if history_on:
-        version = next_document_version(
-            conn, job["url"], KIND_COVER_LETTER,
-            legacy_path=COVER_LETTER_DIR / f"{prefix}_CL.txt")
-        cl_path = COVER_LETTER_DIR / f"{docs.versioned_stem(prefix, version)}_CL.txt"
-    else:
-        cl_path = COVER_LETTER_DIR / f"{prefix}_CL.txt"
-
-    cl_path.write_text(letter, encoding="utf-8")
 
     # Record the validation outcome of the letter actually returned —
     # it may be the last retry, which can have failed validation.
     final_validation = validate_cover_letter(letter, mode=validation_mode)
     validation_status = "approved" if final_validation["passed"] else "failed_validation"
 
-    # Record the version row (spec D2): file path + validation outcome.
-    version_id = None
-    if history_on:
-        version_id = record_document_version(
-            conn, job["url"], KIND_COVER_LETTER, version, str(cl_path),
-            validation_status=validation_status,
-        )
+    # History on (D1/D2): every generation is a new version at a
+    # _v{N} stem reserved by the claim (the pre-history legacy file is
+    # backfilled as version 1 inside the claim transaction and never
+    # touched). History off: the exact pre-history overwrite behavior
+    # at the bare prefix.
+    history_on = history_enabled()
+
+    def _path_for(version: int) -> str:
+        if history_on:
+            return str(COVER_LETTER_DIR / f"{docs.versioned_stem(prefix, version)}_CL.txt")
+        return str(COVER_LETTER_DIR / f"{prefix}_CL.txt")
+
+    claim = claim_document_version(
+        conn, job["url"], KIND_COVER_LETTER,
+        path_for=_path_for,
+        legacy_path=COVER_LETTER_DIR / f"{prefix}_CL.txt" if history_on else None,
+        validation_status=validation_status,
+        pointer_column="cover_letter_path",
+        stamp_column="cover_letter_at",
+        attempts_column="cover_attempts",
+        history_on=history_on,
+    )
+
+    cl_path = Path(claim.file_path)
+    cl_path.write_text(letter, encoding="utf-8")
 
     # Generate PDF (best-effort)
     pdf_path = None
@@ -242,13 +246,6 @@ def persist_cover_letter(conn, job: dict, letter: str,
     except Exception:
         log.debug("PDF generation failed for %s", cl_path, exc_info=True)
 
-    conn.execute(
-        "UPDATE jobs SET cover_letter_path=?, cover_letter_at=?, "
-        "cover_attempts=COALESCE(cover_attempts,0)+1 WHERE url=?",
-        (str(cl_path), datetime.now(timezone.utc).isoformat(), job["url"]),
-    )
-    conn.commit()
-
     result = {
         "url": job["url"],
         "path": str(cl_path),
@@ -256,7 +253,7 @@ def persist_cover_letter(conn, job: dict, letter: str,
         "title": job["title"],
         "site": job["site"],
         "status": validation_status,
-        "version_id": version_id,
+        "version_id": claim.version_id,
     }
     return result, final_validation
 
