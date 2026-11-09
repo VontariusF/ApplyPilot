@@ -631,6 +631,39 @@ def upsert_hiring_lead(conn: sqlite3.Connection,
     return cursor.rowcount == 1
 
 
+def hiring_leads_rows(conn: sqlite3.Connection | None = None,
+                      *,
+                      company_key: str | None = None,
+                      status: str | None = None) -> list[dict]:
+    """Stored leads, optionally filtered by company and status.
+
+    The read path the agent verbs (and the portal board) share, beside
+    the LEAD_* vocabulary above so no surface can drift from it. Status
+    is validated against LEAD_STATUSES — a caller bug, not silently
+    empty. Ordered oldest first: the queue a person works down.
+    """
+    if conn is None:
+        conn = get_connection()
+    if status is not None and status not in LEAD_STATUSES:
+        raise ValueError(
+            f"unknown lead status {status!r}; expected one of {LEAD_STATUSES}")
+    clauses, params = [], []
+    if company_key:
+        clauses.append("company_key = ?")
+        params.append(company_key)
+    if status:
+        clauses.append("last_status = ?")
+        params.append(status)
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    rows = conn.execute(
+        "SELECT profile_url, full_name, title, company_key, source, "
+        "evidence_url, last_status, discovered_at, decided_at "
+        f"FROM hiring_leads{where} ORDER BY discovered_at, profile_url",
+        params,
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
 # Complete column registry: column_name -> SQL type with optional default.
 # This is the single source of truth. Adding a column here is all that's needed
 # for it to appear in both new databases and migrated ones.
