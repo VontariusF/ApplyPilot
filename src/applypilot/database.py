@@ -1136,11 +1136,14 @@ def parse_score_history(raw: str | None) -> list[dict]:
 def mark_rerank(conn: sqlite3.Connection, urls: list[str], when: str) -> int:
     """Stamp `when` onto each URL's rerank_marked_at — the re-judgment set.
 
-    Only described rows are markable (an undescribed job cannot be
-    re-judged; it needs enrich first); callers get back how many rows
-    actually entered the set. Advisory only: no STAGE_CONDITIONS, plan
-    eligibility, or staged plan token reads this column — spec locked
-    decision, staleness never disturbs plan semantics.
+    Only described, non-dismissed rows are markable (an undescribed job
+    cannot be re-judged — it needs enrich first; a dismissed job is
+    board-level curation the user removed from the pipeline, so it never
+    re-enters the scoring loop through rerank — audit Finding 3);
+    callers get back how many rows actually entered the set. Advisory
+    only: no STAGE_CONDITIONS, plan eligibility, or staged plan token
+    reads this column — spec locked decision, staleness never disturbs
+    plan semantics.
 
     Callers commit.
     """
@@ -1149,7 +1152,8 @@ def mark_rerank(conn: sqlite3.Connection, urls: list[str], when: str) -> int:
     marks = ", ".join("?" for _ in urls)
     cursor = conn.execute(
         f"UPDATE jobs SET rerank_marked_at = ? "
-        f"WHERE url IN ({marks}) AND full_description IS NOT NULL",
+        f"WHERE url IN ({marks}) AND full_description IS NOT NULL "
+        f"AND dismissed_at IS NULL",
         (when, *urls),
     )
     return cursor.rowcount

@@ -856,6 +856,7 @@ def _host_score(url: str, score_raw: str, keywords: str | None,
     from applypilot.scoring.scorer import (
         PrevScoreMismatch,
         persist_score,
+        read_resume_text,
         resume_sha256,
     )
 
@@ -864,11 +865,14 @@ def _host_score(url: str, score_raw: str, keywords: str | None,
     # Resume binding (spec Layer 1): stamp the sha256 of the current
     # resume.txt so the rerank flow can tell which scores went stale. A
     # missing resume leaves the score unbound (NULL) — the same
-    # treated-as-stale class as pre-binding rows.
-    try:
-        resume_hash = resume_sha256(config.RESUME_PATH.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        resume_hash = None
+    # treated-as-stale class as pre-binding rows. Read through the
+    # canonical reader (scorer.read_resume_text) so this hash can never
+    # diverge from the one `jobs filter` compares against (audit
+    # Finding 5): same strictness, same text, same hash.
+    resume_hash = None
+    resume_text = read_resume_text(config.RESUME_PATH)
+    if resume_text is not None:
+        resume_hash = resume_sha256(resume_text)
 
     conn = get_connection()
     row = conn.execute(
