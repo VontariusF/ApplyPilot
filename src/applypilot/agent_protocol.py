@@ -836,9 +836,18 @@ def _host_score(url: str, score_raw: str, keywords: str | None,
     envelopes only.
     """
     from applypilot.database import get_connection, get_jobs_by_stage
-    from applypilot.scoring.scorer import persist_score
+    from applypilot.scoring.scorer import persist_score, resume_sha256
 
     score = _validated_host_score(score_raw, reasoning)
+
+    # Resume binding (spec Layer 1): stamp the sha256 of the current
+    # resume.txt so the rerank flow can tell which scores went stale. A
+    # missing resume leaves the score unbound (NULL) — the same
+    # treated-as-stale class as pre-binding rows.
+    try:
+        resume_hash = resume_sha256(config.RESUME_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        resume_hash = None
 
     conn = get_connection()
     row = conn.execute(
@@ -860,6 +869,7 @@ def _host_score(url: str, score_raw: str, keywords: str | None,
         reasoning=(reasoning or "").strip(),
         scored_by="host",
         when=datetime.now(timezone.utc).isoformat(),
+        resume_hash=resume_hash,
     )
     conn.commit()
 

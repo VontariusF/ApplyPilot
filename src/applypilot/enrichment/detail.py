@@ -31,6 +31,7 @@ from applypilot.database import (
     ensure_columns,
 )
 from applypilot.enrichment.remote import infer_remote
+from applypilot.enrichment.seniority import classify_seniority
 from applypilot.llm import get_client
 
 log = logging.getLogger(__name__)
@@ -682,12 +683,14 @@ def persist_description(conn: sqlite3.Connection, url: str,
         "detail_scraped_at = ?, "
         "detail_error = CASE WHEN ? IS NULL "
         "THEN COALESCE(detail_error, 'no description extracted') ELSE NULL END, "
-        "is_remote = ? "
+        "is_remote = ?, "
+        "seniority = COALESCE(seniority, ?) "
         "WHERE url = ?",
         (full_description, normalized_url,
          datetime.now(timezone.utc).isoformat(),
          full_description,
          1 if infer_remote(title or "", full_description) else 0,
+         classify_seniority(title, full_description),
          url),
     )
     conn.commit()
