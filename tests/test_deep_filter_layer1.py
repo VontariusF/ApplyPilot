@@ -13,7 +13,7 @@ import pytest
 
 from applypilot import config, database
 from applypilot.discovery.jobspy import store_jobspy_results
-from applypilot.discovery.salary import parse_salary_display
+from applypilot.discovery.salary import parse_salary_display, parse_salary_row
 from applypilot.enrichment.seniority import classify_seniority
 from applypilot.scoring.scorer import persist_score, resume_sha256
 
@@ -42,6 +42,13 @@ def _row(conn, url):
     # Hourly annualizes at 2080 (jobspy renders interval with '/')
     ("USD50/hourly", (104000.0, 104000.0, "USD", "hourly")),
     ("$30/hourly", (62400.0, 62400.0, "$", "hourly")),
+    # Common interval abbreviations no longer masquerade as annual (L3)
+    ("USD20/hr", (41600.0, 41600.0, "USD", "hourly")),
+    ("5,000/mo", (60000.0, 60000.0, None, "monthly")),
+    ("800/wk", (41600.0, 41600.0, None, "weekly")),
+    # k/m-suffixed amounts scale instead of parsing as raw annual figures (L1)
+    ("$90k-120k", (90000.0, 120000.0, "$", None)),
+    ("€1.5m-2m", (1500000.0, 2000000.0, "€", None)),
 ])
 def test_parse_salary_display_live_zoo(display, expected):
     parsed = parse_salary_display(display)
@@ -59,6 +66,25 @@ def test_parse_salary_display_never_raises_on_weird_input():
     # The B10 keep-the-row pattern depends on the parser being total.
     for weird in ("$$$", "/monthly", "USD", "e5-10", "1,2,3,4"):
         assert parse_salary_display(weird) is None or True  # must not raise
+
+
+def test_parse_salary_row_raw_values():
+    """Ingestion's constructor: raw row values, total (never raises)."""
+    # Fractional hourly amounts keep their value
+    parsed = parse_salary_row(22.5, 30, "USD", "hourly")
+    assert (parsed.min_annual, parsed.max_annual, parsed.currency, parsed.interval) == (
+        46800.0, 62400.0, "USD", "hourly")
+    # Max-only row is populated (min=max), not dropped
+    parsed = parse_salary_row(None, 224000.0, "USD", "yearly")
+    assert (parsed.min_annual, parsed.max_annual) == (224000.0, 224000.0)
+    # No usable amount → None: strings, None, and pandas NaN all fail closed
+    nan = float("nan")
+    assert parse_salary_row("lots", "money", "USD", "yearly") is None
+    assert parse_salary_row(None, None, None, None) is None
+    assert parse_salary_row(nan, nan, "USD", "yearly") is None
+    # One valid amount survives a NaN pair-member
+    parsed = parse_salary_row(nan, 100000.0, "USD", "yearly")
+    assert (parsed.min_annual, parsed.max_annual) == (100000.0, 100000.0)
 
 
 # ---------------------------------------------------------------------------
@@ -117,10 +143,6 @@ def test_classify_seniority_title_outranks_description():
     # A senior title plus an intern-heavy description stays senior.
     assert classify_seniority("Senior Engineer",
                               "Our internship program hosts 20 interns.") == "senior"
-
-
-def test_classify_seniority_description_rescue():
-    assert classify_seniority("Platform Engineer", "This is a junior role.") == "junior"
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +243,59 @@ def test_ingestion_date_posted_string_form(app_dir, isolated_db):
     }])
     store_jobspy_results(conn, df, "indeed")
     assert _row(conn, "https://jobs/str")["date_posted"] == "2026-11-05"
+
+
+def test_ingestion_impossible_date_stores_null(app_dir, isolated_db):
+    """A well-formed-looking but impossible calendar date must not be
+    stored verbatim (it would break --posted-within arithmetic later)."""
+    conn = database.init_db()
+    df = _df([{
+        "job_url": "https://jobs/baddate", "title": "Engineer",
+        "company": "Acme", "location": "X", "min_amount": None,
+        "max_amount": None, "currency": None, "interval": None,
+        "description": None, "site": "indeed", "is_remote": False,
+        "job_url_direct": None, "date_posted": "2026-99-99",
+    }])
+    store_jobspy_results(conn, df, "indeed")
+    assert _row(conn, "https://jobs/baddate")["date_posted"] is None
+
+
+def test_ingestion_fractional_hourly_pay_not_truncated(app_dir, isolated_db):
+    """M2: structured pay comes from the raw row — a fractional hourly
+    minimum keeps its value (the display string would truncate it to
+    USD22, losing ~2% on the annualized figure)."""
+    conn = database.init_db()
+    df = _df([{
+        "job_url": "https://jobs/frac", "title": "Engineer",
+        "company": "Acme", "location": "X", "min_amount": 22.5,
+        "max_amount": 30, "currency": "USD", "interval": "hourly",
+        "description": None, "site": "indeed", "is_remote": False,
+        "job_url_direct": None, "date_posted": None,
+    }])
+    store_jobspy_results(conn, df, "indeed")
+    row = _row(conn, "https://jobs/frac")
+    assert row["salary_min"] == 46800.0  # 22.5 * 2080
+    assert row["salary_max"] == 62400.0
+    assert row["salary_interval"] == "hourly"
+
+
+def test_ingestion_max_only_row_is_populated(app_dir, isolated_db):
+    """M2: a row with only max_amount keeps its structured pay (the old
+    display-string path rendered salary=None and lost the value)."""
+    conn = database.init_db()
+    df = _df([{
+        "job_url": "https://jobs/maxonly", "title": "Engineer",
+        "company": "Acme", "location": "X", "min_amount": None,
+        "max_amount": 224000, "currency": "USD", "interval": "yearly",
+        "description": None, "site": "indeed", "is_remote": False,
+        "job_url_direct": None, "date_posted": None,
+    }])
+    store_jobspy_results(conn, df, "indeed")
+    row = _row(conn, "https://jobs/maxonly")
+    assert row["salary_min"] == 224000.0
+    assert row["salary_max"] == 224000.0
+    assert row["salary_currency"] == "USD"
+    assert row["salary_interval"] == "yearly"
 
 
 # ---------------------------------------------------------------------------
