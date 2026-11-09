@@ -1,4 +1,29 @@
-name: Publish to PyPI
+# Publish kestrel-agent to PyPI on version tags (v*), via OIDC trusted publishing.
+#
+# MANUAL SETUP REQUIRED BEFORE THE FIRST TAG (release runbook):
+#
+# 1. The PyPI project `kestrel-agent` must be registered before the first
+#    publication. Registration happens on first upload — but with trusted
+#    publishing, the project must instead be pre-created on PyPI with the
+#    pending publisher configured (PyPI -> Publishing -> add a pending
+#    trusted publisher), because a tag-triggered workflow cannot claim an
+#    unregistered project name without a human in the loop.
+# 2. Configure the trusted-publisher entry on PyPI for
+#    `Vontarius-Ventures/kestrel`:
+#      - owner: Vontarius-Ventures
+#      - repository: kestrel
+#      - workflow name: publish.yml
+#      - environment: pypi
+#    (Note the repository name is `kestrel`, while this file lives in the
+#    private repo `VontariusF/ApplyPilot` until the public cut; the entry
+#    must point at the public repo.)
+# 3. The `pypi` GitHub environment must exist on the target repo with the
+#    OIDC id-token permission (granted here via `permissions.id-token`).
+#
+# Kestrel is an AGPL-3.0 fork of Pickle-Pixel/ApplyPilot; see NOTICE and
+# README for upstream attribution.
+
+name: Publish kestrel-agent to PyPI
 
 on:
   push:
@@ -24,8 +49,8 @@ jobs:
       - name: Install build tools
         run: pip install build
 
-      - name: Build package
+      - name: Build kestrel-agent distribution
         run: python -m build
 
-      - name: Publish to PyPI
+      - name: Publish kestrel-agent to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
