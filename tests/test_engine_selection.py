@@ -28,12 +28,12 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from applypilot import config
-from applypilot.apply import dashboard, launcher
-from applypilot.apply.claude import ClaudeEngine
-from applypilot.apply.droid import DROID_ALLOWED_TOOLS, DroidEngine
-from applypilot.apply.engines import make_engine, resolve_engine_name
-from applypilot.cli import app
+from kestrel import config
+from kestrel.apply import dashboard, launcher
+from kestrel.apply.claude import ClaudeEngine
+from kestrel.apply.droid import DROID_ALLOWED_TOOLS, DroidEngine
+from kestrel.apply.engines import make_engine, resolve_engine_name
+from kestrel.cli import app
 
 runner = CliRunner()
 
@@ -135,7 +135,7 @@ def spawn_recorder(proc):
 
 def seed_ready_job(resume_path: str = "/tmp/does-not-matter.pdf"):
     """Insert (or reset) one apply-ready job row."""
-    from applypilot.database import get_connection, init_db
+    from kestrel.database import get_connection, init_db
 
     init_db()
     conn = get_connection()
@@ -237,7 +237,7 @@ def test_result_contract_parity(text):
 
 
 def test_scan_result_values():
-    from applypilot.apply.engines import scan_result
+    from kestrel.apply.engines import scan_result
 
     assert scan_result("RESULT:APPLIED").status == "applied"
     assert scan_result("RESULT:EXPIRED").status == "expired"
@@ -412,7 +412,7 @@ def test_droid_run_command_shape(profile_and_job, clean_dashboard, monkeypatch, 
     job = profile_and_job
     dashboard.init_worker(7)
 
-    monkeypatch.setenv("APPLYPILOT_FACTORY_DIR", str(tmp_path / "factory"))
+    monkeypatch.setenv("KESTREL_FACTORY_DIR", str(tmp_path / "factory"))
     monkeypatch.setenv("FACTORY_API_KEY", "fk-test-123")
 
     proc = FakeProc([CLAUDE_ASSISTANT_LINE, CLAUDE_RESULT_LINE])
@@ -472,7 +472,7 @@ def test_droid_child_env_requires_factory_key(profile_and_job, clean_dashboard, 
     job = profile_and_job
     dashboard.init_worker(2)
 
-    monkeypatch.setenv("APPLYPILOT_FACTORY_DIR", "/tmp/ap-test-factory")
+    monkeypatch.setenv("KESTREL_FACTORY_DIR", "/tmp/ap-test-factory")
     monkeypatch.delenv("FACTORY_API_KEY", raising=False)
 
     proc = FakeProc([])
@@ -572,14 +572,14 @@ def _no_tier(*args, **kwargs):
 def test_apply_engine_droid_reaches_launcher(profile_and_job, monkeypatch):
     seed_ready_job()
     monkeypatch.setenv("FACTORY_API_KEY", "fk-test-123")
-    monkeypatch.setattr("applypilot.config.check_tier", _no_tier)
+    monkeypatch.setattr("kestrel.config.check_tier", _no_tier)
 
     captured = {}
 
     def fake_main(**kwargs):
         captured.update(kwargs)
 
-    monkeypatch.setattr("applypilot.apply.launcher.main", fake_main)
+    monkeypatch.setattr("kestrel.apply.launcher.main", fake_main)
 
     result = runner.invoke(
         app, ["apply", "--engine", "droid", "--model", "custom:gemini-flash", "--limit", "1"],
@@ -594,14 +594,14 @@ def test_apply_engine_droid_reaches_launcher(profile_and_job, monkeypatch):
 def test_apply_default_engine_is_claude(profile_and_job, monkeypatch):
     seed_ready_job()
     monkeypatch.delenv("AUTOAPPLY_ENGINE", raising=False)
-    monkeypatch.setattr("applypilot.config.check_tier", _no_tier)
+    monkeypatch.setattr("kestrel.config.check_tier", _no_tier)
 
     captured = {}
 
     def fake_main(**kwargs):
         captured.update(kwargs)
 
-    monkeypatch.setattr("applypilot.apply.launcher.main", fake_main)
+    monkeypatch.setattr("kestrel.apply.launcher.main", fake_main)
 
     result = runner.invoke(app, ["apply", "--limit", "1"])
     assert result.exit_code == 0, result.output
@@ -614,14 +614,14 @@ def test_apply_model_default_reads_autoapply_model(profile_and_job, monkeypatch)
     at call time (after _bootstrap loads the store's .env), then 'haiku'."""
     seed_ready_job()
     monkeypatch.setenv("AUTOAPPLY_MODEL", "qwen2.5:7b")
-    monkeypatch.setattr("applypilot.config.check_tier", _no_tier)
+    monkeypatch.setattr("kestrel.config.check_tier", _no_tier)
 
     captured = {}
 
     def fake_main(**kwargs):
         captured.update(kwargs)
 
-    monkeypatch.setattr("applypilot.apply.launcher.main", fake_main)
+    monkeypatch.setattr("kestrel.apply.launcher.main", fake_main)
 
     result = runner.invoke(app, ["apply", "--limit", "1"])
     assert result.exit_code == 0, result.output
@@ -631,14 +631,14 @@ def test_apply_model_default_reads_autoapply_model(profile_and_job, monkeypatch)
 def test_apply_model_default_unset_is_haiku(profile_and_job, monkeypatch):
     seed_ready_job()
     monkeypatch.delenv("AUTOAPPLY_MODEL", raising=False)
-    monkeypatch.setattr("applypilot.config.check_tier", _no_tier)
+    monkeypatch.setattr("kestrel.config.check_tier", _no_tier)
 
     captured = {}
 
     def fake_main(**kwargs):
         captured.update(kwargs)
 
-    monkeypatch.setattr("applypilot.apply.launcher.main", fake_main)
+    monkeypatch.setattr("kestrel.apply.launcher.main", fake_main)
 
     result = runner.invoke(app, ["apply", "--limit", "1"])
     assert result.exit_code == 0, result.output
@@ -649,14 +649,14 @@ def test_apply_engine_env_override(profile_and_job, monkeypatch):
     seed_ready_job()
     monkeypatch.setenv("AUTOAPPLY_ENGINE", "droid")
     monkeypatch.setenv("FACTORY_API_KEY", "fk-test-123")
-    monkeypatch.setattr("applypilot.config.check_tier", _no_tier)
+    monkeypatch.setattr("kestrel.config.check_tier", _no_tier)
 
     captured = {}
 
     def fake_main(**kwargs):
         captured.update(kwargs)
 
-    monkeypatch.setattr("applypilot.apply.launcher.main", fake_main)
+    monkeypatch.setattr("kestrel.apply.launcher.main", fake_main)
 
     result = runner.invoke(app, ["apply", "--limit", "1"])
     assert result.exit_code == 0, result.output
@@ -681,10 +681,10 @@ def test_apply_droid_without_factory_key_exits_readable(profile_and_job, monkeyp
 
 def test_gen_prompt_prints_engine_specific_commands(profile_and_job, monkeypatch, tmp_path):
     seed_ready_job(resume_path=profile_and_job["tailored_resume_path"])
-    monkeypatch.setenv("APPLYPILOT_FACTORY_DIR", str(tmp_path / "factory"))
+    monkeypatch.setenv("KESTREL_FACTORY_DIR", str(tmp_path / "factory"))
     monkeypatch.delenv("FACTORY_API_KEY", raising=False)  # --gen works without a key
 
-    from applypilot.apply.launcher import gen_prompt, manual_command
+    from kestrel.apply.launcher import gen_prompt, manual_command
 
     prompt_file = gen_prompt(
         "https://jobs.example.com/listing/123", min_score=7, model="haiku", engine="claude",
@@ -744,7 +744,7 @@ def test_acquire_single_url_null_status_is_acquirable():
 
 def test_acquire_single_url_in_progress_stays_locked():
     seed_ready_job()
-    from applypilot.database import get_connection
+    from kestrel.database import get_connection
 
     conn = get_connection()
     conn.execute(

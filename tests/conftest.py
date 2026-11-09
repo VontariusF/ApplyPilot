@@ -1,14 +1,14 @@
-"""Shared fixtures for the ApplyPilot test suites.
+"""Shared fixtures for the Kestrel test suites.
 
-Two layers of isolation, so no test can touch a real ~/.applypilot:
+Two layers of isolation, so no test can touch a real ~/.kestrel:
 
-1. APPLYPILOT_DIR is redirected to a throwaway dir BEFORE the applypilot
+1. KESTREL_DIR is redirected to a throwaway dir BEFORE the kestrel
    package is imported, so config.py binds APP_DIR (and every derived path)
    to it for tests that don't opt into the app_dir fixture.
 2. Tests that need per-test isolation use `app_dir`, which repoints every
-   ApplyPilot path constant at a fresh temp directory.
+   Kestrel path constant at a fresh temp directory.
 
-ApplyPilot resolves ~/.applypilot into module-level path constants at import
+Kestrel resolves ~/.kestrel into module-level path constants at import
 time; every consumer reads them as attributes at call time, so tests can
 repoint the attributes at a temp directory instead of touching the real home
 directory.
@@ -20,10 +20,10 @@ import threading
 
 import pytest
 
-os.environ.setdefault("APPLYPILOT_DIR", tempfile.mkdtemp(prefix="applypilot-test-"))
+os.environ.setdefault("KESTREL_DIR", tempfile.mkdtemp(prefix="kestrel-test-"))
 
-from applypilot import config, database  # noqa: E402  (after the env redirect)
-from applypilot.portal import automation  # noqa: E402  (after the env redirect)
+from kestrel import config, database  # noqa: E402  (after the env redirect)
+from kestrel.portal import automation  # noqa: E402  (after the env redirect)
 
 
 @pytest.fixture(autouse=True)
@@ -42,12 +42,12 @@ def _scheduler_probe_reachable(monkeypatch):
 
 @pytest.fixture
 def app_dir(tmp_path, monkeypatch):
-    """Repoint every ApplyPilot path at a fresh temp app directory."""
-    app = tmp_path / "applypilot"
+    """Repoint every Kestrel path at a fresh temp app directory."""
+    app = tmp_path / "kestrel"
     app.mkdir()
     paths = {
         "APP_DIR": app,
-        "DB_PATH": app / "applypilot.db",
+        "DB_PATH": app / "kestrel.db",
         "PROFILE_PATH": app / "profile.json",
         "PROFILE_MD_PATH": app / "profile.md",
         "RESUME_PATH": app / "resume.txt",
@@ -63,7 +63,7 @@ def app_dir(tmp_path, monkeypatch):
     }
     for name, path in paths.items():
         monkeypatch.setattr(config, name, path)
-    # database.py binds DB_PATH via `from applypilot.config import DB_PATH`,
+    # database.py binds DB_PATH via `from kestrel.config import DB_PATH`,
     # so it holds its own copy and must be repointed separately.
     monkeypatch.setattr(database, "DB_PATH", paths["DB_PATH"])
     return app
@@ -134,7 +134,7 @@ def fake_llm(monkeypatch):
     The seam is `llm._instance` — the singleton every get_client() call
     returns — so ONE patch covers every import style: onboarding.LLMBackend
     calls llm.get_client() at call time, while the scoring/enrichment/
-    discovery modules bind `from applypilot.llm import get_client` at
+    discovery modules bind `from kestrel.llm import get_client` at
     import time and still reach the same singleton. The llm.get_client
     module attribute is swapped too, so a mid-test reset_client() (the
     settings-save path) cannot rebuild a real client on that path.
@@ -144,7 +144,7 @@ def fake_llm(monkeypatch):
     loudly (tests run with no provider keys) — a visible error, never a
     real network call.
     """
-    from applypilot import llm
+    from kestrel import llm
 
     fake = FakeLLMClient()
     monkeypatch.setattr(llm, "_instance", fake)
@@ -158,16 +158,16 @@ def fake_llm(monkeypatch):
 @pytest.fixture()
 def portal_env(app_dir, tmp_path, monkeypatch):
     """Full portal isolation: repointed paths, clean env, fresh writers."""
-    from applypilot.apply import eventlog
+    from kestrel.apply import eventlog
 
     # Settings saves live-refresh os.environ since S2-2 (that is the fix),
     # so snapshot around each portal test — a saved key must not leak into
     # other tests sharing the interpreter.
     env_snapshot = dict(os.environ)
 
-    db_path = app_dir / "applypilot.db"
+    db_path = app_dir / "kestrel.db"
     monkeypatch.setattr(database, "DB_PATH", db_path)
-    monkeypatch.delenv("APPLYPILOT_EVENT_LOG", raising=False)
+    monkeypatch.delenv("KESTREL_EVENT_LOG", raising=False)
     eventlog.reset_writer_cache()
     yield app_dir
     database.close_connection(str(db_path))
@@ -181,10 +181,10 @@ def portal_client(portal_env, monkeypatch):
     """Authenticated portal test client against the isolated store."""
     from fastapi.testclient import TestClient
 
-    from applypilot.portal.app import create_app
+    from kestrel.portal.app import create_app
 
     # Speed up SSE idle-close in tests (generators read these at runtime).
-    from applypilot.portal import app as portal_app_module
+    from kestrel.portal import app as portal_app_module
     monkeypatch.setattr(portal_app_module, "POLL_SECONDS", 0.01)
     monkeypatch.setattr(portal_app_module, "CHAT_POLL_SECONDS", 0.01)
 
@@ -198,13 +198,13 @@ def write_profile(profile: dict | None = None):
     """Seed a minimal profile.json (the onboarding-complete marker)."""
     import json
 
-    from applypilot import config, onboarding
+    from kestrel import config, onboarding
 
     if profile is None:
         profile, _ = onboarding.normalize_profile(
-            {"_applypilot_profile": {"personal": {"full_name": "Test Person",
+            {"_kestrel_profile": {"personal": {"full_name": "Test Person",
                                                   "email": "test@example.com"}},
-             "_applypilot_search": {}})
+             "_kestrel_search": {}})
     config.write_secret_text(config.PROFILE_PATH, json.dumps(profile))
     return profile
 

@@ -7,8 +7,8 @@ and the init_db backfill over pre-existing rows.
 
 import sqlite3
 
-from applypilot.database import backfill_is_remote, ensure_columns, get_connection, init_db
-from applypilot.enrichment.remote import infer_remote
+from kestrel.database import backfill_is_remote, ensure_columns, get_connection, init_db
+from kestrel.enrichment.remote import infer_remote
 
 
 # ---------------------------------------------------------------------------

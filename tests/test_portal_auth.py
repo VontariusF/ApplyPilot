@@ -11,13 +11,13 @@ import logging
 import os
 import stat
 
-from applypilot.portal.auth import host_is_allowed
+from kestrel.portal.auth import host_is_allowed
 
 import pytest
 from fastapi.testclient import TestClient
 
-from applypilot.portal import auth as auth_mod
-from applypilot.portal.app import create_app
+from kestrel.portal import auth as auth_mod
+from kestrel.portal.app import create_app
 
 # Every GET route the portal serves (plus a bogus run id path).
 ROUTES = [
@@ -100,7 +100,7 @@ def test_access_log_never_contains_token_value(anon_client, seeded_profile, capl
 
 
 def test_redact_token_query_handles_query_and_anchor_params():
-    from applypilot.portal.auth import redact_token_query
+    from kestrel.portal.auth import redact_token_query
 
     line = '127.0.0.1 - "GET /?token=abc123 HTTP/1.1" 401'
     assert "abc123" not in redact_token_query(line)

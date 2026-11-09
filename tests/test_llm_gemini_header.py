@@ -7,7 +7,7 @@ leaks into logs and error strings on every failed call.
 import httpx
 import pytest
 
-from applypilot import llm
+from kestrel import llm
 
 KEY = "AIzaSy-SECRET-KEY-VALUE"
 NATIVE_OK = {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}

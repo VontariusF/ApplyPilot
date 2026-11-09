@@ -1,4 +1,4 @@
-"""Guardrail tests for `applypilot apply` Gates 2-3 (spec art_A71wyYS4).
+"""Guardrail tests for `kestrel apply` Gates 2-3 (spec art_A71wyYS4).
 
 Gate 2 — plan-then-confirm: `--plan` prints the batch as ONE pure-JSON
 payload and commits nothing; `--i-confirm <plan-hash>` on a second
@@ -20,9 +20,9 @@ import stat
 import pytest
 from typer.testing import CliRunner
 
-from applypilot import config, database
-from applypilot.apply import launcher, planning
-from applypilot.cli import app
+from kestrel import config, database
+from kestrel.apply import launcher, planning
+from kestrel.cli import app
 
 runner = CliRunner()
 
@@ -60,12 +60,12 @@ def _seed_job(conn, url, title="Engineer", fit_score=9, **extra):
 
 
 def _plan(*args):
-    """Invoke `applypilot apply --plan ...` — the read-only preview."""
+    """Invoke `kestrel apply --plan ...` — the read-only preview."""
     return runner.invoke(app, ["apply", "--plan", *args])
 
 
 def _confirm(plan_hash, *args):
-    """Invoke `applypilot apply --i-confirm <hash> ...`."""
+    """Invoke `kestrel apply --i-confirm <hash> ...`."""
     return runner.invoke(app, ["apply", "--i-confirm", plan_hash, *args])
 
 

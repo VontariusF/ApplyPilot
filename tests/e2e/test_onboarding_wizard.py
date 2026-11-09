@@ -115,7 +115,7 @@ def test_full_wizard_journey_buttons_first(run_journey, chromium, portal_server,
     """The whole interview by buttons (typed only for free-text fields),
     needs-answer chips for skips, quiet review edit, confirm."""
 
-    from applypilot import onboarding
+    from kestrel import onboarding
 
     monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
 
@@ -158,7 +158,7 @@ def test_agent_toggle_round_trip(run_journey, chromium, portal_server, monkeypat
     """'Let the agent ask' hands over to free-form chat; 'Back' returns
     to the same choice-first question, agenda intact."""
 
-    from applypilot import onboarding
+    from kestrel import onboarding
 
     monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
 
@@ -194,13 +194,13 @@ def test_agent_toggle_round_trip(run_journey, chromium, portal_server, monkeypat
 # The scripted extraction: everything a rich resume would yield, bridged
 # by draft_to_answers — the intake kickoff's reply.
 E2E_DRAFT = "Read your resume.\n\n```json\n" + json.dumps({
-    "_applypilot_profile": {
+    "_kestrel_profile": {
         "personal": {"full_name": "Jane Doe", "email": "jane@example.com",
                      "phone": "+1 555 0100", "city": "Austin",
                      "country": "United States"},
         "experience": {"education_level": "Bachelor's"},
     },
-    "_applypilot_search": {"queries": ["Data Engineer"], "location": "Austin, TX",
+    "_kestrel_search": {"queries": ["Data Engineer"], "location": "Austin, TX",
                            "remote": True},
 }) + "\n```"
 
@@ -238,7 +238,7 @@ def test_intake_resume_then_chips_and_gaps(run_journey, chromium, portal_server,
     a chip records the overwrite, clearing one flags the field on review,
     and the review screen badges resume-sourced values."""
 
-    from applypilot import onboarding
+    from kestrel import onboarding
 
     # A ready provider is what makes intake the first ready surface.
     monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
@@ -319,7 +319,7 @@ def test_double_click_cannot_re_answer(run_journey, chromium, portal_server,
 
     import time
 
-    from applypilot import onboarding
+    from kestrel import onboarding
 
     monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
 

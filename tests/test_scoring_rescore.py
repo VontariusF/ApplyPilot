@@ -14,9 +14,9 @@ from urllib.parse import unquote
 import pytest
 from typer.testing import CliRunner
 
-from applypilot import database
-from applypilot.portal import queries as portal_queries
-from applypilot.scoring import scorer
+from kestrel import database
+from kestrel.portal import queries as portal_queries
+from kestrel.scoring import scorer
 
 GOOD = "SCORE: 8\nKEYWORDS: python, llm\nREASONING: Solid match on core skills."
 MALFORMED = "I think this candidate looks like a great fit for the role overall."
@@ -277,7 +277,7 @@ def test_llm_exception_records_score_error(app_dir, resume, monkeypatch):
 
 
 def test_cli_rescore_requires_target():
-    from applypilot.cli import app as cli_app
+    from kestrel.cli import app as cli_app
 
     result = CliRunner().invoke(cli_app, ["rescore"])
     assert result.exit_code == 1
@@ -285,7 +285,7 @@ def test_cli_rescore_requires_target():
 
 
 def test_cli_rescore_rejects_url_with_all():
-    from applypilot.cli import app as cli_app
+    from kestrel.cli import app as cli_app
 
     result = CliRunner().invoke(cli_app, ["rescore", "https://jobs.example/x", "--all"])
     assert result.exit_code == 1
@@ -293,12 +293,12 @@ def test_cli_rescore_rejects_url_with_all():
 
 
 def test_cli_rescore_all_round_trip(app_dir, resume, monkeypatch):
-    from applypilot.cli import app as cli_app
+    from kestrel.cli import app as cli_app
 
     url = seed_job(fit_score=5, score_reasoning="old score")
     fake = FakeClient([GOOD])
     monkeypatch.setattr(scorer, "get_client", lambda: fake)
-    monkeypatch.setattr("applypilot.config.check_tier", lambda *a, **k: None)
+    monkeypatch.setattr("kestrel.config.check_tier", lambda *a, **k: None)
 
     result = CliRunner().invoke(cli_app, ["rescore", "--all"])
     assert result.exit_code == 0, result.output
@@ -307,12 +307,12 @@ def test_cli_rescore_all_round_trip(app_dir, resume, monkeypatch):
 
 
 def test_cli_rescore_single_url(app_dir, resume, monkeypatch):
-    from applypilot.cli import app as cli_app
+    from kestrel.cli import app as cli_app
 
     url = seed_job()
     fake = FakeClient([GOOD])
     monkeypatch.setattr(scorer, "get_client", lambda: fake)
-    monkeypatch.setattr("applypilot.config.check_tier", lambda *a, **k: None)
+    monkeypatch.setattr("kestrel.config.check_tier", lambda *a, **k: None)
 
     result = CliRunner().invoke(cli_app, ["rescore", url])
     assert result.exit_code == 0, result.output
@@ -348,7 +348,7 @@ def test_portal_rescore_all_spawns_tracked_run(portal_client, monkeypatch):
     import sys
 
     client, _ = portal_client
-    from applypilot.portal import runner as runner_mod
+    from kestrel.portal import runner as runner_mod
 
     seen = {}
     original = runner_mod.start_run

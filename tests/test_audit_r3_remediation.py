@@ -33,12 +33,12 @@ import pandas as pd
 import pytest
 from typer.testing import CliRunner
 
-from applypilot import config, database
-from applypilot.apply import launcher, planning
-from applypilot.cli import app
-from applypilot.discovery import jobspy
-from applypilot.enrichment import detail
-from applypilot import pipeline
+from kestrel import config, database
+from kestrel.apply import launcher, planning
+from kestrel.cli import app
+from kestrel.discovery import jobspy
+from kestrel.enrichment import detail
+from kestrel import pipeline
 
 runner = CliRunner()
 
@@ -749,7 +749,7 @@ def test_pending_detail_excludes_skip_sites_everywhere(queue):
 
     assert pipeline._count_pending("enrich") == 1
 
-    from applypilot.database import STAGE_CONDITIONS
+    from kestrel.database import STAGE_CONDITIONS
     portal_pending = queue.execute(
         f"SELECT COUNT(*) FROM jobs WHERE {STAGE_CONDITIONS['pending_detail']}"
     ).fetchone()[0]

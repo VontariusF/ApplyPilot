@@ -8,8 +8,8 @@ Covers the new document surfaces and the re-skin plumbing:
 - CSS-level responsive smoke (real-width checks run in the browser evidence).
 """
 
-from applypilot import config, database
-from applypilot.portal.queries import split_score_reasoning
+from kestrel import config, database
+from kestrel.portal.queries import split_score_reasoning
 
 from tests.test_portal_pages import portal_resume, seed_job
 
@@ -21,7 +21,7 @@ from tests.test_portal_pages import portal_resume, seed_job
 def test_preview_and_version_routes_require_token(portal_env):
     from fastapi.testclient import TestClient
 
-    from applypilot.portal.app import create_app
+    from kestrel.portal.app import create_app
 
     anon = TestClient(create_app(), base_url="http://127.0.0.1")
     routes = [
@@ -181,7 +181,7 @@ def test_login_page_renders_in_both_themes(portal_env):
     """The login form IS the 401 body (middleware-served, no GET route)."""
     from fastapi.testclient import TestClient
 
-    from applypilot.portal.app import create_app
+    from kestrel.portal.app import create_app
 
     anon = TestClient(create_app(), base_url="http://127.0.0.1")
     for theme in ("light", "dark"):
@@ -194,7 +194,7 @@ def test_unrecognized_theme_param_is_ignored(portal_env):
     """Only light/dark pin the theme; anything else falls back to OS preference."""
     from fastapi.testclient import TestClient
 
-    from applypilot.portal.app import create_app
+    from kestrel.portal.app import create_app
 
     anon = TestClient(create_app(), base_url="http://127.0.0.1")
     r = anon.get("/login", params={"theme": "neon"})
@@ -211,7 +211,7 @@ def test_login_uses_shared_sidebar_shell(portal_env):
     """The login form (401 body, middleware-served) extends the shared base."""
     from fastapi.testclient import TestClient
 
-    from applypilot.portal.app import create_app
+    from kestrel.portal.app import create_app
 
     anon = TestClient(create_app(), base_url="http://127.0.0.1")
     r = anon.get("/login")
@@ -230,7 +230,7 @@ def test_base_shell_lists_all_sections(portal_client, seeded_profile):
 def test_base_has_viewport_meta_and_responsive_breakpoints(portal_client):
     """Responsive smoke at the CSS level; real widths are checked in the
     browser evidence pass (375/768/1280)."""
-    from applypilot.portal.app import PORTAL_DIR
+    from kestrel.portal.app import PORTAL_DIR
 
     client, _ = portal_client
     r = client.get("/jobs")

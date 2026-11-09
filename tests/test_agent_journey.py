@@ -27,10 +27,10 @@ from datetime import datetime, timezone
 import pytest
 from typer.testing import CliRunner
 
-import applypilot.scoring.scorer as scorer
-from applypilot import config, database, engine_auth, onboarding
-from applypilot.apply import launcher, planning
-from applypilot.cli import app
+import kestrel.scoring.scorer as scorer
+from kestrel import config, database, engine_auth, onboarding
+from kestrel.apply import launcher, planning
+from kestrel.cli import app
 
 # The live rig's scripted `claude -p` shim: kickoff greeting on turn 1, the
 # fenced profile draft on the resumed session (fake-session-1).
@@ -69,7 +69,7 @@ def signed_in(monkeypatch):
 
 
 def run(*args):
-    """Invoke `applypilot agent ...` and return the CliRunner result."""
+    """Invoke `kestrel agent ...` and return the CliRunner result."""
     return runner.invoke(app, ["agent", *args])
 
 
@@ -104,7 +104,7 @@ def _stub_discovery(monkeypatch):
     others run empty. The seams are the functions pipeline._run_discover
     imports at call time, so the real stage code executes.
     """
-    from applypilot.discovery import composio, jobspy, smartextract, workday
+    from kestrel.discovery import composio, jobspy, smartextract, workday
 
     def seed_jobspy(results_per_site=None):
         conn = database.get_connection()
@@ -124,7 +124,7 @@ def _stub_discovery(monkeypatch):
 
 def _stub_enrichment(monkeypatch):
     """Fill descriptions at the enrichment seam (no page fetches)."""
-    from applypilot.enrichment import detail
+    from kestrel.enrichment import detail
 
     def fill(workers=1, limit=100):
         conn = database.get_connection()

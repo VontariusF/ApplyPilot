@@ -12,9 +12,9 @@ import json
 
 import pytest
 
-from applypilot import config, onboarding
-from applypilot.apply import prompt as prompt_mod
-from applypilot.portal import app as portal_app
+from kestrel import config, onboarding
+from kestrel.apply import prompt as prompt_mod
+from kestrel.portal import app as portal_app
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +133,7 @@ def test_build_prompt_prefers_the_recorded_preferred_name(app_dir, tailored_resu
 def test_confirm_blocks_a_nameless_profile_with_a_readable_message(app_dir):
     state = onboarding.InterviewState(
         phase=onboarding.REVIEW,
-        profile_draft={"_applypilot_profile": {"personal": {"full_name": ""}}},
+        profile_draft={"_kestrel_profile": {"personal": {"full_name": ""}}},
     )
     onboarding.save_state(state)
     with pytest.raises(onboarding.OnboardingError, match="full name"):
@@ -143,7 +143,7 @@ def test_confirm_blocks_a_nameless_profile_with_a_readable_message(app_dir):
 def test_confirm_accepts_a_named_profile(app_dir):
     state = onboarding.InterviewState(
         phase=onboarding.REVIEW,
-        profile_draft={"_applypilot_profile": {"personal": {"full_name": "Test User"}}},
+        profile_draft={"_kestrel_profile": {"personal": {"full_name": "Test User"}}},
     )
     onboarding.save_state(state)
     profile = onboarding.confirm_profile()
@@ -155,7 +155,7 @@ def test_confirm_accepts_a_named_profile(app_dir):
 
 
 def test_conversion_note_flows_through_normalize_profile_into_the_prompt():
-    draft = {"_applypilot_profile": {"compensation": {
+    draft = {"_kestrel_profile": {"compensation": {
         "salary_expectation": "90000", "salary_currency": "GBP",
         "currency_conversion_note": "Compare EUR postings at 1.15 GBP/EUR"}}}
     profile, _ = onboarding.normalize_profile(draft, {})

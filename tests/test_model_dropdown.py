@@ -11,7 +11,7 @@ Covers the spec's named verifying tests:
 import httpx
 import pytest
 
-from applypilot.llm import ModelListError, _parse_model_ids, list_models
+from kestrel.llm import ModelListError, _parse_model_ids, list_models
 
 GEMINI_COMPAT = "https://generativelanguage.googleapis.com/v1beta/openai"
 OPENAI_BASE = "https://api.openai.com/v1"
@@ -43,7 +43,7 @@ def _mock_http(monkeypatch, payload=None, status_code=200, exc=None, capture=Non
             status_code, json=payload, request=httpx.Request("GET", url)
         )
 
-    monkeypatch.setattr("applypilot.llm.httpx.get", handler)
+    monkeypatch.setattr("kestrel.llm.httpx.get", handler)
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +190,7 @@ def test_non_json_body_raises_model_list_error(monkeypatch):
         return httpx.Response(200, text="<html>not json</html>",
                               request=httpx.Request("GET", url))
 
-    monkeypatch.setattr("applypilot.llm.httpx.get", handler)
+    monkeypatch.setattr("kestrel.llm.httpx.get", handler)
     with pytest.raises(ModelListError, match="non-JSON"):
         list_models()
 
@@ -208,7 +208,7 @@ def test_unconfigured_provider_raises_readably(monkeypatch):
 def _wizard_prompt_answers(monkeypatch, answers):
     """Script wizard Prompt/Confirm like the existing provider tests, and
     capture the kwargs of every Prompt.ask call."""
-    from applypilot.wizard import init as wizard
+    from kestrel.wizard import init as wizard
 
     scripted = list(answers)
     calls: list[dict] = []
@@ -320,7 +320,7 @@ def test_settings_models_requires_auth(portal_client):
 
 
 def test_settings_models_returns_ids(portal_client, monkeypatch):
-    from applypilot.portal import app as portal_app
+    from kestrel.portal import app as portal_app
 
     client, _ = portal_client
     monkeypatch.setattr(portal_app, "list_models", lambda **kw: ["m1", "m2"])
@@ -330,7 +330,7 @@ def test_settings_models_returns_ids(portal_client, monkeypatch):
 
 
 def test_settings_models_error_returns_502_with_empty_list(portal_client, monkeypatch):
-    from applypilot.portal import app as portal_app
+    from kestrel.portal import app as portal_app
 
     client, _ = portal_client
     monkeypatch.setattr(
@@ -344,7 +344,7 @@ def test_settings_models_error_returns_502_with_empty_list(portal_client, monkey
 
 
 def test_settings_page_renders_populated_datalists(portal_client, monkeypatch):
-    from applypilot.portal import app as portal_app
+    from kestrel.portal import app as portal_app
 
     client, _ = portal_client
     monkeypatch.setattr(portal_app, "list_models", lambda **kw: ["qwen2.5:7b", "llama3"])
@@ -357,7 +357,7 @@ def test_settings_page_renders_populated_datalists(portal_client, monkeypatch):
 
 
 def test_settings_page_degrades_to_free_text_when_unreachable(portal_client, monkeypatch):
-    from applypilot.portal import app as portal_app
+    from kestrel.portal import app as portal_app
 
     client, _ = portal_client
     monkeypatch.setattr(
@@ -370,8 +370,8 @@ def test_settings_page_degrades_to_free_text_when_unreachable(portal_client, mon
 
 
 def test_settings_merge_write_still_honored_with_model_fields(portal_client):
-    from applypilot import config
-    from applypilot.portal import settings as settings_mod
+    from kestrel import config
+    from kestrel.portal import settings as settings_mod
 
     client, _ = portal_client
     config.ENV_PATH.write_text(
@@ -397,7 +397,7 @@ def test_settings_merge_write_still_honored_with_model_fields(portal_client):
 # ---------------------------------------------------------------------------
 
 def test_default_apply_model_reads_env(monkeypatch):
-    from applypilot import config
+    from kestrel import config
 
     monkeypatch.setenv("AUTOAPPLY_MODEL", "gpt-4o-mini")
     assert config.default_apply_model() == "gpt-4o-mini"
@@ -406,7 +406,7 @@ def test_default_apply_model_reads_env(monkeypatch):
 def test_default_apply_model_unset_or_empty_falls_back(monkeypatch):
     """Both an unset setting and a cleared one fall back to 'haiku' — a
     cleared field must not put an empty --model on the apply argv."""
-    from applypilot import config
+    from kestrel import config
 
     monkeypatch.delenv("AUTOAPPLY_MODEL", raising=False)
     assert config.default_apply_model() == "haiku"

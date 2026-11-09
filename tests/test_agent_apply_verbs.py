@@ -19,8 +19,8 @@ from datetime import datetime, timezone
 import pytest
 from typer.testing import CliRunner
 
-from applypilot import config, database, onboarding
-from applypilot.cli import app
+from kestrel import config, database, onboarding
+from kestrel.cli import app
 
 runner = CliRunner()
 
@@ -33,7 +33,7 @@ CAP = 5
 
 
 def run(*args):
-    """Invoke `applypilot agent ...` and return the CliRunner result."""
+    """Invoke `kestrel agent ...` and return the CliRunner result."""
     return runner.invoke(app, ["agent", *args])
 
 
@@ -94,10 +94,10 @@ def exploding_apply(monkeypatch):
             raise AssertionError(f"{name} ran during host apply bookkeeping")
         return _boom
 
-    import applypilot.apply.chrome as chrome
-    import applypilot.apply.launcher as launcher
-    import applypilot.llm as llm
-    import applypilot.scoring.scorer as scorer
+    import kestrel.apply.chrome as chrome
+    import kestrel.apply.launcher as launcher
+    import kestrel.llm as llm
+    import kestrel.scoring.scorer as scorer
 
     monkeypatch.setattr(launcher, "make_engine", boom("make_engine"))
     monkeypatch.setattr(chrome, "launch_chrome", boom("chrome.launch_chrome"))
@@ -354,7 +354,7 @@ def test_captcha_is_terminal_and_never_requeued(app_dir, isolated_db):
     # The captcha job exists but is excluded — the queue is genuinely empty.
     assert payload_of(result)["error"]["code"] == "no_eligible_job"
 
-    from applypilot.apply.launcher import reset_failed
+    from kestrel.apply.launcher import reset_failed
     assert reset_failed() == 0  # captcha rows are skipped by the sweep
 
 

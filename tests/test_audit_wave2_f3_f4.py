@@ -15,9 +15,9 @@ import json
 import pytest
 from typer.testing import CliRunner
 
-from applypilot.apply import planning
-from applypilot.cli import app
-from applypilot.scoring.docs import _safe_component, output_prefix
+from kestrel.apply import planning
+from kestrel.cli import app
+from kestrel.scoring.docs import _safe_component, output_prefix
 
 runner = CliRunner()
 
@@ -80,14 +80,14 @@ def test_output_prefix_is_ascii_for_non_latin_jobs():
 
 @pytest.fixture()
 def queue(app_dir):
-    from applypilot import database
+    from kestrel import database
     database.init_db()
     return database.get_connection()
 
 
 @pytest.fixture()
 def tier_ok(monkeypatch):
-    from applypilot import config
+    from kestrel import config
     monkeypatch.setattr(config, "check_tier", lambda tier, feature: None)
 
 
@@ -139,7 +139,7 @@ def test_confirm_refuses_legacy_tokens_hashed_without_requested_limit(
     tamper surface cannot be vouched for."""
     _seed_apply_queue(queue, 2)
 
-    from applypilot import config
+    from kestrel import config
     old_core = {"day": planning.utc_today(), "min_score": 7, "cap": 5,
                 "urls": ["https://x.com/jobs/1", "https://x.com/jobs/2"]}
     legacy = {**old_core,

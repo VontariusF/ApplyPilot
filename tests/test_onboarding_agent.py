@@ -13,7 +13,7 @@ import stat
 import pytest
 import yaml
 
-from applypilot import config, engine_auth, onboarding
+from kestrel import config, engine_auth, onboarding
 
 SIGNED_IN = engine_auth.EngineStatus("claude", engine_auth.SIGNED_IN, "claude.ai", "/usr/bin/claude")
 SIGNED_OUT = engine_auth.EngineStatus("claude", engine_auth.SIGNED_OUT, None, "/usr/bin/claude")
@@ -56,7 +56,7 @@ def envelope(result, is_error=False):
 PROFILE_BLOCK = """Here is your profile.
 
 ```json
-{"_applypilot_profile": {
+{"_kestrel_profile": {
     "personal": {"full_name": "Test Person", "email": "test@example.com"},
     "work_authorization": {"legally_authorized_to_work": "Yes",
                            "require_sponsorship": "No"},
@@ -68,7 +68,7 @@ PROFILE_BLOCK = """Here is your profile.
     "skills_boundary": {"programming_languages": "Python, SQL"},
     "resume_facts": {},
     "eeo_voluntary": {}},
- "_applypilot_search": {"queries": ["Data Engineer", "Analytics Engineer"],
+ "_kestrel_search": {"queries": ["Data Engineer", "Analytics Engineer"],
                         "location": "Austin, TX", "remote": true}}
 ```
 """
@@ -81,10 +81,10 @@ if os.environ.get("FAKE_CLAUDE_MODE") == "sparse_correction":
         envelope("Hello! Tell me about your background.")
     elif "changed my email" in prompt:
         envelope("Updated!\n```json\n" + json.dumps(
-            {"_applypilot_profile": {"personal": {"email": "new@example.com"}}}) + "\n```")
+            {"_kestrel_profile": {"personal": {"email": "new@example.com"}}}) + "\n```")
     elif "changed my city" in prompt:
         envelope("Updated!\n```json\n" + json.dumps(
-            {"_applypilot_profile": {"personal": {"city": "Denver, CO"}}}) + "\n```")
+            {"_kestrel_profile": {"personal": {"city": "Denver, CO"}}}) + "\n```")
     else:
         envelope("Thanks! " + PROFILE_BLOCK)
     sys.exit(0)
@@ -289,30 +289,30 @@ def _draft_reply(**profile_overrides):
     }
     profile.update(profile_overrides)
     return ("Confirmed.\n```json\n" + json.dumps({
-        "_applypilot_profile": profile,
-        "_applypilot_search": {"queries": ["Data Engineer"],
+        "_kestrel_profile": profile,
+        "_kestrel_search": {"queries": ["Data Engineer"],
                                "location": "Austin, TX", "remote": True},
     }) + "\n```")
 
 
 def test_extract_accepts_wrapper_and_bare_blocks():
     assert onboarding.extract_profile_draft("text\n```json\n" + json.dumps(
-        {"_applypilot_profile": {"personal": {}}, "_applypilot_search": {}}) + "\n```")
+        {"_kestrel_profile": {"personal": {}}, "_kestrel_search": {}}) + "\n```")
     bare = {"personal": {}, "work_authorization": {}, "compensation": {}}
     draft = onboarding.extract_profile_draft("```json\n" + json.dumps(bare) + "\n```")
-    assert draft["_applypilot_profile"] == bare  # wrapper-less LLM drift accepted
+    assert draft["_kestrel_profile"] == bare  # wrapper-less LLM drift accepted
     assert onboarding.extract_profile_draft("no block here") is None
     assert onboarding.extract_profile_draft("```json\n{broken\n```") is None
 
 
 def test_normalize_fills_eight_keys_and_coerces():
     profile, meta = onboarding.normalize_profile(
-        {"_applypilot_profile": {
+        {"_kestrel_profile": {
             "personal": {"full_name": "Test Person", "password": "SHOULD_NOT_SURVIVE"},
             "work_authorization": {"legally_authorized_to_work": True,
                                    "require_sponsorship": "false"},
          },
-         "_applypilot_search": {"queries": "Data Engineer, Analytics Engineer",
+         "_kestrel_search": {"queries": "Data Engineer, Analytics Engineer",
                                 "location": "Austin, TX", "remote": True}})
     assert set(profile) == set(onboarding._PROFILE_KEYS)
     # Wizard field shape inside every section:
@@ -332,8 +332,8 @@ def test_normalize_fills_eight_keys_and_coerces():
 def test_normalize_profile_leaves_unanswered_auth_blank():
     """Sweep A S2-1: no recorded answer stays unanswered — never a default."""
     profile, _ = onboarding.normalize_profile(
-        {"_applypilot_profile": {"work_authorization": {}, "availability": {}},
-         "_applypilot_search": {}})
+        {"_kestrel_profile": {"work_authorization": {}, "availability": {}},
+         "_kestrel_search": {}})
     assert profile["work_authorization"]["legally_authorized_to_work"] == ""
     assert profile["work_authorization"]["require_sponsorship"] == ""
     assert profile["availability"]["earliest_start_date"] == ""
@@ -342,22 +342,22 @@ def test_normalize_profile_leaves_unanswered_auth_blank():
 def test_review_flags_unanswered_auth_questions(app_dir, fake_llm):
     """Sweep A S2-1: the review screen names unanswered gating questions."""
     profile, _ = onboarding.normalize_profile(
-        {"_applypilot_profile": {"personal": {"full_name": "Test Person",
+        {"_kestrel_profile": {"personal": {"full_name": "Test Person",
                                               "email": "test@example.com"},
                                   "work_authorization": {}, "availability": {}},
-         "_applypilot_search": {}})
+         "_kestrel_search": {}})
     missing = onboarding.missing_review_fields(profile)
     assert "Work authorization (yes/no)" in missing
     assert "Sponsorship needed (yes/no)" in missing
     assert "Earliest start date" in missing
     # Answered profiles are not flagged:
     answered, _ = onboarding.normalize_profile(
-        {"_applypilot_profile": {"personal": {"full_name": "Test Person",
+        {"_kestrel_profile": {"personal": {"full_name": "Test Person",
                                               "email": "test@example.com"},
                                   "work_authorization": {"legally_authorized_to_work": True,
                                                          "require_sponsorship": False},
                                   "availability": {"earliest_start_date": "March 2027"}},
-         "_applypilot_search": {}})
+         "_kestrel_search": {}})
     missing_answered = onboarding.missing_review_fields(answered)
     assert not any("authorization" in m or "Sponsorship" in m or "start date" in m
                    for m in missing_answered)
@@ -366,8 +366,8 @@ def test_review_flags_unanswered_auth_questions(app_dir, fake_llm):
 def test_missing_review_fields_named_for_add_later(app_dir, fake_llm):
     state = onboarding.start_interview("llm")
     state.profile_draft = {**onboarding.normalize_profile(
-        {"_applypilot_profile": {}, "_applypilot_search": {}})[0],
-        "_applypilot_search": {}}
+        {"_kestrel_profile": {}, "_kestrel_search": {}})[0],
+        "_kestrel_search": {}}
     missing = onboarding.missing_review_fields(state.profile_draft)
     assert "Full name" in missing and "Email address" in missing
 
@@ -633,7 +633,7 @@ def test_later_sparse_fenced_block_fills_without_erasing(app_dir, fake_llm):
     onboarding.save_state(onboarding.InterviewState(
         phase=onboarding.INTERVIEW, backend="llm", profile_draft=RICH_DRAFT))
     fake_llm.replies = [
-        'Sure.\n```json\n{"_applypilot_profile": '
+        'Sure.\n```json\n{"_kestrel_profile": '
         '{"compensation": {"salary_expectation": "90000"}}}\n```']
 
     onboarding.send_message("set my salary to 90000")
@@ -691,7 +691,7 @@ def test_sparse_agent_correction_mid_interview(app_dir, fake_claude, signed_in,
     state = onboarding.load_state()
     assert state.profile_draft["personal"]["email"] == "new@example.com"  # landed
     assert state.profile_draft["personal"]["full_name"] == "Test Person"  # kept
-    assert state.profile_draft["_applypilot_search"]["location"] == "Austin, TX"
+    assert state.profile_draft["_kestrel_search"]["location"] == "Austin, TX"
 
     # A second sparse correction preserves the first.
     onboarding.keep_editing()
@@ -720,7 +720,7 @@ def test_ack_turn_ignores_fenced_blocks(app_dir, fake_llm):
         profile_draft=RICH_DRAFT,
         pending_context="RESUME TEXT: ..."))
     fake_llm.replies = [
-        'Noted.\n```json\n{"_applypilot_profile": '
+        'Noted.\n```json\n{"_kestrel_profile": '
         '{"compensation": {"salary_expectation": "95000"}}}\n```']
 
     onboarding.record_answer("education", value="Master's")

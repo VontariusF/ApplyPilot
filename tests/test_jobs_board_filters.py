@@ -11,8 +11,8 @@ import time
 
 import httpx
 
-from applypilot.database import init_db
-from applypilot.portal import queries
+from kestrel.database import init_db
+from kestrel.portal import queries
 
 
 def seed_job(**overrides) -> str:
@@ -256,7 +256,7 @@ def test_onboarding_find_jobs_starts_pipeline_run(portal_client, seeded_profile,
                                                   monkeypatch):
     import time
 
-    from applypilot.portal import runner as runner_mod
+    from kestrel.portal import runner as runner_mod
 
     client, _ = portal_client
     original = runner_mod.start_run
@@ -284,7 +284,7 @@ def test_onboarding_find_jobs_starts_pipeline_run(portal_client, seeded_profile,
 def test_onboarding_done_card_offers_find_jobs(portal_client, seeded_profile,
                                                monkeypatch):
     """The confirm step's done card carries the handoff action."""
-    from applypilot.portal import app as portal_app_module
+    from kestrel.portal import app as portal_app_module
 
     client, _ = portal_client
 
@@ -306,7 +306,7 @@ def test_onboarding_done_card_offers_find_jobs(portal_client, seeded_profile,
 def test_empty_state_find_jobs_button_posts_runs_start(portal_client, seeded_profile,
                                                        monkeypatch):
     """The board's empty state routes through the same runs-start path."""
-    from applypilot.portal import runner as runner_mod
+    from kestrel.portal import runner as runner_mod
 
     client, _ = portal_client
     kinds: list[str] = []
@@ -336,7 +336,7 @@ def test_rescore_does_not_block_event_loop(portal_env, portal_client,
     until the sleep finishes — its completion lands at >= the full blocking
     duration after scoring began.
     """
-    from applypilot.portal import app as portal_app_module
+    from kestrel.portal import app as portal_app_module
 
     client, _ = portal_client
     app = client.app
@@ -380,7 +380,7 @@ def test_board_context_async_matches_sync(portal_client, seeded_profile):
     does."""
     import asyncio
 
-    from applypilot.portal.app import (_board_view, _jobs_board_context,
+    from kestrel.portal.app import (_board_view, _jobs_board_context,
                                        _jobs_board_context_async)
 
     assert asyncio.run(_jobs_board_context_async(_board_view({}))) == (

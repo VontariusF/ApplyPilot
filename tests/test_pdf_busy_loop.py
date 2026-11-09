@@ -20,8 +20,8 @@ from pathlib import Path
 
 import pytest
 
-from applypilot import database, pipeline
-from applypilot.scoring import pdf as pdf_mod
+from kestrel import database, pipeline
+from kestrel.scoring import pdf as pdf_mod
 
 
 def _seed_tailored_job(url: str, txt_path: str) -> None:

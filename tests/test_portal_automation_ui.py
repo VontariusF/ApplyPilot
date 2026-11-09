@@ -16,8 +16,8 @@ from html import unescape
 
 import pytest
 
-from applypilot.database import get_connection, init_db
-from applypilot.portal import automation, runner
+from kestrel.database import get_connection, init_db
+from kestrel.portal import automation, runner
 
 
 def seed_applied(n: int) -> None:
@@ -205,7 +205,7 @@ def test_toggles_survive_portal_restart(portal_env, portal_client):
     # The "restart": a brand-new app instance + client over the same app dir.
     from fastapi.testclient import TestClient
 
-    from applypilot.portal.app import create_app
+    from kestrel.portal.app import create_app
     app = create_app()
     fresh = TestClient(app, base_url="http://127.0.0.1")
     fresh.headers["x-portal-token"] = app.state.token
@@ -316,7 +316,7 @@ def test_cap_usage_line_shows_used_of_cap(portal_client):
 
 def test_cards_stream_pushes_on_change(portal_client):
     """A change since connect is pushed as the cards partial (push-on-change)."""
-    from applypilot.portal import app as portal_app
+    from kestrel.portal import app as portal_app
 
     last = portal_app._automation_signature()
     client, _ = portal_client
@@ -507,7 +507,7 @@ def test_runs_start_rejects_offsite_next_targets(portal_client, real_spawns):
 
 def test_progress_stream_pushes_on_change(portal_client):
     """Run start since connect is pushed as the strip partial."""
-    from applypilot.portal import app as portal_app
+    from kestrel.portal import app as portal_app
 
     last = portal_app._progress_signature()
     assert last == ("idle", None)
@@ -532,8 +532,8 @@ def test_progress_stream_pushes_on_change(portal_client):
 @pytest.fixture()
 def agent_panel(monkeypatch):
     """Clean in-memory transcript + provider gate opened for the fake LLM."""
-    from applypilot.portal import assistant
-    from applypilot import onboarding
+    from kestrel.portal import assistant
+    from kestrel import onboarding
 
     monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
     assistant.clear_transcript()
@@ -602,7 +602,7 @@ def test_agent_falls_back_for_out_of_scope_asks(portal_client, agent_panel,
 
 def test_agent_without_provider_shows_the_gate(portal_client):
     """No fake_llm, no provider configured: a visible error, no crash."""
-    from applypilot.portal import assistant
+    from kestrel.portal import assistant
 
     assistant.clear_transcript()
     client, _ = portal_client

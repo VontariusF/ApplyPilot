@@ -12,9 +12,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from typer.testing import CliRunner
 
-from applypilot import database
-from applypilot.cli import app
-from applypilot.database import FilterPredicates, filter_jobs
+from kestrel import database
+from kestrel.cli import app
+from kestrel.database import FilterPredicates, filter_jobs
 
 runner = CliRunner()
 
@@ -27,7 +27,7 @@ RESUME_TEXT = "engineer with nine years of platform experience\n"
 
 
 def _hash(text: str) -> str:
-    from applypilot.scoring.scorer import resume_sha256
+    from kestrel.scoring.scorer import resume_sha256
     return resume_sha256(text)
 
 

@@ -7,7 +7,7 @@ passing against the new presentation; these tests pin what the cards show.
 
 from datetime import datetime, timedelta, timezone
 
-from applypilot.database import init_db
+from kestrel.database import init_db
 
 
 def seed_job(**overrides) -> str:
@@ -35,7 +35,7 @@ def seed_job(**overrides) -> str:
 # ---------------------------------------------------------------------------
 
 def test_relative_age_buckets():
-    from applypilot.portal.app import _relative_age
+    from kestrel.portal.app import _relative_age
 
     now = datetime.now(timezone.utc)
     assert _relative_age(None) == ""

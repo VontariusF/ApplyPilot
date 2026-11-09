@@ -14,7 +14,7 @@ import re
 
 import pytest
 
-from applypilot import config, engine_auth, onboarding
+from kestrel import config, engine_auth, onboarding
 
 from tests.test_onboarding_agent import FAKE_CLAUDE, SIGNED_IN
 
@@ -233,9 +233,9 @@ def test_walk_renders_records_and_advances_every_question(portal_client, fake_ll
     assert draft["experience"]["years_of_experience_total"] == "3–5"
     assert draft["personal"]["country"] == "United States"
     assert draft["skills_boundary"]["programming_languages"] == ["Python", "SQL"]
-    assert draft["_applypilot_search"]["queries"] == ["Data Engineer", "Analytics Engineer"]
-    assert draft["_applypilot_search"]["remote"] is True
-    assert draft["_applypilot_search"]["location"] == "Austin, TX"  # falls back to the city
+    assert draft["_kestrel_search"]["queries"] == ["Data Engineer", "Analytics Engineer"]
+    assert draft["_kestrel_search"]["remote"] is True
+    assert draft["_kestrel_search"]["location"] == "Austin, TX"  # falls back to the city
 
     page = client.post("/onboarding/confirm")
     assert page.status_code == 200
@@ -411,10 +411,10 @@ def test_not_sure_sponsorship_stays_unanswered(portal_client, fake_llm, monkeypa
 
 def test_answers_win_over_agent_json(app_dir):
     agent_json = {
-        "_applypilot_profile": {
+        "_kestrel_profile": {
             "work_authorization": {"legally_authorized_to_work": "Yes", "require_sponsorship": "No"}
         },
-        "_applypilot_search": {},
+        "_kestrel_search": {},
     }
     answers = {"work_authorized": "no", "sponsorship": "not_sure"}
     profile, _ = onboarding.normalize_profile(agent_json, answers)
@@ -433,8 +433,8 @@ def test_no_answers_means_no_gating_values(app_dir):
 
 def test_agent_json_fills_what_the_wizard_does_not_own(app_dir):
     agent_json = {
-        "_applypilot_profile": {"personal": {"email": "agent@example.com"}},
-        "_applypilot_search": {"location": "Denver, CO"},
+        "_kestrel_profile": {"personal": {"email": "agent@example.com"}},
+        "_kestrel_search": {"location": "Denver, CO"},
     }
     answers = {"full_name": "Test Person", "email": "mine@example.com"}
     profile, meta = onboarding.normalize_profile(agent_json, answers)
@@ -880,13 +880,13 @@ def test_review_clearing_a_bridged_answer_removes_the_draft_value(app_dir):
         # semantics, not the name gate.
         profile_draft={"personal": {"full_name": "Test User",
                                     "email": "resume@example.com"},
-                       "_applypilot_search": {"remote": True}}))
+                       "_kestrel_search": {"remote": True}}))
 
     onboarding.update_answers({"email": "", "work_style": ""})
     state = onboarding.load_state()
     assert state.answers == {"email": "", "work_style": ""}
     assert state.profile_draft["personal"]["email"] == ""  # cleared, not resurrected
-    assert state.profile_draft["_applypilot_search"]["remote"] is False
+    assert state.profile_draft["_kestrel_search"]["remote"] is False
 
     onboarding.confirm_profile()
     profile = json.loads(config.PROFILE_PATH.read_text())
@@ -965,7 +965,7 @@ def test_record_answer_guards_order_and_duplicate_submits(app_dir, fake_llm, mon
     onboarding.save_state(onboarding.InterviewState(
         phase=onboarding.INTERVIEW, backend="llm",
         answers={"full_name": "Jane Q. Public"},
-        profile_draft={"_applypilot_profile": {"personal": {"email": "resume@example.com"}}}))
+        profile_draft={"_kestrel_profile": {"personal": {"email": "resume@example.com"}}}))
     state = onboarding.record_answer("email", free_text="resume@example.com")
     assert state.answers["email"] == "resume@example.com"
 

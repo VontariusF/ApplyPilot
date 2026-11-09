@@ -107,8 +107,8 @@ def test_agent_panel_actions_via_fake_llm_and_plain_run_rows(
         run_journey, chromium, portal_server, harmless_runs, fake_llm,
         monkeypatch):
     """The panel drives the same actions; run history reads in plain language."""
-    from applypilot import onboarding
-    from applypilot.portal import runner
+    from kestrel import onboarding
+    from kestrel.portal import runner
 
     # The panel's provider gate detects env providers; the fake sits at the
     # client seam, so open the gate the same way the route tests do.
@@ -153,8 +153,8 @@ def test_agent_panel_actions_via_fake_llm_and_plain_run_rows(
 def _seed_run(run_id: str, kind: str, params: dict | None,
               status: str, **extra) -> None:
     """Insert a registry row directly (same helper shape as the route tests)."""
-    from applypilot.database import get_connection
-    from applypilot.portal import runner
+    from kestrel.database import get_connection
+    from kestrel.portal import runner
 
     runner.init_registry()
     now = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
@@ -196,7 +196,7 @@ def test_progress_strip_on_the_jobs_board(run_journey, chromium,
     """A running find-jobs pipeline shows 'Working: Finding jobs — N found'."""
     from datetime import datetime, timezone
 
-    from applypilot.database import init_db
+    from kestrel.database import init_db
 
     _seed_run("e2e-pipeline", "pipeline", {"results_level": "standard"},
               "running")

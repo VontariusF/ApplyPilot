@@ -20,8 +20,8 @@ from pathlib import Path
 import httpx
 import pytest
 
-import applypilot.discovery.composio as composio
-from applypilot.discovery.composio import (
+import kestrel.discovery.composio as composio
+from kestrel.discovery.composio import (
     DEFAULT_USER_ID,
     TOOL_REGISTRY,
     ComposioClient,
@@ -29,7 +29,7 @@ from applypilot.discovery.composio import (
     map_web3_job,
     store_web3_jobs,
 )
-from applypilot.database import init_db
+from kestrel.database import init_db
 
 API_KEY = "test-key-not-a-real-credential"
 
@@ -283,7 +283,7 @@ def test_missing_connection_is_degraded_source_error(clean_composio_env):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(404, json={
             "error": {"message": "No connected account found for user ID "
-                                 "applypilot-spike for toolkit web3_career",
+                                 "kestrel for toolkit web3_career",
                       "code": 1810,
                       "slug": "ActionExecute_ConnectedAccountNotFound",
                       "suggested_fix": "Connect your web3_career account first."}})
@@ -577,20 +577,20 @@ def test_empty_result_is_clean(clean_composio_env, monkeypatch, isolated_db):
 def test_discover_stage_degrades_on_composio_error(monkeypatch, clean_composio_env):
     """A Composio source error lands in the discover-stage summary exactly
     like the other sources — logged, counted, never a crashed stage."""
-    monkeypatch.setattr("applypilot.discovery.jobspy.run_discovery", lambda: None)
-    monkeypatch.setattr("applypilot.discovery.workday.run_workday_discovery",
+    monkeypatch.setattr("kestrel.discovery.jobspy.run_discovery", lambda: None)
+    monkeypatch.setattr("kestrel.discovery.workday.run_workday_discovery",
                         lambda employers=None, workers=1: None)
-    monkeypatch.setattr("applypilot.discovery.smartextract.run_smart_extract",
+    monkeypatch.setattr("kestrel.discovery.smartextract.run_smart_extract",
                         lambda workers=1: None)
 
-    import applypilot.discovery.composio as composio_module
+    import kestrel.discovery.composio as composio_module
 
     def boom():
         raise ComposioError("no ACTIVE connection for toolkit web3_career")
 
     monkeypatch.setattr(composio_module, "run_composio_discovery", boom)
 
-    import applypilot.pipeline as pipeline
+    import kestrel.pipeline as pipeline
     stats = pipeline._run_discover()
     assert stats["composio"].startswith("error:")
     assert "no ACTIVE connection" in stats["composio"]
@@ -628,7 +628,7 @@ def test_doctor_row_block_without_key_warns(clean_composio_env, monkeypatch):
 
 
 def test_wizard_composio_step_writes_env_and_yaml(app_dir, monkeypatch):
-    import applypilot.wizard.init as wizard
+    import kestrel.wizard.init as wizard
 
     answers = iter(["ck_wizard_secret_4321", "web3_career", DEFAULT_USER_ID])
     monkeypatch.setattr(wizard.Confirm, "ask", staticmethod(lambda *a, **k: True))
@@ -659,7 +659,7 @@ def test_wizard_composio_step_writes_env_and_yaml(app_dir, monkeypatch):
 
 
 def test_wizard_composio_step_skippable(app_dir, monkeypatch):
-    import applypilot.wizard.init as wizard
+    import kestrel.wizard.init as wizard
 
     monkeypatch.setattr(wizard.Confirm, "ask", staticmethod(lambda *a, **k: False))
     wizard._setup_composio()
@@ -686,11 +686,11 @@ def test_base_install_imports_without_composio_sdk():
                 return None
 
         sys.meta_path.insert(0, _BlockExtra())
-        import applypilot.discovery.composio  # noqa: F401
-        import applypilot.pipeline  # noqa: F401
+        import kestrel.discovery.composio  # noqa: F401
+        import kestrel.pipeline  # noqa: F401
         print("ok")
     """)
-    env = dict(os.environ, APPLYPILOT_DIR=tempfile.mkdtemp(prefix="applypilot-lazy-"))
+    env = dict(os.environ, KESTREL_DIR=tempfile.mkdtemp(prefix="kestrel-lazy-"))
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                             env=env, cwd=repo_root, timeout=120)
     assert result.returncode == 0, result.stderr

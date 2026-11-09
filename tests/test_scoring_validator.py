@@ -7,7 +7,7 @@ user actually listed in their profile's skills_boundary (F-6) — the
 profile-grounded helper existed but was never wired.
 """
 
-from applypilot.scoring.validator import (
+from kestrel.scoring.validator import (
     validate_json_fields,
     validate_tailored_resume,
 )

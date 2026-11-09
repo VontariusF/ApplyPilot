@@ -12,7 +12,7 @@ inside pytest that loop stays registered as running for every later test —
 breaking any test that calls asyncio.run afterwards (the SSE suites do).
 A per-journey loop is created and fully unwound, so nothing leaks.
 
-Runs headless everywhere by default; set APPLYPILOT_E2E_HEADED=1 to watch
+Runs headless everywhere by default; set KESTREL_E2E_HEADED=1 to watch
 it locally. When the Chromium binary is missing, the suite SKIPS with the
 install hint instead of failing — plain `pytest` stays green for
 contributors who have not run `playwright install chromium`. CI installs
@@ -33,7 +33,7 @@ import pytest
 
 def _headed() -> bool:
     """True when the operator asked to watch the browser (local debugging)."""
-    return os.environ.get("APPLYPILOT_E2E_HEADED", "").strip().lower() in {"1", "true", "yes"}
+    return os.environ.get("KESTREL_E2E_HEADED", "").strip().lower() in {"1", "true", "yes"}
 
 
 def _free_port() -> int:
@@ -56,8 +56,8 @@ def portal_server(portal_env, seeded_profile, fake_llm, monkeypatch):
     """
     import uvicorn
 
-    from applypilot.portal import app as portal_app_module
-    from applypilot.portal.app import create_app
+    from kestrel.portal import app as portal_app_module
+    from kestrel.portal.app import create_app
 
     # Speed up SSE idle-close in tests (generators read these at runtime).
     monkeypatch.setattr(portal_app_module, "POLL_SECONDS", 0.05)
@@ -107,7 +107,7 @@ def harmless_runs(monkeypatch):
     """
     import sys
 
-    from applypilot.portal import runner
+    from kestrel.portal import runner
 
     original = runner.start_run
 
@@ -125,7 +125,7 @@ def seeded_job(portal_env):
     """One scored job in the isolated store, so the board has a row to show."""
     from datetime import datetime, timezone
 
-    from applypilot.database import init_db
+    from kestrel.database import init_db
 
     conn = init_db()
     conn.execute(

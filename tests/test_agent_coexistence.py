@@ -1,6 +1,6 @@
 """Protocol/portal coexistence on one store (spec art_A71wyYS4, Verification 2).
 
-The portal and the `applypilot agent` protocol are two front doors over one
+The portal and the `kestrel agent` protocol are two front doors over one
 onboarding state file and one single-session lock. These tests prove the
 shared-truth property in both directions and the busy refusal at both
 doors:
@@ -29,8 +29,8 @@ import time
 import pytest
 from typer.testing import CliRunner
 
-from applypilot import engine_auth, onboarding
-from applypilot.cli import app
+from kestrel import engine_auth, onboarding
+from kestrel.cli import app
 
 from tests.test_onboarding_agent import FAKE_CLAUDE, SIGNED_IN
 

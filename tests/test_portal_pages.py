@@ -6,7 +6,7 @@ directly and assert the rendered output and the manual-override effects.
 
 from datetime import datetime, timezone
 
-from applypilot.database import get_connection, init_db
+from kestrel.database import get_connection, init_db
 
 
 def seed_job(**overrides) -> str:
@@ -31,7 +31,7 @@ def seed_job(**overrides) -> str:
 
 
 def portal_resume() -> object:
-    from applypilot import config
+    from kestrel import config
     return config.APP_DIR / "tailored_resumes" / "resume.txt"
 
 
@@ -138,7 +138,7 @@ def test_jobs_redirect_encodes_url_location(portal_client, monkeypatch):
     """mark/regenerate/rescore build an encoded /jobs/detail?url= target."""
     from urllib.parse import quote
 
-    import applypilot.portal.app as portal_app
+    import kestrel.portal.app as portal_app
 
     client, _ = portal_client
     url = seed_job(url="https://jobs.lever.co/acme/abc?team=platform&mode=board")
@@ -199,7 +199,7 @@ def test_runs_page_renders_history(portal_client):
     import sys
 
     client, _ = portal_client
-    from applypilot.portal import runner
+    from kestrel.portal import runner
 
     runner.start_run("pipeline", {}, command=[sys.executable, "-c", "pass"],
                      emit_jsonl=False)
@@ -217,7 +217,7 @@ def test_runs_start_route_spawns_and_records(portal_client, monkeypatch):
     import sys
     import time
 
-    from applypilot.portal import runner as runner_mod
+    from kestrel.portal import runner as runner_mod
 
     client, _ = portal_client
     original = runner_mod.start_run
@@ -258,7 +258,7 @@ def test_runs_start_refused_while_run_active(portal_client):
     client, _ = portal_client
     from urllib.parse import unquote
 
-    from applypilot.portal import runner as runner_mod
+    from kestrel.portal import runner as runner_mod
 
     runner_mod.init_registry()
     get_connection().execute(
@@ -277,7 +277,7 @@ def test_runs_start_refused_while_run_active(portal_client):
 def test_log_page_renders_redacted_backfill(portal_client, portal_env):
     import json as _json
 
-    from applypilot import config
+    from kestrel import config
 
     client, _ = portal_client
     config.ENV_PATH.write_text("GEMINI_API_KEY=secret-gemini-key\n", encoding="utf-8")
@@ -285,7 +285,7 @@ def test_log_page_renders_redacted_backfill(portal_client, portal_env):
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text("used secret-gemini-key during startup\n", encoding="utf-8")
 
-    from applypilot.portal import runner as runner_mod
+    from kestrel.portal import runner as runner_mod
 
     runner_mod.init_registry()
     conn = get_connection()

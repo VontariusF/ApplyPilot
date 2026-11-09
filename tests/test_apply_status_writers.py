@@ -15,9 +15,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from applypilot import config, database
-from applypilot.apply import launcher
-from applypilot.database import get_connection, init_db
+from kestrel import config, database
+from kestrel.apply import launcher
+from kestrel.database import get_connection, init_db
 
 HX = {"HX-Request": "true"}
 
@@ -32,7 +32,7 @@ def queue(app_dir):
 @pytest.fixture()
 def start_spy(portal_client, monkeypatch):
     """Replace runner.start_run (the real spawn) with a recording fake."""
-    from applypilot.portal import runner
+    from kestrel.portal import runner
 
     calls: list[tuple[str, dict]] = []
 
@@ -386,7 +386,7 @@ def test_count_apply_eligible_agrees_with_acquire_on_manual_ats(queue):
     count manual-ATS jobs the worker refuses — every scheduled run then
     marked one 'manual' and exited 'Queue empty', burning a tracked run
     per manual-ATS job. The count mirrors the worker's predicate."""
-    from applypilot.apply import launcher
+    from kestrel.apply import launcher
 
     manual_url = "https://ibegin.tcsapps.com/job/123"
     seed_job(url=manual_url, application_url=manual_url,
@@ -466,7 +466,7 @@ def test_worker_captcha_after_manual_applied_records_conflict(app_dir):
 def test_count_apply_eligible_excludes_captcha(queue):
     """Queue predicate copy 3 (count_apply_eligible): captcha rows are
     terminal by decision and are never counted as eligible."""
-    from applypilot.apply import launcher as launcher_mod
+    from kestrel.apply import launcher as launcher_mod
 
     captcha_url = "https://jobs.example/blocked"
     seed_job(url=captcha_url, application_url=captcha_url,

@@ -61,9 +61,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUN_DIR = Path(os.environ.get("DOGFOOD_RUN_DIR") or Path(tempfile.gettempdir()) / "dogfood-run")
 
-# --- Environment BEFORE any applypilot import binds paths at import time. ---
+# --- Environment BEFORE any kestrel import binds paths at import time. ---
 RUN_DIR.mkdir(parents=True, exist_ok=True)
-os.environ["APPLYPILOT_DIR"] = str(RUN_DIR / "applypilot")
+os.environ["KESTREL_DIR"] = str(RUN_DIR / "kestrel")
 
 BIN_DIR = RUN_DIR / "bin"
 BIN_DIR.mkdir(exist_ok=True)
@@ -192,7 +192,7 @@ def _start_stub_server() -> tuple[str, ThreadingHTTPServer]:
 PROFILE_BLOCK = """Here is your profile.
 
 ```json
-{"_applypilot_profile": {
+{"_kestrel_profile": {
     "personal": {"full_name": "Test Person", "email": "test@example.com"},
     "work_authorization": {"legally_authorized_to_work": "Yes",
                            "require_sponsorship": "No"},
@@ -204,7 +204,7 @@ PROFILE_BLOCK = """Here is your profile.
     "skills_boundary": {"programming_languages": "Python, SQL"},
     "resume_facts": {},
     "eeo_voluntary": {}},
- "_applypilot_search": {"queries": ["Data Engineer", "Analytics Engineer"],
+ "_kestrel_search": {"queries": ["Data Engineer", "Analytics Engineer"],
                         "location": "Austin, TX", "remote": true}}
 ```
 """
@@ -216,11 +216,11 @@ os.environ["FAKE_PROFILE_BLOCK"] = PROFILE_BLOCK
 PARTIAL_BLOCK = """Here's what I have so far.
 
 ```json
-{"_applypilot_profile": {
+{"_kestrel_profile": {
     "experience": {"current_title": "Data Engineer",
                    "years_of_experience_total": "6"},
     "skills_boundary": {"programming_languages": "Python, SQL"}},
- "_applypilot_search": {"queries": ["Data Engineer"],
+ "_kestrel_search": {"queries": ["Data Engineer"],
                         "location": "Austin, TX", "remote": true}}
 ```
 """
@@ -333,7 +333,7 @@ class Transcript:
 
     def cmd(self, argv: list[str], output: str, exit_code: int) -> None:
         rendered = " ".join(a if " " not in a else f'"{a}"' for a in argv)
-        self.parts.append(f"```bash\n$ applypilot {rendered}\n```\n")
+        self.parts.append(f"```bash\n$ kestrel {rendered}\n```\n")
         if exit_code == 0:
             self.parts.append(f"```json\n{output.strip()}\n```\n")
         else:
@@ -378,16 +378,16 @@ def main() -> int:
     import pytest
     from typer.testing import CliRunner
 
-    import applypilot.scoring.scorer as scorer  # noqa: F401  (RESUME_PATH binds once)
-    from applypilot import config, database, onboarding
-    from applypilot.apply import planning
-    from applypilot.cli import app
+    import kestrel.scoring.scorer as scorer  # noqa: F401  (RESUME_PATH binds once)
+    from kestrel import config, database, onboarding
+    from kestrel.apply import planning
+    from kestrel.cli import app
 
     mp = pytest.MonkeyPatch()
     runner = CliRunner()
     t = Transcript()
 
-    t.h(1, "ApplyPilot agent-protocol dogfood transcript")
+    t.h(1, "Kestrel agent-protocol dogfood transcript")
     t.note(f"Product head under test: `{_git(['merge-base', 'origin/main', 'HEAD'])}` "
            f"(origin/main — the harness adds scripts only). Branch head: `{_git_head()}`.")
     t.note(f"Run directory (throwaway): `{RUN_DIR}` · fake claude: `{fake}` · "
@@ -408,8 +408,8 @@ def main() -> int:
     t.note("- Every protocol verb below is the real CLI in a fresh invocation surface;")
 
     # ---- Stub the discovery/enrichment network seams (stage code stays real).
-    from applypilot.discovery import composio, jobspy, smartextract, workday
-    from applypilot.enrichment import detail
+    from kestrel.discovery import composio, jobspy, smartextract, workday
+    from kestrel.enrichment import detail
 
     JOBS = [
         {"url": "https://jobs.example/alpha", "title": "Data Engineer",
@@ -460,7 +460,7 @@ def main() -> int:
                 pass
         t.cmd(argv, body, result.exit_code)
         if result.exit_code != 0:
-            t.failures.append(f"unexpected nonzero exit: applypilot {' '.join(argv)}")
+            t.failures.append(f"unexpected nonzero exit: kestrel {' '.join(argv)}")
         return result.output
 
     def run_probe(argv: list[str], expected_code: str) -> None:
@@ -604,7 +604,7 @@ def main() -> int:
             "fenced text redacted" in (p["last_agent_reply"] or ""),
             (p["last_agent_reply"] or "")[:60])
     t.check("redacted draft carries no raw profile JSON",
-            "_applypilot_profile" not in (p["last_agent_reply"] or ""))
+            "_kestrel_profile" not in (p["last_agent_reply"] or ""))
 
     # The documented exit from the kept-draft interview state: hand the
     # agenda to the agent and back — the completed agenda lands on review.

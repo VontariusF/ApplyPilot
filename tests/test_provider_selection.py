@@ -15,8 +15,8 @@ import stat
 
 import pytest
 
-from applypilot import config
-from applypilot.llm import ModelListError, _detect_provider, describe_provider, mask_key
+from kestrel import config
+from kestrel.llm import ModelListError, _detect_provider, describe_provider, mask_key
 
 GEMINI_COMPAT = "https://generativelanguage.googleapis.com/v1beta/openai"
 OPENAI_BASE = "https://api.openai.com/v1"
@@ -300,7 +300,7 @@ class _FakeConfirm:
 
 
 def _install_wizard_fakes(monkeypatch, answers):
-    from applypilot.wizard import init as wizard
+    from kestrel.wizard import init as wizard
 
     scripted = list(answers)
 
@@ -395,7 +395,7 @@ def test_wizard_gemini_branch_still_works(monkeypatch, tmp_path):
 def test_doctor_never_prints_full_key(monkeypatch, tmp_path):
     from typer.testing import CliRunner
 
-    from applypilot.cli import app
+    from kestrel.cli import app
 
     secret = "sk-test-secret-key-123456"
     monkeypatch.chdir(tmp_path)  # keep load_dotenv away from any real .env
@@ -415,7 +415,7 @@ def test_doctor_never_prints_full_key(monkeypatch, tmp_path):
 def test_doctor_reports_unconfigured_provider_readably(monkeypatch, tmp_path):
     from typer.testing import CliRunner
 
-    from applypilot.cli import app
+    from kestrel.cli import app
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(config, "ENV_PATH", tmp_path / "missing.env")

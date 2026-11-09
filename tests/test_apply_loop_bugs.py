@@ -13,9 +13,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from applypilot import config, database
-from applypilot.apply import launcher
-from applypilot.scoring import docs
+from kestrel import config, database
+from kestrel.apply import launcher
+from kestrel.scoring import docs
 
 
 # ---------------------------------------------------------------------------

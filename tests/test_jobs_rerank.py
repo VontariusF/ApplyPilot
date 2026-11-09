@@ -15,11 +15,11 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from typer.testing import CliRunner
 
-from applypilot import database
-from applypilot.apply import planning
-from applypilot.cli import app
-from applypilot.database import parse_score_history
-from applypilot.scoring.scorer import resume_sha256
+from kestrel import database
+from kestrel.apply import planning
+from kestrel.cli import app
+from kestrel.database import parse_score_history
+from kestrel.scoring.scorer import resume_sha256
 
 runner = CliRunner()
 
@@ -28,7 +28,7 @@ RESUME_V2 = "staff platform engineer with ten years of experience\n"
 
 
 def run(*args):
-    """Invoke `applypilot ...` and return the CliRunner result."""
+    """Invoke `kestrel ...` and return the CliRunner result."""
     return runner.invoke(app, list(args))
 
 
@@ -380,7 +380,7 @@ def test_rescore_records_history_and_rescored_since_delta(store, app_dir):
 def test_score_history_caps_at_five_entries(app_dir, isolated_db):
     conn = database.init_db()
     _seed(conn, "https://jobs.example/cap")
-    from applypilot.scoring.scorer import persist_score
+    from kestrel.scoring.scorer import persist_score
 
     when = datetime.now(timezone.utc).isoformat()
     persist_score(conn, "https://jobs.example/cap", 1, "", "r", "host", when)
@@ -406,7 +406,7 @@ def test_persist_score_history_survives_concurrent_rescores(store, monkeypatch):
     """
     import threading
 
-    from applypilot.scoring.scorer import persist_score
+    from kestrel.scoring.scorer import persist_score
 
     when = datetime.now(timezone.utc).isoformat()
     persist_score(store, "https://jobs.example/j1", 4, "", "r", "host", when)

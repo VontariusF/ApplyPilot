@@ -10,7 +10,7 @@ change timeout behavior for normal chat() calls.
 import httpx
 import pytest
 
-from applypilot import llm
+from kestrel import llm
 
 SECRET = "sk-super-secret-12345"
 

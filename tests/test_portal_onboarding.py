@@ -11,8 +11,8 @@ import json
 
 import pytest
 
-from applypilot import config, engine_auth, onboarding
-from applypilot.portal import app as portal_app
+from kestrel import config, engine_auth, onboarding
+from kestrel.portal import app as portal_app
 
 from tests.test_onboarding_agent import FAKE_CLAUDE, FakeLLMClient
 
@@ -124,12 +124,12 @@ def test_intake_page_flow_drives_the_resume_first_kickoff(portal_client, monkeyp
     client, _ = portal_client
     patch_gates(monkeypatch, claude=SIGNED_IN)
     draft_reply = "Read your resume.\n\n```json\n" + json.dumps({
-        "_applypilot_profile": {
+        "_kestrel_profile": {
             "personal": {"full_name": "Jane Doe", "email": "jane@example.com",
                          "country": "United States"},
             "work_authorization": {},
         },
-        "_applypilot_search": {"queries": ["Data Engineer"], "location": "Austin, TX"},
+        "_kestrel_search": {"queries": ["Data Engineer"], "location": "Austin, TX"},
     }) + "\n```"
     fake_llm.replies[:] = [draft_reply]  # first turn (the kickoff) returns the draft
 

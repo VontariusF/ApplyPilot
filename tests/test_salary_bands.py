@@ -10,9 +10,9 @@ import json
 
 import pytest
 
-from applypilot import config
-from applypilot import onboarding
-from applypilot.apply import prompt as prompt_mod
+from kestrel import config
+from kestrel import onboarding
+from kestrel.apply import prompt as prompt_mod
 
 
 def make_job(resume_pdf):
@@ -140,7 +140,7 @@ def test_decided_country_opens_the_salary_question_even_with_currency_skipped():
 
 def test_recorded_salary_answer_beats_agent_extraction():
     answers = {"salary_band": "90000"}
-    draft = {"_applypilot_profile": {"compensation": {
+    draft = {"_kestrel_profile": {"compensation": {
         "salary_expectation": "999999", "salary_currency": "EUR"}}}
     profile, _ = onboarding.normalize_profile(draft, answers)
     assert profile["compensation"]["salary_expectation"] == "90000"
@@ -148,7 +148,7 @@ def test_recorded_salary_answer_beats_agent_extraction():
 
 def test_normalize_never_defaults_the_currency_to_usd():
     profile, _ = onboarding.normalize_profile(
-        {"_applypilot_profile": {"compensation": {"salary_expectation": "90000"}}}, {})
+        {"_kestrel_profile": {"compensation": {"salary_expectation": "90000"}}}, {})
     assert profile["compensation"]["salary_currency"] == ""
     assert profile["compensation"]["salary_expectation"] == "90000"
 

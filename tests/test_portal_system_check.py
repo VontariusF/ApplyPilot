@@ -9,9 +9,9 @@ probes) and assert the resulting states and copy, never a reimplementation.
 
 import pytest
 
-from applypilot import config, engine_auth, llm, onboarding
-from applypilot.discovery import composio
-from applypilot.portal import system_check as sc
+from kestrel import config, engine_auth, llm, onboarding
+from kestrel.discovery import composio
+from kestrel.portal import system_check as sc
 
 # The real composio check, captured before fixtures stub the module attr.
 _REAL_COMPOSIO_STATE = composio.composio_state
@@ -249,7 +249,7 @@ def test_every_check_renders_in_every_state(state):
         (heading, [sc.Check(cid, f"Label {cid}", state, f"Meaning for {cid}.") for cid in ids])
         for heading, ids in sc._GROUPS
     ]
-    from applypilot.portal.app import templates
+    from kestrel.portal.app import templates
 
     html = templates.env.get_template("partials/system_checks.html").render(
         groups=groups, state_labels=sc.STATE_LABELS
