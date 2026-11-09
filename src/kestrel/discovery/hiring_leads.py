@@ -264,37 +264,38 @@ def map_tavily_result(raw: dict, company_key: str) -> dict:
                              source=LEAD_SOURCE_TAVILY)
 
 
-def company_affiliation_field(*, title: object, snippet: object,
-                              display_name: str,
-                              domain: str | None = None) -> str | None:
-    """Which metadata field attributes this result to the company, if any.
+def title_affiliation_role(*, title: object, display_name: str,
+                           domain: str | None = None,
+                           taxonomy: tuple[str, ...] | list[str] = (),
+                           ) -> str | None:
+    """The hiring role a result TITLE pairs with the company, if any.
 
-    Pure, case-insensitive whole-word match: the company display name —
-    or its domain — must appear in the result title or in the snippet
-    the provider already served. Returns ``"title"`` or ``"snippet"``,
-    or None when neither field names the company. A query keyword is
-    not evidence of affiliation (dogfood finding 2026-11-09: students
-    and founders at unrelated companies were attributed to the queried
-    employer because the query named it). No network calls — both
-    fields are metadata the adapter already holds.
+    Guarantee-grade attribution (dogfood round two, 2026-11-09): the
+    title alone must establish BOTH facts — the company display name
+    or its domain appears as a whole-word match, AND a role-taxonomy
+    term appears. Snippet text is deliberately not read: a profile
+    that merely mentions the company in body text (a project or tool
+    list) is an assertion of affiliation, not evidence of it — the
+    live store attributed a student to supabase.com on exactly that.
+    Returns the matched taxonomy term (as configured, not lowercased),
+    or None. Pure — the title is metadata the adapter already holds.
     """
-    needles = [str(display_name or "").lower()]
-    if domain:
-        needles.append(str(domain).lower())
-    needles = [n for n in needles if n]
-    for field, text in (("title", str(title or "")),
-                        ("snippet", str(snippet or ""))):
-        if not text:
-            continue
-        lowered = text.lower()
-        for needle in needles:
-            if re.search(rf"\b{re.escape(needle)}\b", lowered):
-                return field
+    text = str(title or "").lower()
+    if not text:
+        return None
+    needles = [n for n in (str(display_name or "").lower(),
+                           str(domain or "").lower()) if n]
+    if not any(re.search(rf"\b{re.escape(n)}\b", text) for n in needles):
+        return None
+    for term in taxonomy:
+        if re.search(rf"\b{re.escape(str(term).lower())}\b", text):
+            return str(term)
     return None
 
 
 def affiliated_xray_rows(raw_results: list[dict], company: dict, *,
                          mapper: Callable[[dict, str], dict],
+                         taxonomy: tuple[str, ...] | list[str] = (),
                          ) -> tuple[list[dict], int]:
     """Map raw X-ray results to lead rows, keeping affiliated ones (pure).
 
@@ -303,9 +304,12 @@ def affiliated_xray_rows(raw_results: list[dict], company: dict, *,
 
     1. The LinkedIn host+path gate inside ``mapper`` (not a person, or
        not a profile link — metadata noise).
-    2. The affiliation gate: the company name or domain must appear in
-       the result title or snippet (``company_affiliation_field``);
-       otherwise the result is dropped and counted, not stored.
+    2. The attribution gate: the result TITLE must pair the company
+       (name or domain) with a hiring role from ``taxonomy``
+       (``title_affiliation_role``); anything weaker — a snippet
+       mention, a company name without a hiring role, a role without
+       the company — is an assertion, not a guarantee, and is dropped
+       and counted, never stored.
 
     Returns the mapped rows and the count dropped for no affiliation —
     the run payload's ``dropped_no_affiliation`` counter.
@@ -320,18 +324,16 @@ def affiliated_xray_rows(raw_results: list[dict], company: dict, *,
             # message is generic — result titles carry personal data.
             log.debug("Skipping unusable X-ray result: %s", exc)
             continue
-        matched = company_affiliation_field(
+        role = title_affiliation_role(
             title=raw.get("title"),
-            # SerpAPI serves ``snippet``, Tavily ``content`` — same
-            # role, either name accepted.
-            snippet=raw.get("snippet") or raw.get("content"),
             display_name=company.get("display_name", ""),
-            domain=company.get("domain"))
-        if matched is None:
+            domain=company.get("domain"),
+            taxonomy=taxonomy)
+        if role is None:
             dropped += 1
-            log.debug("Dropping result: metadata names no company affiliation")
+            log.debug("Dropping result: title pairs no company and hiring role")
             continue
-        log.debug("Result attributed via %s match", matched)
+        log.debug("Result attributed via title pairing with role %r", role)
         rows.append(row)
     return rows, dropped
 
@@ -753,7 +755,8 @@ class SerpXRaySource:
         raw_results = self._client.organic_results(
             query, num=self._results_per_query)
         leads, dropped = affiliated_xray_rows(
-            raw_results, company, mapper=map_serp_result)
+            raw_results, company, mapper=map_serp_result,
+            taxonomy=self._taxonomy)
         self.dropped_no_affiliation += dropped
         return leads
 
@@ -806,7 +809,8 @@ class TavilyXRaySource:
             query, include_domains=[_LINKEDIN_HOST_SUFFIX],
             max_results=self._max_results)
         leads, dropped = affiliated_xray_rows(
-            raw_results, company, mapper=map_tavily_result)
+            raw_results, company, mapper=map_tavily_result,
+            taxonomy=self._taxonomy)
         self.dropped_no_affiliation += dropped
         return leads
 

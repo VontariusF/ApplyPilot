@@ -208,57 +208,77 @@ def test_map_serp_result_strips_trackers_for_stable_dedupe():
 
 
 # ---------------------------------------------------------------------------
-# Attribution precision (dogfood 2026-11-09): the metadata the provider
-# already served must name the company before a result is attributed to it
+# Attribution guarantees (dogfood 2026-11-09, rounds one and two): the
+# result TITLE must pair the company with a hiring role before a result
+# is attributed to it — snippet text is never evidence
 # ---------------------------------------------------------------------------
 
 
 def test_affiliation_filter_accepts_title_match():
-    field = hl.company_affiliation_field(
+    role = hl.title_affiliation_role(
         title="Jane Doe - Head of Talent - Stripe | LinkedIn",
-        snippet="Jane Doe builds developer tools.",
-        display_name="Stripe", domain="stripe.com")
-    assert field == "title"
+        display_name="Stripe", domain="stripe.com", taxonomy=TAXONOMY)
+    assert role == "Head of Talent"
 
 
-def test_affiliation_filter_accepts_snippet_match():
-    field = hl.company_affiliation_field(
-        title="Jane Doe - Head of Talent | LinkedIn",
-        snippet="Jane Doe leads recruiting at Supabase.",
-        display_name="Supabase", domain="supabase.com")
-    assert field == "snippet"
+def test_affiliation_filter_never_reads_the_snippet():
+    # The dogfood false positive, in its exact shape: profile body text
+    # mentioning the company (a project/tool list) must not attribute —
+    # the gate does not read the snippet at all.
+    role = hl.title_affiliation_role(
+        title="Anish Kajan - ECE + Information Security @ The Ohio State "
+              "University | LinkedIn",
+        display_name="Supabase", domain="supabase.com", taxonomy=TAXONOMY)
+    assert role is None
 
 
 def test_affiliation_filter_accepts_domain_match():
-    field = hl.company_affiliation_field(
-        title="Jane Doe — hiring, see careers on stripe.com",
-        snippet=None,
-        display_name="Stripe Incorporated", domain="stripe.com")
-    assert field == "title"
+    role = hl.title_affiliation_role(
+        title="Jane Doe — Head of Talent — hiring via careers on "
+              "stripe.com",
+        display_name="Stripe Incorporated", domain="stripe.com",
+        taxonomy=TAXONOMY)
+    assert role == "Head of Talent"
+
+
+def test_affiliation_filter_requires_a_role_not_just_the_company():
+    # A company-internal role that is not a hiring role is not a lead:
+    # the title must pair the company with a taxonomy term.
+    role = hl.title_affiliation_role(
+        title="Jane Doe - Senior Software Engineer - Acme Robotics "
+              "| LinkedIn",
+        display_name="Acme Robotics", domain=None, taxonomy=TAXONOMY)
+    assert role is None
+
+
+def test_affiliation_filter_requires_the_company_not_just_a_role():
+    # A recruiter at a different company (dogfood round one: a real
+    # "Principal TA Partner | Yugabyte" returned for a Supabase query).
+    role = hl.title_affiliation_role(
+        title="Maria Siddiqui - Principal TA Partner | Yugabyte",
+        display_name="Supabase", domain="supabase.com", taxonomy=TAXONOMY)
+    assert role is None
 
 
 def test_affiliation_filter_drops_no_mention_result():
-    field = hl.company_affiliation_field(
+    role = hl.title_affiliation_role(
         title="Jane Doe - Student at State University | LinkedIn",
-        snippet="Jane Doe founded a robotics club at her school.",
-        display_name="Stripe", domain="stripe.com")
-    assert field is None
+        display_name="Stripe", domain="stripe.com", taxonomy=TAXONOMY)
+    assert role is None
 
 
 def test_affiliation_filter_matches_whole_words_only():
-    field = hl.company_affiliation_field(
-        title="Jane Doe - Striped Apparel | LinkedIn",
-        snippet=None,
-        display_name="Stripe", domain=None)
-    assert field is None  # "striped" is not "Stripe"
+    role = hl.title_affiliation_role(
+        title="Jane Doe - Head of Talent - Striped Apparel | LinkedIn",
+        display_name="Stripe", domain=None, taxonomy=TAXONOMY)
+    assert role is None  # "Striped" is not "Stripe"
 
 
 def test_affiliation_filter_is_case_insensitive():
-    field = hl.company_affiliation_field(
+    role = hl.title_affiliation_role(
         title="JANE DOE - HEAD OF TALENT AT SUPABASE | LinkedIn",
-        snippet=None,
-        display_name="supabase", domain=None)
-    assert field == "title"
+        display_name="supabase", domain=None, taxonomy=TAXONOMY)
+    assert role == "Head of Talent"
 
 
 # ---------------------------------------------------------------------------
