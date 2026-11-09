@@ -37,7 +37,9 @@ Wire contract (the entire stdout surface):
 from __future__ import annotations
 
 import json
+import logging
 import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, NoReturn, Optional
@@ -68,6 +70,21 @@ def _prepare() -> None:
 
     load_env()
     ensure_dirs()
+    _keep_logs_off_stdout()
+
+
+def _keep_logs_off_stdout() -> None:
+    """Re-assert the wire contract against stream drift (dogfood finding 5).
+
+    Verb bodies log operationally — PDF generation, discovery, the
+    scheduler probe — through the shared logging root, which cli.py's
+    basicConfig sends to stderr (logging's default stream). Nothing may
+    share stdout with the JSON payload, so any root handler whose stream
+    is stdout is re-pointed at stderr here, on every verb invocation.
+    """
+    for handler in logging.getLogger().handlers:
+        if getattr(handler, "stream", None) is sys.stdout:
+            handler.stream = sys.stderr
 
 
 def _prepare_db() -> None:
@@ -249,6 +266,10 @@ def _current_question_payload(state: onboarding.InterviewState | None) -> dict |
     return {
         "id": spec.id,
         "prompt": spec.prompt,
+        # The wizard's agent-facing clarification ("bootcamps and
+        # certificates count too") — context the host conductor reads
+        # where the portal shows its ask-the-agent card (W0).
+        "hint": spec.agent_hint,
         "choices": _choice_rows(resolved),
         "prefilled": chips.get(spec.id),
         "allow_free_text": spec.allow_free_text,
@@ -345,9 +366,27 @@ def _progress(state: onboarding.InterviewState | None) -> dict:
     return {"answered": answered, "remaining": len(onboarding.remaining_questions(state))}
 
 
+def _provider_setup_needed(state: onboarding.InterviewState | None,
+                           ready: dict) -> bool:
+    """True only when the journey is blocked until a backend is set up.
+
+    Host-driven journeys (backend "host") never are: the driving agent is
+    the interview's intelligence, and a fresh or unstarted store defaults
+    to one — `start`'s ambient choice runs host when no claude/provider
+    backend is ready (W0). True keeps its one honest meaning: a
+    claude/llm interview whose backends have all gone away (claude signed
+    out, provider removed) — the chat channel is dead until setup
+    returns, so the driver should surface the setup step.
+    """
+    if ready["can_start_any"]:
+        return False
+    return state is not None and state.backend in ("claude", "llm")
+
+
 def _next_payload(state: onboarding.InterviewState | None, reveal: bool = False) -> dict:
     """The one authoritative payload every verb returns."""
     phase = state.phase if state is not None else onboarding.GATE
+    ready = onboarding.readiness()
     payload = {
         "phase": phase,
         "mode": state.mode if state is not None else None,
@@ -360,7 +399,7 @@ def _next_payload(state: onboarding.InterviewState | None, reveal: bool = False)
         "needs": {
             "resume": _needs_resume(state),
             "confirm": phase == onboarding.REVIEW,
-            "provider_setup": not onboarding.readiness()["can_start_any"],
+            "provider_setup": _provider_setup_needed(state, ready),
         },
         "progress": _progress(state),
         "resume": _resume_block(state, reveal),
@@ -1509,7 +1548,12 @@ def apply_acquire_cmd(
         help="Include the resume text and resume_facts (redacted by "
              "default — stdout lands in host chat logs)."),
 ) -> None:
-    """Take the per-job apply lock on the next eligible job (bookkeeping only)."""
+    """Take the per-job apply lock on the next eligible job (bookkeeping only).
+
+    The payload carries a one-time claim token at job.claim — echo it
+    back as `apply-result --claim` to report the outcome; a wrong or
+    missing token is refused (not_claim_owner) and the lock stays held.
+    """
     _prepare_db()
     _verb(lambda: _host_apply_acquire(min_score, reveal))
 

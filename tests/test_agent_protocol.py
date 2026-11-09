@@ -288,7 +288,11 @@ def test_gate_payload_when_no_state_exists(app_dir, no_backend):
     assert payload["last_agent_reply"] is None
     assert payload["prefill_chips"] == []
     assert payload["progress"] == {"answered": 0, "remaining": 0}
-    assert payload["needs"]["provider_setup"] is True
+    # W0: a fresh store is not blocked on provider setup — `start`'s
+    # ambient choice runs the interview host-driven (the driving agent
+    # is the intelligence), so the flag reads false before any backend
+    # exists.
+    assert payload["needs"]["provider_setup"] is False
 
 
 def test_contract_error_paths_emit_envelope_nonzero(app_dir, no_backend):
@@ -343,16 +347,19 @@ def test_error_codes_are_semantic(app_dir, no_backend):
 def test_start_without_backend_starts_host_mode(app_dir, no_backend):
     """agent start no longer demands a backend (spec art_v7WOlPfz): intake
     opens, and the second start runs the interview on the host backend —
-    needs.provider_setup stays true but is informational."""
+    needs.provider_setup reads false in agent-led/host-driven mode (W0):
+    the driving agent is the interview's intelligence, so no provider is
+    ever requested on this journey."""
     payload = payload_of(run("start"))
     assert payload["phase"] == "intake"
     assert payload["backend"] is None or payload["backend"] == ""
+    assert payload["needs"]["provider_setup"] is False
     result = run("start")
     assert result.exit_code == 0, result.stdout
     payload = payload_of(result)
     assert payload["phase"] == "interview"
     assert payload["backend"] == "host"
-    assert payload["needs"]["provider_setup"] is True
+    assert payload["needs"]["provider_setup"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -454,29 +461,41 @@ def test_host_answers_get_local_notes_not_backend_acks(app_dir, no_backend, expl
     assert exploding_backends == []
 
 
-def test_send_in_host_mode_is_gated(app_dir, no_backend, exploding_backends):
-    """Free-form chat stays backend-only in host mode: provider_setup code,
-    guidance pointing at the answer/resume/review driving verbs."""
+def test_send_in_host_mode_records_the_turn(app_dir, no_backend, exploding_backends):
+    """W0: free-form chat works in host mode — the driving agent relays the
+    human's words, the message records as the user turn, and no backend
+    call runs (the host composes its next question from the payload)."""
     run("start")
     run("start")
     result = run("send", "--text", "hello there")
-    assert result.exit_code != 0
+    assert result.exit_code == 0, result.stdout
     payload = payload_of(result)
-    assert payload["error"]["code"] == "provider_setup"
-    assert "agent answer" in payload["error"]["message"]
-    assert "resume" in payload["error"]["message"]
-    assert "review" in payload["error"]["message"]
+    assert payload["phase"] == "interview"
+    assert payload["backend"] == "host"
+    state = onboarding.load_state()
+    user_turns = [m for m in state.messages if m["role"] == onboarding._ROLE_USER]
+    assert [m["content"] for m in user_turns] == ["hello there"]
+    assert state.error is None
+    assert exploding_backends == []
 
 
-def test_agent_led_on_in_host_mode_is_gated(app_dir, no_backend, exploding_backends):
-    """Agent-led mode is free-form chat's channel — gated in host mode like
-    send; agent-led off stays available (a pure local switch back)."""
+def test_agent_led_switch_works_in_host_mode(app_dir, no_backend, exploding_backends):
+    """W0: agent-led mode is drivable in host mode — the switch is a pure
+    local change (no backend to take a directive turn), marked by a
+    transcript note; switching back stays available."""
     run("start")
     run("start")
     result = run("agent-led", "on")
-    assert result.exit_code != 0
-    assert payload_of(result)["error"]["code"] == "provider_setup"
-    assert payload_of(run("agent-led", "off"))["mode"] == "choices"
+    assert result.exit_code == 0, result.stdout
+    payload = payload_of(result)
+    assert payload["mode"] == onboarding.MODE_AGENT
+    assert payload["backend"] == "host"
+    state = onboarding.load_state()
+    notes = [m for m in state.messages if m["role"] == onboarding._ROLE_NOTE]
+    assert any("agent-led" in m["content"] for m in notes)
+    # ...and back: the mode round-trips without any backend call.
+    assert payload_of(run("agent-led", "off"))["mode"] == onboarding.MODE_CHOICES
+    assert exploding_backends == []
 
 
 def test_redo_in_host_mode_is_a_pure_local_reset(app_dir, no_backend, exploding_backends):
@@ -490,6 +509,167 @@ def test_redo_in_host_mode_is_a_pure_local_reset(app_dir, no_backend, exploding_
     assert payload["phase"] == "interview"
     assert payload["backend"] == "host"
     assert exploding_backends == []
+
+
+# ---------------------------------------------------------------------------
+# W0: agent-led (host-driven) onboarding — the gate and the flag
+# ---------------------------------------------------------------------------
+
+def test_start_mode_agent_bypasses_the_gate_without_backend_calls(
+        app_dir, no_backend, exploding_backends, tmp_path):
+    """The gate bypass in agent-led mode: `start --mode agent` on a store
+    with no claude/provider backend runs the interview host-driven —
+    mode agent, zero kickoff/ack turns, no provider_setup refusal."""
+    resume_file = tmp_path / "resume.txt"
+    resume_file.write_text("Test Person — data engineer résumé.", encoding="utf-8")
+    assert payload_of(run("start"))["phase"] == "intake"
+    assert payload_of(run("resume", "--file", str(resume_file)))["phase"] == "intake"
+    result = run("start", "--mode", "agent")
+    assert result.exit_code == 0, result.stdout
+    payload = payload_of(result)
+    assert payload["phase"] == "interview"
+    assert payload["backend"] == "host"
+    assert payload["mode"] == onboarding.MODE_AGENT
+    assert payload["needs"]["provider_setup"] is False
+    assert payload["current_question"] is not None  # the agenda is live
+    assert exploding_backends == []
+
+
+def test_host_agent_led_journey_produces_profile_without_provider(
+        app_dir, no_backend, exploding_backends, tmp_path):
+    """W0 acceptance: the full agent-led, provider-free interview —
+    start → resume --file → start --mode agent → send turns (the host
+    relays the human's prose) → answer turns (the guided agenda) →
+    review → confirm — writes profile.json / profile.md / searches.yaml
+    with zero claude/provider calls."""
+    from kestrel import config
+
+    resume_file = tmp_path / "resume.txt"
+    resume_file.write_text("Test Person — data engineer résumé.", encoding="utf-8")
+
+    assert payload_of(run("start"))["phase"] == "intake"
+    assert payload_of(run("resume", "--file", str(resume_file)))["phase"] == "intake"
+    payload = payload_of(run("start", "--mode", "agent"))
+    assert payload["backend"] == "host"
+    assert payload["mode"] == onboarding.MODE_AGENT
+
+    # The host conducts the interview: free-form turns record what the
+    # host relayed, the payload names the next question, answers record
+    # the host's composed values.
+    result = run("send", "--text", "I'm a data engineer with 8 years of experience.")
+    assert result.exit_code == 0, result.stdout
+    assert payload_of(result)["phase"] == "interview"
+
+    for _ in range(len(onboarding.QUESTION_SPECS) + 1):
+        payload = payload_of(run("next"))
+        question = payload["current_question"]
+        if question is None:
+            break
+        if question["choices"]:
+            result = run("answer", "--question", question["id"],
+                         "--choice", question["choices"][0]["value"])
+        elif question["allow_free_text"]:
+            result = run("answer", "--question", question["id"],
+                         "--free-text", "Something reasonable")
+        else:
+            result = run("answer", "--question", question["id"], "--skip")
+        assert result.exit_code == 0, result.stdout
+    else:
+        pytest.fail("the agenda never completed")
+
+    payload = payload_of(run("next"))
+    assert payload["phase"] == "review"
+    assert payload["needs"]["provider_setup"] is False
+    result = run("confirm")
+    assert result.exit_code == 0, result.stdout
+    payload = payload_of(result)
+    assert payload["phase"] == "done"
+    assert config.PROFILE_PATH.exists()
+    assert config.PROFILE_MD_PATH.exists()
+    assert config.SEARCH_CONFIG_PATH.exists()
+    assert exploding_backends == []
+
+
+def test_provider_setup_reads_true_only_when_backends_vanish(
+        app_dir, fake_claude, signed_in, monkeypatch):
+    """The flag's remaining honest meaning (W0): a claude/llm interview
+    whose backends have all gone away — claude signed out, no provider —
+    reads true, because the chat channel is dead until setup returns.
+    Host-driven journeys never read true."""
+    run("start")
+    run("start")
+    payload = payload_of(run("next"))
+    assert payload["backend"] == "claude"
+    assert payload["needs"]["provider_setup"] is False
+    # Claude signs out and no provider is configured.
+    monkeypatch.setattr(engine_auth, "claude_status", lambda *a, **k: SIGNED_OUT_STATUS)
+    monkeypatch.setattr(onboarding, "provider_ready", lambda: False)
+    assert payload_of(run("next"))["needs"]["provider_setup"] is True
+
+
+def test_prepare_repoints_stdout_log_handlers_to_stderr(app_dir, no_backend):
+    """Dogfood finding 5: operational logs must never share stdout with
+    the JSON payload. A root handler deliberately aimed at stdout (the
+    drift the guard exists for) is re-pointed at stderr by _prepare()."""
+    import logging
+    import sys
+
+    from kestrel import agent_protocol
+
+    root = logging.getLogger()
+    stray = logging.StreamHandler(sys.stdout)
+    root.addHandler(stray)
+    try:
+        agent_protocol._prepare()
+        assert all(getattr(h, "stream", None) is not sys.stdout
+                   for h in root.handlers)
+    finally:
+        root.removeHandler(stray)
+
+
+def test_every_verb_stdout_is_one_json_document(
+        app_dir, no_backend, exploding_backends, tmp_path):
+    """Wire contract, dogfood finding 5: every agent verb prints exactly
+    one parseable JSON document on stdout — no INFO lines, no banners,
+    error envelopes included. Walks the whole lifecycle so every
+    onboarding verb runs at least once."""
+    resume_file = tmp_path / "resume.txt"
+    resume_file.write_text("Test Person — data engineer résumé.", encoding="utf-8")
+
+    def one_doc(result):
+        # json.loads fails with "Extra data" on anything but ONE document.
+        payload = json.loads(result.stdout)
+        assert isinstance(payload, dict)
+        return payload
+
+    one_doc(run("next"))  # gate (fresh store)
+    one_doc(run("start"))  # intake
+    one_doc(run("resume", "--file", str(resume_file)))
+    one_doc(run("start"))  # host interview starts
+    one_doc(run("send", "--text", "I have 8 years of experience."))
+    one_doc(run("agent-led", "on"))
+    one_doc(run("agent-led", "off"))
+    while True:
+        payload = one_doc(run("next"))
+        if payload["phase"] != "interview":
+            break
+        question = payload["current_question"]
+        assert question is not None
+        if question["choices"]:
+            one_doc(run("answer", "--question", question["id"],
+                        "--choice", question["choices"][0]["value"]))
+        elif question["allow_free_text"]:
+            one_doc(run("answer", "--question", question["id"],
+                        "--free-text", "Something reasonable"))
+        else:
+            one_doc(run("answer", "--question", question["id"], "--skip"))
+    assert payload["phase"] == "review"
+    one_doc(run("review", "--set", "full_name=Test Person"))
+    one_doc(run("confirm"))
+    # Error envelopes are one JSON document too (exit nonzero).
+    result = run("confirm")  # already done
+    assert result.exit_code != 0
+    assert one_doc(result)["error"]["code"] == "nothing_to_confirm"
 
 
 def test_start_never_wipes_an_active_interview(app_dir, fake_claude, signed_in, tmp_path):
