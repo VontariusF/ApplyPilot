@@ -664,6 +664,35 @@ def hiring_leads_rows(conn: sqlite3.Connection | None = None,
     return [dict(row) for row in rows]
 
 
+def mark_hiring_lead(conn: sqlite3.Connection, profile_url: str,
+                     status: str) -> bool:
+    """Transition one lead's last_status to dismissed or connected.
+
+    The one write path for lead status decisions — the portal's
+    POST /leads/mark calls it (the verbs are read-only over decisions).
+    Only the two decided statuses are valid targets: "discovered" is the
+    ingestion state, never a decision, so it is refused here. Values come
+    from the LEAD_* vocabulary above — the same constants the adapters
+    write and every surface reads, so no caller can drift. Sets
+    decided_at (the user decision timestamp); unknown profile_url
+    returns False rather than raising.
+    """
+    if status not in (LEAD_STATUS_DISMISSED, LEAD_STATUS_CONNECTED):
+        raise ValueError(
+            f"a lead can only be marked {LEAD_STATUS_DISMISSED!r} or "
+            f"{LEAD_STATUS_CONNECTED!r}, got {status!r}")
+    profile_url = (profile_url or "").strip()
+    if not profile_url:
+        raise ValueError("mark_hiring_lead requires profile_url")
+    cursor = conn.execute(
+        "UPDATE hiring_leads SET last_status = ?, decided_at = ? "
+        "WHERE profile_url = ?",
+        (status, _utc_now(), profile_url),
+    )
+    conn.commit()
+    return cursor.rowcount == 1
+
+
 # Complete column registry: column_name -> SQL type with optional default.
 # This is the single source of truth. Adding a column here is all that's needed
 # for it to appear in both new databases and migrated ones.

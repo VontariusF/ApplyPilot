@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Leads · Kestrel Portal{% endblock %}
+{% block content %}
+<div class="page-head">
+  <h1>Hiring leads</h1>
+  <p class="dim">People who do the hiring at your high-match companies. Kestrel never contacts anyone — opening a profile is your click, in your own browser.</p>
+</div>
+
+<section class="panel">
+  <nav class="chip-row" aria-label="Lead views">
+    {% for chip in chip_links %}
+    <a class="chip {{ 'chip-active' if chip.active }}" href="{{ chip.href }}"
+       {% if chip.active %}aria-pressed="true"{% endif %}>{{ chip.label }}</a>
+    {% endfor %}
+  </nav>
+</section>
+
+{% include "partials/leads_board.html" %}
+{% endblock %}
