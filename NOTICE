@@ -1,0 +1,21 @@
+Kestrel
+Copyright 2026 The Kestrel Authors
+
+This product is licensed under the GNU Affero General Public License,
+Version 3.0 (AGPL-3.0-only). See the LICENSE file for the full license text.
+
+Fork lineage
+------------
+
+Kestrel is a fork of ApplyPilot (https://github.com/Pickle-Pixel/ApplyPilot),
+created by Pickle-Pixel and first published on GitHub on February 17, 2026.
+
+This distribution contains substantial portions of ApplyPilot's source code.
+The original copyright and license notices of the upstream ApplyPilot project
+are retained herein in accordance with Section 13 and Section 4(c) of the
+GNU Affero General Public License v3.0. The upstream project is licensed
+under AGPL-3.0; this fork distributes the same work under
+"AGPL-3.0-only" with modifications by The Kestrel Authors.
+
+Kestrel is not affiliated with applypilot.app, useapplypilot.com, or any
+other product using the "ApplyPilot" name.
