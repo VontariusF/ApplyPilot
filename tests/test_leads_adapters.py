@@ -7,6 +7,7 @@ structural never-request-linkedin.com guardrail. All HTTP runs over
 httpx.MockTransport — never live calls, never real credentials.
 """
 
+import json
 import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
@@ -27,6 +28,7 @@ from kestrel.discovery.hiring_leads import (
     COMPANY_UNRESOLVED,
     NO_HIGH_MATCH_COMPANIES,
     NO_PROVIDER_KEY,
+    PROVIDER_UNSUPPORTED,
     QUOTA_EXHAUSTED,
     SOURCE_RETIRED,
     FirecrawlClient,
@@ -34,9 +36,12 @@ from kestrel.discovery.hiring_leads import (
     LeadsRefusal,
     SerpClient,
     SerpXRaySource,
+    TavilyClient,
+    TavilyXRaySource,
     discover_hiring_leads,
     map_serp_result,
     xray_query,
+    xray_query_plain,
 )
 
 SERP_KEY = "test-serp-key-not-a-real-credential"
@@ -239,6 +244,8 @@ def test_serp_client_clamps_bogus_retry_after_header():
 
 def test_no_provider_key_refusal_fires_before_any_network_call(app_dir,
                                                                monkeypatch):
+    # Default provider is tavily, so its key is the one the refusal names.
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     monkeypatch.delenv("SERP_API_KEY", raising=False)
 
     def no_http(*args, **kwargs):
@@ -250,14 +257,15 @@ def test_no_provider_key_refusal_fires_before_any_network_call(app_dir,
     with pytest.raises(LeadsRefusal) as refused:
         discover_hiring_leads(conn, now=NOW)
     assert refused.value.code == NO_PROVIDER_KEY
-    assert refused.value.details["required_env"] == ["SERP_API_KEY"]
+    assert refused.value.details["required_env"] == ["TAVILY_API_KEY"]
+    assert refused.value.details["provider"] == "tavily"
     # no_http never tripped: the refusal precedes any client construction.
     assert hl.discovery_runs_used(NOW) == 0  # refusals spend nothing
 
 
 def test_no_high_match_companies_refusal_names_threshold_and_orphans(app_dir,
                                                                      monkeypatch):
-    monkeypatch.setenv("SERP_API_KEY", SERP_KEY)  # source builds; data gate fires
+    monkeypatch.setenv("TAVILY_API_KEY", SERP_KEY)  # source builds; data gate fires
     conn = init_db()
     conn.execute(
         "INSERT INTO jobs (url, title, fit_score, discovered_at) "
@@ -274,7 +282,7 @@ def test_no_high_match_companies_refusal_names_threshold_and_orphans(app_dir,
 
 def test_company_unresolved_refusal_for_unknown_key(app_dir, monkeypatch):
     _seed_companies(init_db(), ACME)
-    monkeypatch.setenv("SERP_API_KEY", SERP_KEY)
+    monkeypatch.setenv("TAVILY_API_KEY", SERP_KEY)
     with pytest.raises(LeadsRefusal) as refused:
         discover_hiring_leads(company_key="nowhere.example", now=NOW)
     assert refused.value.code == COMPANY_UNRESOLVED
@@ -397,7 +405,7 @@ def test_discovery_never_requests_linkedin_hosts(app_dir, monkeypatch):
 
 def test_firecrawl_is_off_by_default(app_dir):
     assert config.firecrawl_enabled() is False
-    assert hl.DEFAULT_SOURCES == ("serp",)
+    assert config.leads_provider() == "tavily"
     conn = init_db()
     with pytest.raises(LeadsRefusal) as refused:
         discover_hiring_leads(conn, sources=("firecrawl",), now=NOW)
@@ -471,6 +479,179 @@ def test_firecrawl_never_targets_linkedin_even_by_caller_bug(app_dir):
 
 
 # ---------------------------------------------------------------------------
+# Tavily: the default X-ray provider (plain queries + include_domains)
+# ---------------------------------------------------------------------------
+
+
+def _tavily_result(slug, title="Head of Talent"):
+    display = slug.replace("-", " ").title()
+    return {
+        "title": f"{display} - {title} - Acme Robotics | LinkedIn",
+        "url": f"https://www.linkedin.com/in/{slug}",
+        "content": f"{display} — hiring at Acme Robotics.",
+    }
+
+
+def _tavily_source(responder, calls, max_results=10):
+    client = TavilyClient(
+        SERP_KEY,
+        base_url="https://api.tavily.test",
+        transport=_recording_transport(calls, responder),
+        sleep=lambda seconds: None,
+    )
+    return TavilyXRaySource(client, max_results=max_results,
+                            taxonomy=TAXONOMY)
+
+
+def test_xray_query_plain_is_taxonomy_ors_with_no_site_operator():
+    query = xray_query_plain("Acme Robotics", TAXONOMY)
+    assert '"Acme Robotics"' in query
+    assert '"Head of Talent" OR "Recruiting Manager"' in query
+    assert "site:" not in query  # Tavily does not guarantee operators
+
+
+def test_tavily_request_body_carries_include_domains_and_no_site_prefix():
+    calls = []
+    source = _tavily_source(
+        lambda request: httpx.Response(200, json={"results": []}), calls)
+    source.discover_for_company({"company_key": "acme-robotics.com",
+                                 "display_name": "Acme Robotics"})
+    assert len(calls) == 1
+    request = calls[0]
+    assert urlparse(str(request.url)).hostname == "api.tavily.test"
+    body = json.loads(request.content)
+    assert body["include_domains"] == ["linkedin.com"]  # restrict mode
+    assert body["max_results"] == 10
+    assert body["api_key"] == SERP_KEY
+    assert "site:" not in body["query"]
+
+
+def test_tavily_happy_path_dedupes_on_profile_url(app_dir, monkeypatch):
+    conn = init_db()
+    _seed_companies(conn, ACME)
+    responder = lambda request: httpx.Response(200, json={  # noqa: E731
+        "results": [_tavily_result("jane-doe-8b21435"),
+                    _tavily_result("sam-smith")]})
+    _patch_build_source(monkeypatch, _tavily_source(responder, []))
+
+    first = discover_hiring_leads(conn, now=NOW)
+    second = discover_hiring_leads(conn, now=NOW)
+    assert first["discovered"] == 2 and second["skipped_existing"] == 2
+    lead = conn.execute("SELECT * FROM hiring_leads").fetchone()
+    assert lead["profile_url"] == "https://www.linkedin.com/in/jane-doe-8b21435"
+    assert lead["source"] == "serp"  # same X-ray surface class, by design
+
+
+def test_tavily_drops_non_profile_urls_not_trusted(app_dir, monkeypatch):
+    conn = init_db()
+    _seed_companies(conn, ACME)
+    responder = lambda request: httpx.Response(200, json={  # noqa: E731
+        "results": [
+            _tavily_result("jane-doe"),
+            # Provider ignored include_domains or returned a company page:
+            # dropped by the host+path gate, never stored.
+            {"title": "Acme Robotics | LinkedIn",
+             "url": "https://www.linkedin.com/company/acme-robotics/"},
+            {"title": "Not even LinkedIn",
+             "url": "https://example.com/in/jane-doe"},
+            {"title": "No url"},
+        ]})
+    _patch_build_source(monkeypatch, _tavily_source(responder, []))
+
+    payload = discover_hiring_leads(conn, now=NOW)
+    assert payload["discovered"] == 1
+    assert conn.execute("SELECT COUNT(*) FROM hiring_leads").fetchone()[0] == 1
+
+
+def test_tavily_no_provider_key_refusal_names_the_provider(app_dir,
+                                                           monkeypatch):
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    conn = init_db()
+    _seed_companies(conn, ACME)
+    with pytest.raises(LeadsRefusal) as refused:
+        discover_hiring_leads(conn, now=NOW)
+    assert refused.value.code == NO_PROVIDER_KEY
+    assert refused.value.details["provider"] == "tavily"
+    assert refused.value.details["required_env"] == ["TAVILY_API_KEY"]
+    assert "TAVILY_API_KEY" in str(refused.value)
+
+
+class _NamedFakeSource:
+    name = "set-at-construction"
+    source_label = "serp"
+
+    def __init__(self, name):
+        self.name = name
+
+    def discover_for_company(self, company):
+        return []
+
+
+@pytest.mark.parametrize("configured,expected", [
+    (None, "tavily"),  # the default per the provider decision
+    ("serp", "serp"),
+    ("tavily", "tavily"),
+    ("Tavily", "tavily"),  # normalized, not case-sensitive
+])
+def test_provider_selection_reads_leads_yaml(app_dir, monkeypatch,
+                                             configured, expected):
+    if configured is not None:
+        (app_dir / "leads.yaml").write_text(f"provider: {configured}\n",
+                                            encoding="utf-8")
+    requested = []
+
+    def fake_build(name, *, client=None, sleep=time.sleep):
+        requested.append(name)
+        return _NamedFakeSource(name)
+
+    monkeypatch.setattr(hl, "build_source", fake_build)
+    _seed_companies(init_db(), ACME)  # past the company gate
+    discover_hiring_leads(now=NOW)
+    assert requested == [expected]
+
+
+def test_provider_unsupported_refusal_for_unknown_provider(app_dir,
+                                                           monkeypatch):
+    (app_dir / "leads.yaml").write_text("provider: bing\n", encoding="utf-8")
+    conn = init_db()
+    _seed_companies(conn, ACME)
+    with pytest.raises(LeadsRefusal) as refused:
+        discover_hiring_leads(conn, now=NOW)
+    assert refused.value.code == PROVIDER_UNSUPPORTED
+    assert refused.value.details["provider"] == "bing"
+    assert set(refused.value.details["known_providers"]) == {
+        "serp", "tavily", "firecrawl"}
+    assert "bing" in str(refused.value)
+
+
+def test_tavily_client_retries_retryable_status_then_fails_honestly():
+    calls, sleeps = [], []
+    responder = lambda request: httpx.Response(500)  # noqa: E731
+    client = TavilyClient(SERP_KEY, base_url="https://api.tavily.test",
+                          transport=_recording_transport(calls, responder),
+                          max_retries=1, sleep=sleeps.append)
+    with pytest.raises(hl.HiringLeadsError):
+        client.search_results("q", include_domains=["linkedin.com"],
+                              max_results=10)
+    assert len(calls) == 2  # one retry, then an honest failure
+    assert sleeps == [2.0]  # exponential backoff, no hidden sleep
+
+
+def test_tavily_client_clamps_bogus_retry_after_header():
+    sleeps = []
+    responder = lambda request: httpx.Response(  # noqa: E731
+        429, headers={"retry-after": "9999999999"})
+    client = TavilyClient(SERP_KEY, base_url="https://api.tavily.test",
+                          transport=httpx.MockTransport(responder),
+                          max_retries=1, sleep=sleeps.append)
+    with pytest.raises(hl.HiringLeadsError):
+        client.search_results("q", include_domains=["linkedin.com"],
+                              max_results=10)
+    from kestrel.llm import MAX_RATE_LIMIT_WAIT_SECONDS
+    assert sleeps == [MAX_RATE_LIMIT_WAIT_SECONDS]
+
+
+# ---------------------------------------------------------------------------
 # Config and redaction
 # ---------------------------------------------------------------------------
 
@@ -488,9 +669,12 @@ def test_leads_config_defaults_and_loud_override_refusal(app_dir):
 
 def test_provider_keys_join_the_redaction_boundary(monkeypatch):
     assert "SERP_API_KEY" in config.SECRET_ENV_KEYS
+    assert "TAVILY_API_KEY" in config.SECRET_ENV_KEYS
     assert "FIRECRAWL_API_KEY" in config.SECRET_ENV_KEYS
     monkeypatch.setenv("SERP_API_KEY", "serp-secret-value")
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-secret-value")
     monkeypatch.setenv("FIRECRAWL_API_KEY", "firecrawl-secret-value")
     values = config.collect_secret_values()
     assert "serp-secret-value" in values
+    assert "tavily-secret-value" in values
     assert "firecrawl-secret-value" in values

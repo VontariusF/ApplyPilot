@@ -429,6 +429,24 @@ def leads_role_taxonomy() -> tuple[str, ...]:
     return tuple(t.strip() for t in raw)
 
 
+def leads_provider() -> str:
+    """Search provider that runs X-ray lead discovery (serp | tavily).
+
+    Default is tavily per the provider decision recorded in the spec
+    thread (Tavily's free tier: 1,000 credits/month, basic search = 1
+    credit). An unknown but well-formed name is NOT refused here — the
+    discovery entrypoint turns it into a typed provider_unsupported
+    refusal that names the known providers. Only a malformed value
+    (non-string, empty) is refused loudly here, like min_company_fit.
+    """
+    raw = load_leads_config().get("provider")
+    if raw is None:
+        return DEFAULTS["leads_provider"]
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(f"leads.yaml provider must be a string, got {raw!r}")
+    return raw.strip().lower()
+
+
 def leads_serp_results_per_query() -> int:
     """Organic results fetched per X-ray query (spec §4, default 10)."""
     raw = (load_leads_config().get("serp") or {}).get("results_per_query")
@@ -443,6 +461,23 @@ def leads_serp_results_per_query() -> int:
     if not 1 <= num <= 20:
         raise ValueError(
             f"leads.yaml serp.results_per_query must be in 1..20, got {raw!r}")
+    return num
+
+
+def leads_tavily_max_results() -> int:
+    """Results requested per Tavily X-ray query (default 10)."""
+    raw = (load_leads_config().get("tavily") or {}).get("max_results")
+    if raw is None:
+        return DEFAULTS["tavily_max_results"]
+    try:
+        num = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"leads.yaml tavily.max_results must be an integer, got {raw!r}"
+        )
+    if not 1 <= num <= 20:
+        raise ValueError(
+            f"leads.yaml tavily.max_results must be in 1..20, got {raw!r}")
     return num
 
 
@@ -479,6 +514,11 @@ DEFAULTS = {
     # Spec §4 serp.results_per_query: organic results read per X-ray
     # query. Metadata only — profile pages are never fetched.
     "serp_results_per_query": 10,
+    # Tavily is the default discovery provider (user decision recorded
+    # in the spec thread: 1,000 free credits/month, basic search = 1
+    # credit). tavily.max_results: results per X-ray query.
+    "leads_provider": "tavily",
+    "tavily_max_results": 10,
     "max_apply_attempts": 3,
     # The tailor/cover stage-attempts cap (V3): the one number every
     # consumer reads — the queue predicates in database.STAGE_CONDITIONS,
@@ -549,6 +589,7 @@ SECRET_ENV_KEYS = (
     # Hiring-leads discovery providers (spec art_u0YGUqpk §4): any value
     # these hold must cross the redaction boundary like every other key.
     "SERP_API_KEY",
+    "TAVILY_API_KEY",
     "FIRECRAWL_API_KEY",
 )
 
