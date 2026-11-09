@@ -1023,11 +1023,11 @@ def _current_resume_hash() -> str:
     resume to compare against every existing score reports stale.
     """
     from applypilot import config
-    from applypilot.scoring.scorer import resume_sha256
+    from applypilot.scoring.scorer import read_resume_text, resume_sha256
 
-    if not config.RESUME_PATH.exists():
+    text = read_resume_text(config.RESUME_PATH)
+    if text is None:
         return ""
-    text = config.RESUME_PATH.read_text(encoding="utf-8", errors="replace")
     return resume_sha256(text)
 
 
@@ -1224,7 +1224,9 @@ def jobs_rerank(
     pending queue, and each re-scored job leaves the set — and nothing
     else changes: plan eligibility and staged plan tokens are untouched
     (staleness is advisory, spec art_we4AUxEy Layer 3). Zero predicates
-    targets every scoreable job in the store.
+    targets every scoreable job in the store. Dismissed rows are
+    excluded from the target set — dismissal is board-level curation —
+    and reported separately in --json as skipped_dismissed.
     """
     _bootstrap()
 
@@ -1238,24 +1240,35 @@ def jobs_rerank(
     )
     jobs = filter_jobs(predicates, current_resume_hash=_current_resume_hash())
     # Only described rows can be re-judged — an undescribed job needs
-    # enrich first, and the skip is reported, not silent.
-    targets = [job for job in jobs if job["full_description"]]
-    skipped = len(jobs) - len(targets)
+    # enrich first — and dismissal is board-level curation: a dismissed
+    # row never re-enters the scoring loop through rerank (audit
+    # Finding 3). Both skips are reported, not silent.
+    targets = [job for job in jobs
+               if job["full_description"] and not job["dismissed_at"]]
+    skipped_description = sum(1 for job in jobs if not job["full_description"])
+    skipped_dismissed = len(jobs) - len(targets) - skipped_description
 
     marked = 0
     if not dry_run:
         from datetime import datetime, timezone
 
+        conn = get_connection()
         marked = mark_rerank(
-            get_connection(), [job["url"] for job in targets],
+            conn, [job["url"] for job in targets],
             datetime.now(timezone.utc).isoformat())
+        # mark_rerank's contract: callers commit. Without this commit
+        # the UPDATE rolls back when the CLI process exits — the mark
+        # silently lost while the command still reports `marked: N`
+        # (audit Finding 1, the Blocker).
+        conn.commit()
 
     if json_output:
         _emit_json({
             "dry_run": dry_run,
             "count": len(targets),
             "marked": marked,
-            "skipped": skipped,
+            "skipped": skipped_description + skipped_dismissed,
+            "skipped_dismissed": skipped_dismissed,
             "jobs": [{field: job[field] for field in _JSON_JOB_FIELDS}
                      for job in targets],
         })
@@ -1267,7 +1280,8 @@ def jobs_rerank(
 
     verb = "would be marked" if dry_run else "marked"
     table = Table(title=(f"{len(targets)} job(s) {verb} for re-scoring "
-                         f"({skipped} skipped: no captured description)"))
+                         f"({skipped_description} skipped: no captured "
+                         f"description; {skipped_dismissed} dismissed)"))
     for column in ("URL", "Title", "Score", "Stale"):
         table.add_column(column)
     for job in targets:

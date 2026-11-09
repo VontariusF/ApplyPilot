@@ -11,12 +11,29 @@ import logging
 import re
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 from applypilot.config import RESUME_PATH, load_profile
 from applypilot.database import get_connection, get_jobs_by_stage
 from applypilot.llm import get_client
 
 log = logging.getLogger(__name__)
+
+
+def read_resume_text(path: Path) -> str | None:
+    """resume.txt's text with invalid bytes replaced — None when absent.
+
+    The single canonical reader for every resume_sha256 consumer (host
+    score stamping, `jobs filter` staleness, `jobs rerank`): hashes can
+    only agree when all readers see the same text, so strictness lives
+    here and nowhere else (audit Finding 5). errors="replace" keeps a
+    file holding stray invalid bytes scoring instead of failing, with
+    every consumer stamping the identical replaced-text hash.
+    """
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return None
 
 
 # ── Scoring Prompt ────────────────────────────────────────────────────────
@@ -210,34 +227,52 @@ def persist_score(conn, url: str, score: int, keywords: str, reasoning: str,
     """
     from applypilot.database import SCORE_HISTORY_CAP, parse_score_history
 
-    prior = conn.execute(
-        "SELECT fit_score, scored_resume_hash, scored_at, score_history "
-        "FROM jobs WHERE url = ?", (url,)
-    ).fetchone()
+    # Serialize the history read-modify-write (audit Finding 4): the
+    # SELECT-then-UPDATE pair once raced a concurrent persist for the
+    # same URL — both read the same prior snapshot and the loser's
+    # score_history entry was lost. BEGIN IMMEDIATE takes the store's
+    # write lock BEFORE the prior row is read, so the second writer
+    # blocks (busy_timeout) and then reads the first's committed row.
+    # Commit first: in legacy isolation mode even a read-only statement
+    # sequence can leave an implicit transaction open, and starting
+    # BEGIN IMMEDIATE under one raises "cannot start a transaction within
+    # a transaction" (same entry discipline as claim_document_version).
+    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        prior = conn.execute(
+            "SELECT fit_score, scored_resume_hash, scored_at, score_history "
+            "FROM jobs WHERE url = ?", (url,)
+        ).fetchone()
 
-    history: list[dict] = []
-    if prior is not None:
-        if prev_score is not None and prev_score != prior[0]:
-            raise PrevScoreMismatch(
-                f"--prev-score {prev_score} does not match the job's current "
-                f"score {prior[0]} — re-read job-next; nothing was persisted")
-        if prior[0] is not None:
-            history = parse_score_history(prior[3])
-            history.append({
-                "prev_score": prior[0],
-                "prev_score_hash": prior[1],
-                "prev_scored_at": prior[2],
-                "rescored_at": when,
-            })
-            history = history[-SCORE_HISTORY_CAP:]
+        history: list[dict] = []
+        if prior is not None:
+            if prev_score is not None and prev_score != prior[0]:
+                raise PrevScoreMismatch(
+                    f"--prev-score {prev_score} does not match the job's current "
+                    f"score {prior[0]} — re-read job-next; nothing was persisted")
+            if prior[0] is not None:
+                history = parse_score_history(prior[3])
+                history.append({
+                    "prev_score": prior[0],
+                    "prev_score_hash": prior[1],
+                    "prev_scored_at": prior[2],
+                    "rescored_at": when,
+                })
+                history = history[-SCORE_HISTORY_CAP:]
 
-    conn.execute(
-        "UPDATE jobs SET fit_score = ?, score_reasoning = ?, scored_at = ?, "
-        "score_error = NULL, scored_by = ?, scored_resume_hash = ?, "
-        "rerank_marked_at = NULL, score_history = ? WHERE url = ?",
-        (score, f"{keywords}\n{reasoning}", when, scored_by, resume_hash,
-         json.dumps(history) if history else None, url),
-    )
+        conn.execute(
+            "UPDATE jobs SET fit_score = ?, score_reasoning = ?, scored_at = ?, "
+            "score_error = NULL, scored_by = ?, scored_resume_hash = ?, "
+            "rerank_marked_at = NULL, score_history = ? WHERE url = ?",
+            (score, f"{keywords}\n{reasoning}", when, scored_by, resume_hash,
+             json.dumps(history) if history else None, url),
+        )
+    except BaseException:
+        # Nothing persisted — release the write lock and leave the row
+        # exactly as the caller found it (the mismatch envelope's promise).
+        conn.rollback()
+        raise
 
 
 def _record_score_errors(conn, urls: list[str], error: str) -> None:
