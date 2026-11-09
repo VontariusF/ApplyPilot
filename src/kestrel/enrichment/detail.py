@@ -732,39 +732,55 @@ def scrape_site_batch(
             page = context.new_page()
 
             for i, (url, title) in enumerate(jobs):
-                log.info("[%d/%d] %s", i + 1, len(jobs), title[:50] if title else url[:50])
+                # Dogfood 2026-11-09: one bad page (a crashed tab, a DB
+                # hiccup) aborted the whole batch — every later job in
+                # the site stayed unscraped. One job's failure must
+                # cost one row, not the site.
+                try:
+                    stats["processed"] += 1  # one attempt = one count, wherever it fails
+                    result = scrape_detail_page(page, url)
 
-                result = scrape_detail_page(page, url)
-                stats["processed"] += 1
+                    tier = result.get("tier_used")
+                    status = result["status"]
+                    elapsed = result.get("elapsed", 0)
 
-                tier = result.get("tier_used")
-                status = result["status"]
-                elapsed = result.get("elapsed", 0)
+                    if tier:
+                        stats["tiers"][tier] = stats["tiers"].get(tier, 0) + 1
 
-                if tier:
-                    stats["tiers"][tier] = stats["tiers"].get(tier, 0) + 1
+                    tier_str = f"T{tier}" if tier else "--"
+                    desc_len = len(result.get("full_description") or "")
+                    apply_str = "yes" if result.get("application_url") else "no"
+                    err_str = f" | err={result.get('error')}" if result.get("error") else ""
 
-                tier_str = f"T{tier}" if tier else "--"
-                desc_len = len(result.get("full_description") or "")
-                apply_str = "yes" if result.get("application_url") else "no"
-                err_str = f" | err={result.get('error')}" if result.get("error") else ""
+                    log.info("  %s | %s | desc=%s chars | apply=%s | %.1fs%s",
+                             status, tier_str, f"{desc_len:,}", apply_str, elapsed, err_str)
 
-                log.info("  %s | %s | desc=%s chars | apply=%s | %.1fs%s",
-                         status, tier_str, f"{desc_len:,}", apply_str, elapsed, err_str)
+                    if status in ("ok", "partial"):
+                        stats[status] += 1
+                        persist_description(conn, url,
+                                            result.get("full_description"),
+                                            result.get("application_url"), title)
+                    else:
+                        stats["error"] += 1
+                        conn.execute(
+                            "UPDATE jobs SET detail_error = ?, detail_scraped_at = ? WHERE url = ?",
+                            (result.get("error", "unknown"), now, url),
+                        )
 
-                if status in ("ok", "partial"):
-                    stats[status] += 1
-                    persist_description(conn, url,
-                                        result.get("full_description"),
-                                        result.get("application_url"), title)
-                else:
+                    conn.commit()
+                except Exception as e:  # noqa: BLE001 - one row must not sink the batch
                     stats["error"] += 1
-                    conn.execute(
-                        "UPDATE jobs SET detail_error = ?, detail_scraped_at = ? WHERE url = ?",
-                        (result.get("error", "unknown"), now, url),
-                    )
-
-                conn.commit()
+                    log.error("%s: job %d/%d crashed, batch continues: %s",
+                              site, i + 1, len(jobs), e)
+                    try:
+                        conn.execute(
+                            "UPDATE jobs SET detail_error = ?, detail_scraped_at = ? "
+                            "WHERE url = ?",
+                            (f"enrich-crash: {str(e)[:180]}", now, url),
+                        )
+                        conn.commit()
+                    except Exception:
+                        conn.rollback()
 
                 if i < len(jobs) - 1:
                     time.sleep(delay)
@@ -843,7 +859,12 @@ def _run_detail_scraper(
         with ThreadPoolExecutor(max_workers=min(workers, len(order))) as pool:
             futures = {pool.submit(_scrape_site, site): site for site in order}
             for future in as_completed(futures):
-                _merge_stats(future.result())
+                try:
+                    _merge_stats(future.result())
+                except Exception as e:  # noqa: BLE001 - one site must not sink the run
+                    site = futures[future]
+                    total_stats["site_errors"] = total_stats.get("site_errors", 0) + 1
+                    log.error("%s: batch CRASHED (remaining sites continue): %s", site, e)
     else:
         # Sequential mode (default)
         for site in order:
@@ -851,7 +872,15 @@ def _run_detail_scraper(
             delay = SITE_DELAYS.get(site, 2.0)
             log.info("%s -- %d jobs (delay=%.1fs)", site, len(jobs), delay)
 
-            stats = scrape_site_batch(conn, site, jobs, delay=delay, max_jobs=max_per_site)
+            try:
+                stats = scrape_site_batch(conn, site, jobs, delay=delay, max_jobs=max_per_site)
+            except Exception as e:  # noqa: BLE001 - one site must not sink the run
+                # Dogfood 2026-11-09: the parallel path caught per-site
+                # crashes but this path did not — a single failed batch
+                # aborted enrichment with every later site's jobs stranded.
+                total_stats["site_errors"] = total_stats.get("site_errors", 0) + 1
+                log.error("%s: batch CRASHED (remaining sites continue): %s", site, e)
+                continue
             _merge_stats(stats)
 
             log.info("Site summary: %d ok, %d partial, %d error | T1=%d T2=%d T3=%d",
