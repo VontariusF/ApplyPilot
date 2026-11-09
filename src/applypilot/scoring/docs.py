@@ -9,18 +9,27 @@ import unicodedata
 # cannot leave '__' or ' _' sequences behind.
 _SEPARATOR_RUN = re.compile(r"[\s_-]{2,}")
 
+# F3: anything non-ASCII that survives NFKD decomposition (CJK, Cyrillic,
+# ø) has no ASCII spelling to fall back to — reduce it to an underscore
+# so generated filenames are ASCII-only. Runs of these collapse via
+# _SEPARATOR_RUN below.
+_ASCII_FALLBACK = re.compile(r"[^A-Za-z0-9_-]")
+
 
 def _safe_component(value: str | None, limit: int) -> str:
-    """Filename-safe, idempotent slug for one prefix component (S3).
+    """Filename-safe, idempotent ASCII slug for one prefix component (S3).
 
     Non-ASCII look-alikes are normalized to their ASCII spelling
-    (é → e via NFD decomposition plus combining-mark removal) before the
-    character filter; runs of two or more separators collapse to one
+    (é → e via NFKD decomposition plus combining-mark removal) before the
+    character filter; anything non-ASCII that survives decomposition
+    (CJK, Cyrillic, ø) becomes an underscore, so the output is
+    ASCII-only. Runs of two or more separators collapse to one
     underscore. Applying this to its own output is a no-op.
     """
     text = unicodedata.normalize("NFKD", value or "")
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
     text = re.sub(r"[^\w\s-]", "", text)
+    text = _ASCII_FALLBACK.sub("_", text)
     text = _SEPARATOR_RUN.sub("_", text.strip()).replace(" ", "_")
     text = text.strip("_ ")
     return text[:limit] or "none"

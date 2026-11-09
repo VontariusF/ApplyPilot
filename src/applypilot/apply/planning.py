@@ -107,9 +107,17 @@ def plan_hash(core: dict) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _plan_core(day: str, min_score: int, cap: int, urls: list[str]) -> dict:
-    """The hash-relevant plan content (estimates and run mechanics excluded)."""
-    return {"day": day, "min_score": min_score, "cap": cap, "urls": urls}
+def _plan_core(day: str, min_score: int, cap: int, urls: list[str],
+               requested_limit: Optional[int]) -> dict:
+    """The hash-relevant plan content (estimates and run mechanics excluded).
+
+    F4: requested_limit is part of the core — the token's tamper surface
+    is everything a confirm's flags are compared against, and a disk-
+    edited requested_limit would otherwise make an unfaithful --limit
+    repeat look faithful.
+    """
+    return {"day": day, "min_score": min_score, "cap": cap, "urls": urls,
+            "requested_limit": requested_limit}
 
 
 def _estimate_seconds() -> int:
@@ -160,7 +168,7 @@ def stage_batch_plan(min_score: int, limit: Optional[int],
                      "excluded": excluded})
 
     urls = [job["url"] for job in batch]
-    digest = plan_hash(_plan_core(day, min_score, cap, urls))
+    digest = plan_hash(_plan_core(day, min_score, cap, urls, limit))
     estimate = _estimate_seconds()
 
     payload = {
@@ -196,9 +204,8 @@ def stage_batch_plan(min_score: int, limit: Optional[int],
         "next": f"applypilot apply --i-confirm {digest} "
                 "(same flags as this --plan run, same UTC day)",
     }
-    staged = {**_plan_core(day, min_score, cap, urls),
+    staged = {**_plan_core(day, min_score, cap, urls, limit),
               "plan_hash": digest,
-              "requested_limit": limit,
               "staged_at": datetime.now(timezone.utc).isoformat()}
     config.write_secret_text(plan_path(), json.dumps(staged, indent=2))
     return payload
@@ -260,8 +267,15 @@ def verify_confirm(given_hash: str, explicit_cap: Optional[int],
             f"the staged plan is from {stored.get('day')!r}, not today "
             f"({today}) — plan again; tokens do not cross UTC days.",
             details={"staged_day": stored.get("day"), "today": today})
+    # F4: the hash core covers requested_limit, so a disk-tampered value
+    # fails the integrity check like any other edit. Compatibility is
+    # deliberate: a token staged by a build whose hash core predates
+    # requested_limit no longer verifies and is refused with a re-plan
+    # instruction — tokens do not cross UTC days anyway, and a token
+    # whose tamper surface we cannot vouch for must not be accepted.
     core = _plan_core(stored.get("day"), stored.get("min_score"),
-                      stored.get("cap"), stored.get("urls", []))
+                      stored.get("cap"), stored.get("urls", []),
+                      stored.get("requested_limit"))
     if plan_hash(core) != stored.get("plan_hash"):
         raise PlanEditedError(
             "the staged plan file was edited after it was written — plan "
