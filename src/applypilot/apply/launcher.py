@@ -541,6 +541,19 @@ def mark_result(url: str, status: str, error: str | None = None,
             f"{url} is locked under a different claim token — re-acquire it "
             "with `agent apply-acquire` and report with the returned claim")
 
+    # V2 (audit follow-up): the F8 check above is read-time, but the
+    # recording UPDATEs below were only claim-conditional by accident of
+    # timing — a stale-lock reclaim interleaved between this SELECT and the
+    # UPDATE could be overwritten by the displaced holder's in-flight
+    # report. When the row carried a claim token at read time, the write is
+    # made claim-conditional: it only lands while the token we validated is
+    # still the one on the row. A zero-row update is that lost race — the
+    # reclaimer's outcome stands, nothing is clobbered.
+    claim_guard = (stored_claim
+                   if isinstance(stored_claim, str)
+                   and stored_claim.startswith(CLAIM_TOKEN_PREFIX)
+                   else None)
+
     # P2-1: a 'reclaimed' marker means a B4 stale-lock reclaim happened while
     # the reporting worker believed it still held the job. Its report is a
     # lost race against the reclaimer's own outcome — never evidence of a
@@ -600,26 +613,39 @@ def mark_result(url: str, status: str, error: str | None = None,
             f"stale lock was reclaimed; the latest report ('{status}') won."
         )
 
+    # The write itself carries the claim predicate when the lock held a
+    # token (see claim_guard above); tokenless rows keep the exact
+    # pre-claim UPDATE — V4 keeps their unenforceability documented.
+    claim_predicate = " AND apply_task_id = ?" if claim_guard is not None else ""
+    claim_params = (claim_guard,) if claim_guard is not None else ()
+
     if status == "applied":
-        conn.execute("""
+        cursor = conn.execute(f"""
             UPDATE jobs SET apply_status = 'applied', applied_at = ?,
                            apply_error = NULL, apply_conflict = ?,
                            agent_id = NULL,
                            apply_duration_ms = ?, apply_task_id = ?,
                            applied_resume_version_id = ?,
                            applied_cover_version_id = ?
-            WHERE url = ?
+            WHERE url = ?{claim_predicate}
         """, (now, superseded_note, duration_ms, marker_to_keep,
-              resume_version_id, cover_version_id, url))
+              resume_version_id, cover_version_id, url, *claim_params))
     else:
         attempts = _ATTEMPTS_BAN if permanent else "COALESCE(apply_attempts, 0) + 1"
-        conn.execute(f"""
+        cursor = conn.execute(f"""
             UPDATE jobs SET apply_status = ?, apply_error = ?,
                            apply_attempts = {attempts}, agent_id = NULL,
                            apply_conflict = ?,
                            apply_duration_ms = ?, apply_task_id = ?
-            WHERE url = ?
-        """, (status, error or "unknown", superseded_note, duration_ms, marker_to_keep, url))
+            WHERE url = ?{claim_predicate}
+        """, (status, error or "unknown", superseded_note, duration_ms,
+              marker_to_keep, url, *claim_params))
+    if claim_guard is not None and cursor.rowcount == 0:
+        # Lost race: a reclaim replaced our token between the check and
+        # this write. Roll back and report in the existing vocabulary —
+        # the reclaimer's outcome superseded this report.
+        conn.rollback()
+        return "superseded"
     conn.commit()
     return "recorded"
 
