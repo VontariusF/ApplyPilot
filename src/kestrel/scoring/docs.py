@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Shared helpers for generated output documents (tailored resumes, cover letters)."""
 
 import hashlib

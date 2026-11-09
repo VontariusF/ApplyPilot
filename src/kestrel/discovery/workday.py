@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Workday ATS direct API scraper: searches employer career portals.
 
 Scrapes Workday-powered career sites (NVIDIA, Salesforce, Workday, etc.)

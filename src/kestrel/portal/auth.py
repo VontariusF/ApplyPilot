@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Portal authentication: localhost token, cookie handling, host checks.
 
 A token is generated at first launch and stored at 0600 under

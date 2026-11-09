@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """The `kestrel agent` JSON protocol — onboarding and host-driven
 pipeline stages for any host coding agent.
 

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """System Check: the portal's in-process diagnostic surface.
 
 Replaces the terminal ``kestrel doctor`` for portal users: the same

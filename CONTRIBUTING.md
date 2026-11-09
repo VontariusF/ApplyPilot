@@ -1,6 +1,9 @@
-# Contributing to ApplyPilot
+# Contributing to Kestrel
 
-Thank you for your interest in contributing to ApplyPilot. This guide covers everything you need to get started.
+Thank you for your interest in contributing to Kestrel — an AGPL-3.0 fork of
+[Pickle-Pixel/ApplyPilot](https://github.com/Pickle-Pixel/ApplyPilot). This
+guide covers development setup, the gates every change must pass, and the
+ground rules for what never enters the repository.
 
 ## Development Setup
 
@@ -12,154 +15,104 @@ Thank you for your interest in contributing to ApplyPilot. This guide covers eve
 ### Clone and Install
 
 ```bash
-git clone https://github.com/Pickle-Pixel/ApplyPilot.git
-cd ApplyPilot
+git clone https://github.com/Vontarius-Ventures/kestrel.git
+cd kestrel
 pip install -e ".[dev]"
 playwright install chromium
 ```
 
-This installs ApplyPilot in editable mode with all development dependencies (pytest, ruff, etc.) and downloads the Chromium browser binary for Playwright.
+This installs Kestrel in editable mode with the development dependencies
+(pytest, ruff, and the portal stack) and downloads the Chromium browser
+binary for Playwright.
 
-### Verify Installation
-
-```bash
-applypilot --version
-pytest tests/ -v
-ruff check src/
-```
-
-## How to Contribute
-
-### Adding New Workday Employers
-
-Workday employer portals are configured in `config/employers.yaml`. To add a new employer:
-
-1. Find the company's Workday career portal URL (usually `https://company.wd5.myworkdaysite.com/`)
-2. Identify the Workday instance number (wd1, wd3, wd5, etc.) and the tenant ID
-3. Add an entry to `config/employers.yaml`:
-
-```yaml
-- name: "Company Name"
-  tenant: "company_tenant_id"
-  instance: "wd5"
-  url: "https://company.wd5.myworkdaysite.com/en-US/recruiting"
-```
-
-4. Test discovery: `applypilot discover --employer "Company Name"`
-5. Submit a PR with the new entry
-
-### Adding New Career Sites
-
-Direct career site scrapers are configured in `config/sites.yaml`. To add a new site:
-
-1. Inspect the company's careers page and identify the job listing structure
-2. Add an entry to `config/sites.yaml` with CSS selectors:
-
-```yaml
-- name: "Company Name"
-  url: "https://company.com/careers"
-  selectors:
-    job_list: ".job-listing"
-    title: ".job-title"
-    location: ".job-location"
-    link: "a.job-link"
-    description: ".job-description"
-```
-
-3. Test: `applypilot discover --site "Company Name"`
-4. Submit a PR
-
-### Bug Fixes and Features
-
-1. Check existing [issues](https://github.com/Pickle-Pixel/ApplyPilot/issues) to avoid duplicating work
-2. For new features, open an issue first to discuss the approach
-3. Fork the repo and create a feature branch from `main`
-4. Write your code with type hints and docstrings
-5. Add tests for new functionality
-6. Update the CHANGELOG.md under an `[Unreleased]` section
-7. Submit a PR
-
-## Running Tests
+### Verify the installation
 
 ```bash
-# Run all tests
-pytest tests/ -v
-
-# Run a specific test file
-pytest tests/test_scoring.py -v
-
-# Run with coverage
-pytest tests/ --cov=src/applypilot --cov-report=term-missing
+kestrel --version
+kestrel doctor --json
 ```
 
-## Linting and Code Style
+## Must-pass gates
 
-ApplyPilot uses [Ruff](https://docs.astral.sh/ruff/) for linting and formatting.
+These must pass before you open a PR — CI runs them, and a red gate blocks
+the merge:
 
 ```bash
-# Check for issues
-ruff check src/
-
-# Auto-fix what can be fixed
-ruff check src/ --fix
-
-# Format code
-ruff format src/
-```
-
-### Code Style Guidelines
-
-- **Type hints**: All function signatures must have type annotations
-- **Docstrings**: All public functions and classes must have docstrings (Google style)
-- **Naming**: snake_case for functions and variables, PascalCase for classes
-- **Imports**: Sorted by Ruff (isort-compatible)
-- **Line length**: 100 characters maximum
-
-## PR Guidelines
-
-- **One feature per PR.** Keep changes focused and reviewable.
-- **Include tests.** New features need test coverage. Bug fixes need a regression test.
-- **Update CHANGELOG.md.** Add your changes under `[Unreleased]`.
-- **Write a clear PR description.** Explain what changed and why.
-- **Keep commits clean.** Squash fixup commits before requesting review.
-- **CI must pass.** All linting and tests must be green.
-
-### Pre-merge validation (this fork)
-
-GitHub Actions are disabled in this fork, so the local run IS the merge gate.
-Before every merge — and always for portal or onboarding changes — run:
-
-```
 ruff check .                 # lint (src + tests)
-pytest tests -m "not e2e"    # unit suite
-pytest tests/e2e             # browser e2e — portal PRs must not merge without it
+pytest tests -m "not e2e"    # unit suite (non-e2e)
 ```
 
-The e2e suite catches the choice-value and first-card contract breaks that the
-unit suites mock away: the PR #44 salary-band break shipped exactly that way.
-Chromium must be installed once per machine (`playwright install chromium`) —
-without it the e2e tests silently SKIP, and a skipped gate is no gate.
+For portal or onboarding changes, also run the browser e2e suite
+(`pytest tests/e2e`); Chromium must be installed once per machine
+(`playwright install chromium`) — without it the e2e tests silently SKIP,
+and a skipped gate is no gate.
 
-## Project Structure
+## How to contribute
+
+1. Check existing [issues](https://github.com/Vontarius-Ventures/kestrel/issues)
+   to avoid duplicating work; for new features, open an issue first to
+   discuss the approach.
+2. Fork the repo and create a feature branch from `main`.
+3. Write code with type hints and docstrings, and add tests for new
+   functionality — bug fixes need a regression test.
+4. Run the must-pass gates above.
+5. Submit a PR with a clear description of what changed and why.
+
+### Adding Workday employers and career sites
+
+Workday employer portals live in `src/kestrel/config/employers.yaml`; direct
+career sites in `src/kestrel/config/sites.yaml`. Find the portal URL and
+Workday instance/tenant (or the site's CSS selectors for job listings), add
+an entry following the existing format, and verify with
+`kestrel run --stage discover` against that employer or site before
+submitting.
+
+## Code style
+
+- **Type hints** on all function signatures.
+- **Docstrings** (Google style) on all public functions and classes.
+- **snake_case** for functions and variables, **PascalCase** for classes.
+- **Imports** sorted by Ruff (isort-compatible); **line length** 120
+  characters.
+- Auto-fix what Ruff can fix: `ruff check src/ --fix`.
+
+## Ground rules — never commit
+
+These are hard rules, enforced by review; violations are removed on sight:
+
+- **Keys, tokens, or credentials of any kind** — API keys, OAuth tokens,
+  session cookies, password files.
+- **`.env*.local` and `*.local` files** — local-only configuration and
+  secrets stay on your machine. `.env.example` (placeholders only) is the
+  template that ships.
+- **Personal machine details** — home-directory paths, hostnames, IPs,
+  usernames, deployed-service configs (e.g., launchd plists).
+- **Local databases** — SQLite files and their journals.
+- **Live resume/profile data** — `profile.json` and `resume.txt` are
+  git-ignored; commit only the `profile.example.json` / example fixtures.
+
+## Project structure
 
 ```
-ApplyPilot/
-├── src/applypilot/       # Main package
-│   ├── __init__.py
+kestrel/
+├── src/kestrel/          # Main package
 │   ├── cli.py            # CLI entry points
-│   ├── discover/         # Stage 1: job discovery scrapers
-│   ├── enrich/           # Stage 2: description extraction
-│   ├── score/            # Stage 3: AI scoring
-│   ├── tailor/           # Stage 4: resume tailoring
-│   ├── cover/            # Stage 5: cover letter generation
-│   ├── apply/            # Stage 6: browser automation
-│   └── utils/            # Shared utilities
-├── config/               # Default configuration files
-├── tests/                # Test suite
-├── docs/                 # Documentation
+│   ├── pipeline.py       # Stage orchestration (tailor, cover letters, PDF)
+│   ├── discovery/        # Stage 1: job discovery scrapers
+│   ├── enrichment/       # Stage 2: description extraction
+│   ├── scoring/          # Stage 3: AI scoring
+│   ├── apply/            # Stage 6: browser automation (Claude/Droid engines)
+│   ├── portal/           # Localhost web portal
+│   ├── wizard/           # Onboarding wizard
+│   ├── agent_protocol.py # Host-driven agent protocol (JSON verbs)
+│   ├── database.py       # SQLite store
+│   └── config/           # Bundled YAML configs (employers, sites, searches)
+├── tests/                # Test suite (unit + e2e)
 └── pyproject.toml        # Package configuration
 ```
 
 ## License
 
-By contributing to ApplyPilot, you agree that your contributions will be licensed under the [GNU Affero General Public License v3.0](LICENSE).
+By contributing to Kestrel, you agree that your contributions will be
+licensed under the [GNU Affero General Public License v3.0](LICENSE).
+Kestrel retains upstream ApplyPilot attribution per [NOTICE](NOTICE).

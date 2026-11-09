@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """AI-powered smart extraction: discovers jobs from arbitrary websites.
 
 Two-phase approach:

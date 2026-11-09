@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Remote-work inference heuristic (spec D).
 
 The store has no authoritative remote field from any discovery site, so

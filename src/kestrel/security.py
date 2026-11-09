@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Credential redaction primitives.
 
 Security remediation S1/S3: secret values must never reach error messages,

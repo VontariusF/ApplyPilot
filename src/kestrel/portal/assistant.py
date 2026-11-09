@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Ask-the-agent panel for the Automation page (spec Automation UI).
 
 A scoped assistant: it can start or stop one of the three presets, flip

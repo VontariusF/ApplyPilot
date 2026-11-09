@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Bounded JSONL event log for apply runs.
 
 The portal's SSE endpoint tails these files; the CLI dashboard writes them

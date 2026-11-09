@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Rich live dashboard for the apply pipeline.
 
 Displays real-time worker status, job progress, and recent events

@@ -37,5 +37,13 @@ build/
 .DS_Store
 Thumbs.db
 
+# Owner secrets (never ship or commit)
+*.local
+.env*.local
+
+# Local SQLite databases (never commit)
+*.sqlite3
+*.sqlite3-journal
+
 # Claude Code
 .claude/

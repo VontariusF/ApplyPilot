@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Kestrel Pipeline Orchestrator.
 
 Runs pipeline stages in sequence or concurrently (streaming mode).

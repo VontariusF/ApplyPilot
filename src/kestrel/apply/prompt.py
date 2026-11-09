@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Prompt builder for the autonomous job application agent.
 
 Constructs the full instruction prompt that tells Claude Code / the AI agent

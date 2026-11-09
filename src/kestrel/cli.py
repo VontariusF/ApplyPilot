@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Kestrel CLI — the main entry point."""
 
 from __future__ import annotations

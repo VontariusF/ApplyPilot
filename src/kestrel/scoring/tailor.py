@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Resume tailoring: LLM-powered ATS-optimized resume generation per job.
 
 THIS IS THE HEAVIEST REFACTOR. Every piece of personal data -- name, email, phone,

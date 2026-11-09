@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Kestrel HTML Dashboard Generator.
 
 Generates a self-contained HTML dashboard with:

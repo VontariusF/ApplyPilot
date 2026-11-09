@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Automation backend: preset config, toggles, and the in-process scheduler.
 
 automation.json lives next to the other secret-adjacent config in

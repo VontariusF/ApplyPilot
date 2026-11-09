@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Settings page backend: read ~/.kestrel/.env masked, write it merged.
 
 Reads never return a secret value — secrets are masked to their last four

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Seniority classification: title/description text → a seniority tier.
 
 Deterministic and table-driven — no LLM in the loop (locked decision,

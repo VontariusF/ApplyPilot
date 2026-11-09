@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Composio discovery source: job listings via the Composio v3.1 tool API.
 
 First source: the ``web3_career`` toolkit (web3.career), whose single tool

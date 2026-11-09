@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Gate 2/3 planning for `kestrel apply` (spec art_A71wyYS4).
 
 The plan-then-confirm contract for externally driven batches:

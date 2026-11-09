@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Kestrel first-time setup wizard.
 
 Interactive flow that creates ~/.kestrel/ with:
