@@ -3,7 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}ApplyPilot Portal{% endblock %}</title>
+  <title>{% block title %}Kestrel Portal{% endblock %}</title>
+  <link rel="icon" type="image/png" href="/static/kestrel-mono.png">
   <link rel="stylesheet" href="/static/portal.css">
   <script src="/static/htmx.min.js" defer></script>
   <script src="/static/ext-sse.js" defer></script>
@@ -11,7 +12,9 @@
 <body>
   <div class="shell">
     <aside class="sidebar">
-      <a class="sidebar-brand" href="/">Apply<span class="brand-pilot">Pilot</span></a>
+      <a class="sidebar-brand" href="/" aria-label="Kestrel home">
+        <img class="brand-mark" src="/static/kestrel-mark.png" alt="" width="26" height="26">Kestrel
+      </a>
       <nav class="side-nav" aria-label="Main">
         <a href="/jobs" {% if request.url.path.startswith("/jobs") %}class="active" aria-current="page"{% endif %}>Jobs</a>
         <a href="/" {% if request.url.path == "/" %}class="active" aria-current="page"{% endif %}>Dashboard</a>

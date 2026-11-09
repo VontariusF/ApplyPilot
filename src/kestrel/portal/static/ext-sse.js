@@ -187,7 +187,7 @@ This extension adds support for Server Sent Events to htmx.  See /www/extensions
 			// remove the sse: prefix from here on out
 			sseEventName = sseEventName.substr(4);
 
-			// [ApplyPilot fork] htmx core registers `hx-trigger="sse:*"`
+			// [Kestrel fork] htmx core registers `hx-trigger="sse:*"`
 			// listeners on the EventSource object that existed when the
 			// element was processed and saves it as internalData.sseListener
 			// on the trigger element. When this extension replaces the source
@@ -244,7 +244,7 @@ This extension adds support for Server Sent Events to htmx.  See /www/extensions
 	function ensureEventSource(elt, url, retryCount) {
 		var internalData = api.getInternalData(elt);
 
-		// [ApplyPilot fork] Close the EventSource this element already owns
+		// [Kestrel fork] Close the EventSource this element already owns
 		// before creating a replacement. Upstream overwrites internalData
 		// without closing, so a still-connected previous source is orphaned
 		// and duplicate streams pile up when the element is reprocessed.

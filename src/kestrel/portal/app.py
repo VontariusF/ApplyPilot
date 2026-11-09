@@ -35,7 +35,17 @@ from kestrel.portal import system_check as system_check_mod
 from kestrel.scoring.scorer import run_scoring
 
 PORTAL_DIR = Path(__file__).parent
-STATIC_FILES = ("htmx.min.js", "ext-sse.js", "portal.css")
+STATIC_FILES = (
+    "htmx.min.js",
+    "ext-sse.js",
+    "portal.css",
+    # Kestrel brand art (brand kit v1.0): mark, horizontal lockup, dark-surface
+    # and monochrome variants.
+    "kestrel-mark.png",
+    "kestrel-wordmark.png",
+    "kestrel-dark.png",
+    "kestrel-mono.png",
+)
 
 log = logging.getLogger(__name__)
 
