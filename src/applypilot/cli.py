@@ -872,5 +872,231 @@ def doctor(
     console.print()
 
 
+# ---------------------------------------------------------------------------
+# jobs sub-app: deep filtering over the store (spec art_we4AUxEy Layer 2)
+# ---------------------------------------------------------------------------
+
+jobs_app = typer.Typer(name="jobs", help="Filter and inspect the jobs store.")
+app.add_typer(jobs_app, name="jobs")
+
+# The spec's sort surface. The builder's full mapping lives in
+# database._FILTER_SORT_COLUMNS; the CLI validates against this tuple so
+# an unknown --sort is a typed usage error, not a traceback.
+_FILTER_SORT_KEYS = ("score", "date", "salary", "discovered")
+
+# The explicit filterable-dimension contract for --json output (spec
+# Layer 2): identity columns plus every dimension a predicate reads,
+# with the derived `stale` flag — consumers see why a row matched.
+_JSON_JOB_FIELDS = (
+    "url", "title", "location", "site", "discovered_at", "date_posted",
+    "salary_min", "salary_max", "salary_currency", "salary_interval",
+    "seniority", "fit_score", "stale",
+)
+
+
+def _parse_csv_list(raw: str | None) -> list[str] | None:
+    """Split a comma-separated flag value into tokens ('' → None)."""
+    if raw is None:
+        return None
+    tokens = [token.strip() for token in raw.split(",") if token.strip()]
+    return tokens or None
+
+
+def _parse_posted_within(raw: str) -> int:
+    """Parse --posted-within: '7d'/'30d'/'90d' or a plain int of days.
+
+    Anything else is a typed CLI usage error (spec F5-consistent
+    hardening), not a traceback.
+    """
+    text = raw.strip().lower()
+    if text.endswith("d"):
+        text = text[:-1]
+    try:
+        days = int(text)
+    except ValueError:
+        raise typer.BadParameter(
+            f"--posted-within must be a duration like '14d' or a plain number of "
+            f"days, got {raw!r}."
+        ) from None
+    if days <= 0:
+        raise typer.BadParameter("--posted-within must be a positive number of days.")
+    return days
+
+
+def _profile_currency() -> str | None:
+    """The profile's compensation currency, or None when unset.
+
+    No profile yet (pre-onboarding filter runs) simply means no currency
+    default — the salary predicate then matches any currency.
+    """
+    from applypilot.config import load_profile
+
+    try:
+        compensation = load_profile().get("compensation", {})
+    except FileNotFoundError:
+        return None
+    currency = compensation.get("salary_currency")
+    if currency is None or not str(currency).strip():
+        return None
+    return str(currency).strip()
+
+
+def _current_resume_hash() -> str:
+    """sha256 of resume.txt's text, '' when no resume is on disk.
+
+    An empty hash differs from any stored scored_resume_hash, so with no
+    resume to compare against every existing score reports stale.
+    """
+    from applypilot import config
+    from applypilot.scoring.scorer import resume_sha256
+
+    if not config.RESUME_PATH.exists():
+        return ""
+    text = config.RESUME_PATH.read_text(encoding="utf-8", errors="replace")
+    return resume_sha256(text)
+
+
+@jobs_app.command("filter")
+def jobs_filter(
+    posted_within: Optional[str] = typer.Option(
+        None, "--posted-within",
+        help="date_posted within N days — '7d'/'30d'/'90d' or a plain int.",
+    ),
+    location: Optional[str] = typer.Option(
+        None, "--location", help="Location substring, case-insensitive."),
+    remote: Optional[bool] = typer.Option(
+        None, "--remote", "--on-site",
+        help="Restrict to remote (is_remote=1) or on-site (is_remote=0) rows.",
+    ),
+    seniority: Optional[str] = typer.Option(
+        None, "--seniority",
+        help="Comma-separated any-of tiers: intern,junior,mid,senior,staff,principal,lead,manager.",
+    ),
+    min_salary: Optional[float] = typer.Option(
+        None, "--min-salary",
+        help="Minimum annualized pay — a range reaching this counts.",
+    ),
+    currency: Optional[str] = typer.Option(
+        None, "--currency",
+        help="Currency for --min-salary matching (default: the profile's compensation.salary_currency).",
+    ),
+    min_score: Optional[int] = typer.Option(
+        None, "--min-score", help="Minimum fit_score."),
+    max_score: Optional[int] = typer.Option(
+        None, "--max-score", help="Maximum fit_score."),
+    site: Optional[str] = typer.Option(
+        None, "--site", help="Comma-separated any-of source boards, case-insensitive."),
+    keyword: Optional[str] = typer.Option(
+        None, "--keyword",
+        help="Comma-separated any-of substrings over title + full_description.",
+    ),
+    exclude_keyword: Optional[str] = typer.Option(
+        None, "--exclude-keyword",
+        help="Comma-separated substrings that must not appear in title + full_description.",
+    ),
+    stale_only: bool = typer.Option(
+        False, "--stale-only",
+        help="Only jobs whose score is stale: scored before the current resume.txt (or never bound).",
+    ),
+    sort: str = typer.Option(
+        "discovered", "--sort",
+        help="Sort key: score|date|salary|discovered (descending by default).",
+    ),
+    ascending: bool = typer.Option(False, "--asc", help="Sort ascending."),
+    limit: Optional[int] = typer.Option(
+        None, "--limit", help="Maximum rows to return."),
+    json_output: bool = typer.Option(
+        False, "--json",
+        help="Emit one pure-JSON document (takes precedence over --urls).",
+    ),
+    urls: bool = typer.Option(
+        False, "--urls", help="Print one URL per line, for piping."),
+) -> None:
+    """Query the store with composable predicates (all AND together).
+
+    Read-only. Zero predicates lists everything (honoring --sort/--limit).
+    """
+    _bootstrap()
+
+    from applypilot.database import (
+        VALID_SENIORITY_TIERS,
+        FilterPredicates,
+        filter_jobs,
+    )
+
+    seniority_list = _parse_csv_list(seniority)
+    if seniority_list:
+        unknown = sorted(
+            t.lower() for t in seniority_list
+            if t.lower() not in VALID_SENIORITY_TIERS
+        )
+        if unknown:
+            raise typer.BadParameter(
+                f"Unknown seniority tier(s) {', '.join(unknown)} — valid tiers: "
+                f"{', '.join(VALID_SENIORITY_TIERS)}."
+            )
+    if sort not in _FILTER_SORT_KEYS:
+        raise typer.BadParameter(
+            f"Unknown sort key {sort!r} — valid keys: {', '.join(_FILTER_SORT_KEYS)}."
+        )
+    if limit is not None and limit <= 0:
+        raise typer.BadParameter("--limit must be a positive integer.")
+    if min_salary is None and currency is not None:
+        raise typer.BadParameter("--currency only matters together with --min-salary.")
+
+    currency_value = currency or (
+        _profile_currency() if min_salary is not None else None)
+
+    predicates = FilterPredicates(
+        posted_within_days=_parse_posted_within(posted_within) if posted_within else None,
+        location=location.strip() if location else None,
+        remote=remote,
+        seniority=seniority_list,
+        min_salary=min_salary,
+        currency=currency_value,
+        min_score=min_score,
+        max_score=max_score,
+        sites=_parse_csv_list(site),
+        keywords=_parse_csv_list(keyword),
+        exclude_keywords=_parse_csv_list(exclude_keyword),
+        stale_only=stale_only,
+        sort=sort,
+        ascending=ascending,
+        limit=limit,
+    )
+    jobs = filter_jobs(predicates, current_resume_hash=_current_resume_hash())
+
+    if json_output:
+        _emit_json({
+            "count": len(jobs),
+            "jobs": [{field: job[field] for field in _JSON_JOB_FIELDS}
+                     for job in jobs],
+        })
+        return
+    if urls:
+        for job in jobs:
+            typer.echo(job["url"])
+        return
+
+    table = Table(title=f"{len(jobs)} matching jobs")
+    for column in ("URL", "Title", "Location", "Remote", "Seniority",
+                   "Salary", "Score", "Posted", "Stale"):
+        table.add_column(column)
+    for job in jobs:
+        remote_label = {1: "remote", 0: "on-site"}.get(job["is_remote"], "—")
+        table.add_row(
+            job["url"] or "—",
+            job["title"] or "—",
+            job["location"] or "—",
+            remote_label,
+            job["seniority"] or "—",
+            job["salary"] or "—",
+            "—" if job["fit_score"] is None else str(job["fit_score"]),
+            (job["date_posted"] or "")[:10] or "—",
+            "yes" if job["stale"] else "",
+        )
+    console.print(table)
+
+
 if __name__ == "__main__":
     app()

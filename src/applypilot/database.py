@@ -876,6 +876,178 @@ def get_jobs_by_stage(conn: sqlite3.Connection | None = None,
 
 
 # ---------------------------------------------------------------------------
+# Deep filtering: composable read-only job queries (spec art_we4AUxEy Layer 2)
+# ---------------------------------------------------------------------------
+
+# Valid seniority tiers — the same set enrichment/seniority.py classifies
+# into. The CLI validates --seniority tokens against this before the
+# predicate ever reaches SQL.
+VALID_SENIORITY_TIERS = (
+    "intern", "junior", "mid", "senior", "staff", "principal", "lead", "manager",
+)
+
+# Sort key → SQL expression. Salary sorts on the annualized range's top
+# (COALESCE falls back to min when the board delivered a single value).
+# NULLS LAST keeps unposted/unpayed/unscored rows from crowding the head;
+# url is the deterministic tiebreaker. Cross-currency salary sorts compare
+# raw annualized numbers — filtering with --currency first is the honest
+# way to rank one currency.
+_FILTER_SORT_COLUMNS = {
+    "score": "fit_score",
+    "date": "date_posted",
+    "salary": "COALESCE(salary_max, salary_min)",
+    "discovered": "discovered_at",
+}
+
+
+@dataclass
+class FilterPredicates:
+    """The composable `jobs filter` predicate set (spec Layer 2).
+
+    Every field is optional; a field left at its default contributes no
+    clause, and set fields AND together. Zero predicates = full listing.
+    The CLI translates flags into this dataclass — it holds no SQL — so
+    the portal can call `filter_jobs(FilterPredicates(...))` directly.
+
+    Salary comparisons are annualized (`--min-salary` against
+    salary_max — a job's range reaching the threshold counts). When a
+    currency is set, rows with a different known currency are excluded;
+    rows with NULL salary_currency still match (unknown currency — the
+    live store's un-prefixed strings are the profile-locale ones).
+    """
+
+    posted_within_days: int | None = None
+    location: str | None = None
+    remote: bool | None = None          # True=remote, False=on-site, None=either
+    seniority: list[str] | None = None  # any-of
+    min_salary: float | None = None
+    currency: str | None = None         # uppercased by the builder
+    min_score: int | None = None
+    max_score: int | None = None
+    sites: list[str] | None = None      # any-of, case-insensitive
+    keywords: list[str] | None = None   # any-of, title+full_description substring
+    exclude_keywords: list[str] | None = None
+    stale_only: bool = False
+    sort: str = "discovered"
+    ascending: bool = False
+    limit: int | None = None
+
+
+def filter_jobs(predicates: FilterPredicates,
+                current_resume_hash: str | None = None,
+                conn: sqlite3.Connection | None = None) -> list[dict]:
+    """Run one composable filter query and return matching job dicts.
+
+    Args:
+        predicates: The AND-composed predicate set (see FilterPredicates).
+        current_resume_hash: sha256 of the current resume.txt text, used
+            to compute each row's `stale` flag (spec Layer 3 semantics:
+            a score is stale when scored_resume_hash is NULL or differs).
+            Pass None (no resume on disk) and every scored row reports
+            stale. Only affects the returned `stale` key, never the row
+            set — unless predicates.stale_only is set, which also filters.
+        conn: Database connection. Uses get_connection() if None.
+
+    Returns:
+        List of job dicts (all columns) in sort order, each with a
+        derived `stale` bool. Rows already carry the structured
+        dimensions (date_posted, salary_min/max/currency/interval,
+        seniority, fit_score) — the --json surface forwards them as-is.
+
+    Raises:
+        ValueError: Unknown sort key (a CLI-level typed usage error).
+    """
+    if predicates.sort not in _FILTER_SORT_COLUMNS:
+        valid = "|".join(_FILTER_SORT_COLUMNS)
+        raise ValueError(f"Unknown sort key {predicates.sort!r} (valid: {valid})")
+    if conn is None:
+        conn = get_connection()
+
+    where: list[str] = []
+    params: list = []
+
+    if predicates.posted_within_days is not None:
+        # Lexicographic compare on the date prefix — date_posted holds
+        # ISO text, optionally with a time component. Unknown posting
+        # dates (NULL) cannot be "within" anything.
+        cutoff = (datetime.now(timezone.utc) - timedelta(
+            days=predicates.posted_within_days)).date().isoformat()
+        where.append("substr(date_posted, 1, 10) >= ?")
+        params.append(cutoff)
+
+    if predicates.location:
+        where.append("location LIKE ?")
+        params.append(f"%{predicates.location}%")
+
+    if predicates.remote is not None:
+        where.append("is_remote = ?")
+        params.append(1 if predicates.remote else 0)
+
+    if predicates.seniority:
+        where.append(
+            f"lower(seniority) IN ({', '.join('?' * len(predicates.seniority))})")
+        params.extend(t.lower() for t in predicates.seniority)
+
+    if predicates.min_salary is not None:
+        where.append("salary_max >= ?")
+        params.append(predicates.min_salary)
+        if predicates.currency:
+            # Currency-matched: exclude rows known to be in another
+            # currency; NULL-currency rows stay (unknown ≠ foreign).
+            where.append("(salary_currency IS NULL OR upper(salary_currency) = ?)")
+            params.append(predicates.currency.upper())
+
+    if predicates.min_score is not None:
+        where.append("fit_score >= ?")
+        params.append(predicates.min_score)
+    if predicates.max_score is not None:
+        where.append("fit_score <= ?")
+        params.append(predicates.max_score)
+
+    if predicates.sites:
+        where.append(
+            f"lower(site) IN ({', '.join('?' * len(predicates.sites))})")
+        params.extend(s.lower() for s in predicates.sites)
+
+    searchable = "lower(coalesce(title, '') || ' ' || coalesce(full_description, ''))"
+    if predicates.keywords:
+        like = [f"{searchable} LIKE ?" for _ in predicates.keywords]
+        where.append(f"({' OR '.join(like)})")
+        params.extend(f"%{k.lower()}%" for k in predicates.keywords)
+    if predicates.exclude_keywords:
+        for keyword in predicates.exclude_keywords:
+            where.append(f"{searchable} NOT LIKE ?")
+            params.append(f"%{keyword.lower()}%")
+
+    if predicates.stale_only:
+        # Spec: scored_resume_hash != current resume hash (or NULL). An
+        # empty fallback hash marks every score stale when no resume
+        # exists to compare against. Parenthesized — this OR is ANDed
+        # with every other clause.
+        where.append(
+            "(scored_resume_hash IS NULL OR scored_resume_hash != ?)")
+        params.append(current_resume_hash or "")
+
+    query = "SELECT * FROM jobs"
+    if where:
+        query += " WHERE " + " AND ".join(where)
+    column = _FILTER_SORT_COLUMNS[predicates.sort]
+    direction = "ASC" if predicates.ascending else "DESC"
+    query += f" ORDER BY {column} {direction} NULLS LAST, url ASC"
+    if predicates.limit is not None:
+        query += " LIMIT ?"
+        params.append(predicates.limit)
+
+    rows = conn.execute(query, params).fetchall()
+    results = []
+    for row in rows:
+        job = dict(zip(row.keys(), row))
+        job["stale"] = job["scored_resume_hash"] != (current_resume_hash or "")
+        results.append(job)
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Document version history (spec PR F, decisions D1/D2)
 # ---------------------------------------------------------------------------
 
