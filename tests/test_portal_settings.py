@@ -13,10 +13,10 @@ import sys
 import time
 from types import SimpleNamespace
 
-from applypilot import config, llm
-from applypilot.portal import runner
-from applypilot.portal import app as portal_app_module
-from applypilot.portal import settings as settings_mod
+from kestrel import config, llm
+from kestrel.portal import runner
+from kestrel.portal import app as portal_app_module
+from kestrel.portal import settings as settings_mod
 
 
 def test_mask_hides_all_but_last_four():

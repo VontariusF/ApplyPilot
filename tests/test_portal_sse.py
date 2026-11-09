@@ -8,10 +8,10 @@ carries no configured secrets and no raw HTML.
 import asyncio
 import json
 
-from applypilot import config
-from applypilot.apply import dashboard, eventlog
-from applypilot.database import get_connection
-from applypilot.portal.app import _stream_log_lines, _stream_events
+from kestrel import config
+from kestrel.apply import dashboard, eventlog
+from kestrel.database import get_connection
+from kestrel.portal.app import _stream_log_lines, _stream_events
 
 
 def collect(agen):
@@ -22,7 +22,7 @@ def collect(agen):
 
 def test_dashboard_hook_writes_jsonl(portal_env, monkeypatch):
     log = portal_env / "runs" / "hook.jsonl"
-    monkeypatch.setenv("APPLYPILOT_EVENT_LOG", str(log))
+    monkeypatch.setenv("KESTREL_EVENT_LOG", str(log))
     eventlog.reset_writer_cache()
 
     dashboard.init_worker(0)
@@ -91,7 +91,7 @@ def test_stream_events_skips_malformed_lines(portal_env):
 
 
 def insert_run(run_id: str, log_path, event_path: str | None, status: str = "completed") -> None:
-    from applypilot.portal import runner
+    from kestrel.portal import runner
 
     runner.init_registry()
     conn = get_connection()
@@ -211,7 +211,7 @@ def test_absorb_event_survives_malformed_worker_id():
     """Portal sweep P3-5: a non-numeric worker_id used to raise ValueError
     inside the SSE generator, killing the whole stream. It is skipped
     instead."""
-    from applypilot.portal.app import _absorb_event
+    from kestrel.portal.app import _absorb_event
 
     workers, events = {}, []
     assert _absorb_event(
@@ -230,8 +230,8 @@ def test_read_log_tail_raw_keeps_jsonl_parseable(portal_env, monkeypatch):
     """Portal sweep P3-5: the events backfill parses raw lines — a
     configured secret rewritten inside a JSONL line (display redaction)
     used to break the parse and silently drop the backfilled event."""
-    from applypilot.portal import settings as settings_mod
-    from applypilot.portal.app import _read_log_tail
+    from kestrel.portal import settings as settings_mod
+    from kestrel.portal.app import _read_log_tail
 
     log = portal_env / "runs" / "ev.jsonl"
     log.parent.mkdir(parents=True, exist_ok=True)

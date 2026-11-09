@@ -17,9 +17,9 @@ import httpx
 import pandas as pd
 import pytest
 
-import applypilot.database as database
-import applypilot.pipeline as pipeline
-import applypilot.scoring.scorer as scorer
+import kestrel.database as database
+import kestrel.pipeline as pipeline
+import kestrel.scoring.scorer as scorer
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +78,7 @@ def _seed_job(conn, url, title="Engineer", **extra):
 
 
 def test_b2_scoring_error_keeps_fit_score_null(isolated_db, monkeypatch, tmp_path):
-    import applypilot.scoring.scorer as scorer
+    import kestrel.scoring.scorer as scorer
 
     conn = database.init_db()
     _seed_job(conn, "https://x/1")
@@ -134,7 +134,7 @@ def test_b2_successful_score_still_persists(isolated_db, monkeypatch, tmp_path):
 
 
 def test_b5_url_collision_keeps_both_rows_no_delete(isolated_db, monkeypatch):
-    import applypilot.enrichment.detail as detail
+    import kestrel.enrichment.detail as detail
 
     conn = database.init_db()
     conn.execute(
@@ -317,7 +317,7 @@ def test_p1_pdf_stage_still_tolerates_zero_progress_passes(monkeypatch):
 
 
 def _gemini_client(data):
-    from applypilot.llm import LLMClient
+    from kestrel.llm import LLMClient
 
     client = LLMClient("http://test", "gemini-2.0-flash", "key")
     client._client = _FakeHttpxClient(data)
@@ -325,7 +325,7 @@ def _gemini_client(data):
 
 
 def test_b8_gemini_empty_candidates_safety_block():
-    from applypilot.llm import LLMParseError
+    from kestrel.llm import LLMParseError
 
     client = _gemini_client({"candidates": []})
     with pytest.raises(LLMParseError, match="no candidates"):
@@ -335,7 +335,7 @@ def test_b8_gemini_empty_candidates_safety_block():
 
 
 def test_b8_gemini_function_call_part():
-    from applypilot.llm import LLMParseError
+    from kestrel.llm import LLMParseError
 
     client = _gemini_client({
         "candidates": [{
@@ -349,7 +349,7 @@ def test_b8_gemini_function_call_part():
 
 
 def test_b8_compat_null_content():
-    from applypilot.llm import LLMClient, LLMParseError
+    from kestrel.llm import LLMClient, LLMParseError
 
     resp = _FakeResponse({"choices": [{"message": {"content": None}}]})
     with pytest.raises(LLMParseError, match="null/non-text"):
@@ -357,7 +357,7 @@ def test_b8_compat_null_content():
 
 
 def test_b8_compat_normal_content_still_works():
-    from applypilot.llm import LLMClient
+    from kestrel.llm import LLMClient
 
     resp = _FakeResponse({"choices": [{"message": {"content": "hello"}}]})
     assert LLMClient._handle_compat_response(resp) == "hello"
@@ -369,7 +369,7 @@ def test_b8_compat_normal_content_still_works():
 
 
 def test_b9_qwen_none_content_no_attribute_error():
-    from applypilot.llm import LLMClient
+    from kestrel.llm import LLMClient
 
     client = LLMClient("http://test", "Qwen/Qwen2.5-7B", None)
     client._client = _FakeHttpxClient({"choices": [{"message": {"content": "ok"}}]})
@@ -379,7 +379,7 @@ def test_b9_qwen_none_content_no_attribute_error():
 
 
 def test_b9_qwen_string_content_still_gets_no_think():
-    from applypilot.llm import LLMClient
+    from kestrel.llm import LLMClient
 
     client = LLMClient("http://test", "Qwen/Qwen2.5-7B", None)
     captured = {}
@@ -400,7 +400,7 @@ def test_b9_qwen_string_content_still_gets_no_think():
 
 
 def test_b10_bad_salary_cell_skips_row_keeps_batch(isolated_db, jobspy_stub):
-    import applypilot.discovery.jobspy as jobspy_mod
+    import kestrel.discovery.jobspy as jobspy_mod
 
     conn = database.init_db()
     df = pd.DataFrame([
@@ -425,37 +425,37 @@ def test_b10_bad_salary_cell_skips_row_keeps_batch(isolated_db, jobspy_stub):
 
 
 def test_b11_empty_accept_passes_non_remote_city():
-    from applypilot.discovery.filters import location_ok
+    from kestrel.discovery.filters import location_ok
 
     assert location_ok("San Francisco, CA", [], []) is True
     assert location_ok("New York, NY", None or [], []) is True
 
 
 def test_b11_explicit_accept_still_filters():
-    from applypilot.discovery.filters import location_ok
+    from kestrel.discovery.filters import location_ok
 
     assert location_ok("New York, NY", ["new york"], []) is True
     assert location_ok("Boston, MA", ["new york"], []) is False
 
 
 def test_b11_reject_still_applies_with_empty_accept():
-    from applypilot.discovery.filters import location_ok
+    from kestrel.discovery.filters import location_ok
 
     assert location_ok("Boston, MA", [], ["boston"]) is False
     assert location_ok("Remote", [], ["boston"]) is True
 
 
 def test_b11_location_filters_handles_absent_and_none():
-    from applypilot.discovery.filters import location_filters
+    from kestrel.discovery.filters import location_filters
 
     assert location_filters({}) == ([], [])
     assert location_filters({"location_accept": None}) == ([], [])
 
 
 def test_b11_all_sources_share_one_implementation(jobspy_stub):
-    from applypilot.discovery import jobspy as jobspy_mod
-    from applypilot.discovery import workday as workday_mod
-    from applypilot.discovery.filters import location_ok
+    from kestrel.discovery import jobspy as jobspy_mod
+    from kestrel.discovery import workday as workday_mod
+    from kestrel.discovery.filters import location_ok
 
     assert jobspy_mod._location_ok is location_ok
     assert workday_mod._location_ok is location_ok
@@ -467,7 +467,7 @@ def test_b11_all_sources_share_one_implementation(jobspy_stub):
 
 
 def test_b12_job_title_helper_guards_none():
-    from applypilot.apply.launcher import _job_title
+    from kestrel.apply.launcher import _job_title
 
     assert _job_title({"title": None}) == "untitled"
     assert _job_title({}) == "untitled"
@@ -476,7 +476,7 @@ def test_b12_job_title_helper_guards_none():
 
 
 def test_b12_tailor_null_title_error_path_no_typeerror(isolated_db, monkeypatch, tmp_path):
-    import applypilot.scoring.tailor as tailor
+    import kestrel.scoring.tailor as tailor
 
     conn = database.init_db()
     _seed_job(conn, "https://x/1", title=None, fit_score=10)
@@ -501,7 +501,7 @@ def test_b12_tailor_null_title_error_path_no_typeerror(isolated_db, monkeypatch,
 
 
 def test_b12_cover_letter_null_title_error_path_no_typeerror(isolated_db, monkeypatch, tmp_path):
-    import applypilot.scoring.cover_letter as cover_mod
+    import kestrel.scoring.cover_letter as cover_mod
 
     conn = database.init_db()
     _seed_job(conn, "https://x/1", title=None, fit_score=10, tailored_resume_path="/tmp/t.txt")
@@ -544,7 +544,7 @@ class _Body:
 
 
 def test_b14_retry_honors_429_then_succeeds(monkeypatch):
-    import applypilot.discovery.workday as workday_mod
+    import kestrel.discovery.workday as workday_mod
 
     monkeypatch.setattr(workday_mod, "_RETRY_DELAY", 0)
     calls = {"n": 0}
@@ -565,7 +565,7 @@ def test_b14_retry_honors_429_then_succeeds(monkeypatch):
 
 
 def test_b14_permanent_500_exhausts_retries_and_raises(monkeypatch):
-    import applypilot.discovery.workday as workday_mod
+    import kestrel.discovery.workday as workday_mod
 
     monkeypatch.setattr(workday_mod, "_RETRY_DELAY", 0)
     calls = {"n": 0}
@@ -583,7 +583,7 @@ def test_b14_permanent_500_exhausts_retries_and_raises(monkeypatch):
 
 
 def test_b14_non_retryable_404_raises_immediately(monkeypatch):
-    import applypilot.discovery.workday as workday_mod
+    import kestrel.discovery.workday as workday_mod
 
     calls = {"n": 0}
 
@@ -601,7 +601,7 @@ def test_b14_non_retryable_404_raises_immediately(monkeypatch):
 def test_b14_mid_pagination_truncation_surfaced_as_warning(
     isolated_db, monkeypatch, caplog
 ):
-    import applypilot.discovery.workday as workday_mod
+    import kestrel.discovery.workday as workday_mod
 
     def _down(employer, search_text, limit=20, offset=0):
         raise RuntimeError("connection dropped")
@@ -614,7 +614,7 @@ def test_b14_mid_pagination_truncation_surfaced_as_warning(
         "tenant": "t",
         "site_id": "s",
     }
-    with caplog.at_level(logging.WARNING, logger="applypilot.discovery.workday"):
+    with caplog.at_level(logging.WARNING, logger="kestrel.discovery.workday"):
         jobs = workday_mod.search_employer("acme", employer, "query")
 
     assert jobs == []
@@ -629,7 +629,7 @@ def test_b14_mid_pagination_truncation_surfaced_as_warning(
 
 
 def test_b15_concurrent_first_use_constructs_one_client(monkeypatch):
-    import applypilot.llm as llm_mod
+    import kestrel.llm as llm_mod
 
     created = []
 
@@ -666,21 +666,21 @@ def test_b15_concurrent_first_use_constructs_one_client(monkeypatch):
 
 
 def test_b16_old_sqlite_version_raises_readable_error():
-    from applypilot.database import _check_sqlite_version
+    from kestrel.database import _check_sqlite_version
 
     with pytest.raises(RuntimeError, match="SQLite >= 3.30"):
         _check_sqlite_version((3, 29, 0))
 
 
 def test_b16_minimum_version_passes():
-    from applypilot.database import _check_sqlite_version
+    from kestrel.database import _check_sqlite_version
 
     _check_sqlite_version((3, 30, 0))  # no raise
     _check_sqlite_version((3, 46, 1))  # no raise
 
 
 def test_b16_runtime_sqlite_passes():
-    from applypilot.database import _check_sqlite_version
+    from kestrel.database import _check_sqlite_version
 
     _check_sqlite_version()  # the actual runtime — must not raise
 
@@ -872,7 +872,7 @@ def test_f5_streaming_discover_all_ok_reports_ok(monkeypatch):
 
 def test_f5_sequential_discover_suberror_exits_nonzero(monkeypatch):
     """Sequential mode: sub-scraper failure reaches the errors dict, which
-    drives `applypilot run`'s nonzero exit (cli.py exits 1 on errors)."""
+    drives `kestrel run`'s nonzero exit (cli.py exits 1 on errors)."""
 
     def _one_failing(**kwargs):
         return _discover_stats(workday="error: no network")

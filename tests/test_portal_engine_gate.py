@@ -7,7 +7,7 @@ a stale `t0` epoch parameter, not by waiting.
 
 import time
 
-from applypilot import engine_auth
+from kestrel import engine_auth
 
 SIGNED_OUT = engine_auth.EngineStatus("claude", engine_auth.SIGNED_OUT, None, "/usr/bin/claude")
 SIGNED_IN = engine_auth.EngineStatus("claude", engine_auth.SIGNED_IN, "claude.ai", "/usr/bin/claude")
@@ -302,7 +302,7 @@ def test_droid_key_route_saves_and_flips_signed_in(portal_client, monkeypatch):
     assert r.status_code == 303
     assert r.headers["location"] == "/engine"
 
-    from applypilot import config
+    from kestrel import config
 
     env_text = config.ENV_PATH.read_text(encoding="utf-8")
     assert "FACTORY_API_KEY='fk-test-4242-abcd'" in env_text  # merged into .env, quoted (F11)
@@ -335,7 +335,7 @@ def test_droid_key_route_rejects_empty(portal_client, monkeypatch):
     assert "login_error=" in r.headers["location"]
     import os
     assert "FACTORY_API_KEY" not in os.environ  # nothing written, nothing refreshed
-    from applypilot import config
+    from kestrel import config
     assert not config.ENV_PATH.exists() or "FACTORY_API_KEY" not in config.ENV_PATH.read_text()
 
 

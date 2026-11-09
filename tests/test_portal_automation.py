@@ -15,8 +15,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from applypilot.database import get_connection, init_db
-from applypilot.portal import automation, runner
+from kestrel.database import get_connection, init_db
+from kestrel.portal import automation, runner
 
 # The autouse conftest fixture replaces automation._provider_probe with a
 # constant for every test; this is the real gate, captured at collection
@@ -181,7 +181,7 @@ def test_apply_matches_preset_command(portal_env):
 
 def test_refresh_scores_preset_command(portal_env):
     argv = runner.build_rescore_command(automation.preset_params(name="refresh_scores"))
-    assert argv[1:5] == ["-m", "applypilot", "rescore", "--all"]
+    assert argv[1:5] == ["-m", "kestrel", "rescore", "--all"]
 
 
 def test_start_preset_starts_tracked_runs(portal_env, start_spy):
@@ -507,7 +507,7 @@ def test_probe_cache_reuses_the_real_verdict(portal_env, monkeypatch):
         calls["n"] += 1
         return ("reachable", "The provider answered a test request.")
 
-    monkeypatch.setattr("applypilot.llm.probe_provider", _probe)
+    monkeypatch.setattr("kestrel.llm.probe_provider", _probe)
     monkeypatch.setattr(automation, "_provider_probe", _REAL_PROBE_GATE)
     automation.reset_probe_cache()
     try:

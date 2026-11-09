@@ -6,8 +6,8 @@ unescaped wildcards could pull in unrelated jobs.
 
 import pytest
 
-from applypilot import database
-from applypilot.apply import launcher
+from kestrel import database
+from kestrel.apply import launcher
 
 
 def seed_job(conn, url):

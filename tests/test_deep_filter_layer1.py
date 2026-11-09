@@ -11,11 +11,11 @@ import hashlib
 import pandas as pd
 import pytest
 
-from applypilot import config, database
-from applypilot.discovery.jobspy import store_jobspy_results
-from applypilot.discovery.salary import parse_salary_display, parse_salary_row
-from applypilot.enrichment.seniority import classify_seniority
-from applypilot.scoring.scorer import persist_score, resume_sha256
+from kestrel import config, database
+from kestrel.discovery.jobspy import store_jobspy_results
+from kestrel.discovery.salary import parse_salary_display, parse_salary_row
+from kestrel.enrichment.seniority import classify_seniority
+from kestrel.scoring.scorer import persist_score, resume_sha256
 
 
 def _row(conn, url):
@@ -459,7 +459,7 @@ def test_host_score_verb_stamps_current_resume_hash(app_dir, isolated_db):
     against; a resume change later makes this score detectably stale."""
     from typer.testing import CliRunner
 
-    from applypilot.cli import app
+    from kestrel.cli import app
 
     (config.RESUME_PATH).write_text("My resume text v1", encoding="utf-8")
     conn = database.init_db()

@@ -1,6 +1,6 @@
 """S3: proxy credentials must never surface in error messages or logs.
 
-Covers the shared redaction primitives (applypilot.security) and both
+Covers the shared redaction primitives (kestrel.security) and both
 discovery call sites: jobspy.parse_proxy's ValueError and workday.setup_proxy's
 warning.
 """
@@ -9,8 +9,8 @@ import logging
 
 import pytest
 
-from applypilot.discovery import jobspy, workday
-from applypilot.security import REDACTED, redact_proxy, redact_secret_values
+from kestrel.discovery import jobspy, workday
+from kestrel.security import REDACTED, redact_proxy, redact_secret_values
 
 # Malformed proxy (5 segments: the realistic case of a password containing a
 # colon). Only malformed input reaches the error paths being tested.
@@ -57,7 +57,7 @@ def test_parse_proxy_error_hides_credentials():
 
 def test_workday_proxy_warning_hides_credentials(caplog, monkeypatch):
     monkeypatch.setattr(workday, "_opener", None)
-    with caplog.at_level(logging.WARNING, logger="applypilot.discovery.workday"):
+    with caplog.at_level(logging.WARNING, logger="kestrel.discovery.workday"):
         workday.setup_proxy(BAD_PROXY)
 
     assert "s3cret-pass" not in caplog.text

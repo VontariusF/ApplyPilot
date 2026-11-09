@@ -5,7 +5,7 @@ Each section maps to a finding:
 
 - F1: the interview state store — atomic persistence (temp file +
   os.replace + fsync), a cross-process turn lock (flock on a sibling
-  file, since every `applypilot agent` verb is its own process), and
+  file, since every `kestrel agent` verb is its own process), and
   load_state distinguishing "no file" from "unparseable" (the torn-read
   probe P2f once reset a live interview with exit 0).
 - F2: claim discipline for tailor/cover — the version row and pointer
@@ -31,8 +31,8 @@ import textwrap
 import pytest
 from typer.testing import CliRunner
 
-from applypilot import config, database, onboarding
-from applypilot.cli import app
+from kestrel import config, database, onboarding
+from kestrel.cli import app
 
 from tests.test_agent_materials import DESCRIPTION, GOOD_TAILOR_DATA, PROFILE
 
@@ -40,7 +40,7 @@ runner = CliRunner()
 
 
 def run(*args):
-    """Invoke `applypilot agent ...` and return the CliRunner result."""
+    """Invoke `kestrel agent ...` and return the CliRunner result."""
     return runner.invoke(app, ["agent", *args])
 
 
@@ -123,7 +123,7 @@ _HOLDER = textwrap.dedent("""
 
 def test_second_process_gets_busy_while_a_turn_is_held(app_dir, monkeypatch):
     """The flock makes the spec's single-session promise hold across
-    processes: a second `applypilot agent` process waits out the timeout
+    processes: a second `kestrel agent` process waits out the timeout
     and gets the structured busy envelope, not a lost update."""
     monkeypatch.setattr(onboarding, "STATE_TURN_TIMEOUT", 0.3)
     holder = subprocess.Popen(
@@ -282,12 +282,12 @@ def test_conflicting_claim_writes_no_files(claim_store, monkeypatch):
 
 
 def _subprocess_env(app_dir):
-    return {**os.environ, "APPLYPILOT_DIR": str(app_dir)}
+    return {**os.environ, "KESTREL_DIR": str(app_dir)}
 
 
 def _spawn_cli(app_dir, *args):
     return subprocess.Popen(
-        [sys.executable, "-m", "applypilot.cli", "agent", *args],
+        [sys.executable, "-m", "kestrel.cli", "agent", *args],
         env=_subprocess_env(app_dir), stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, text=True)
 
@@ -332,7 +332,7 @@ def test_parallel_writers_winner_bytes_loser_typed_conflict(app_dir, kind):
     payload, while the other exits 1 with a typed, branchable envelope —
     never internal_error, and its bytes never land on disk.
 
-    (app_dir only — the subprocesses read $APPLYPILOT_DIR/applypilot.db,
+    (app_dir only — the subprocesses read $KESTREL_DIR/kestrel.db,
     so the seed and the writers must share that file. Which payload wins
     the claim race is timing-dependent by design; the test derives the
     winner from the outcomes.)"""
@@ -388,7 +388,7 @@ def _tailor(app_dir, data):
     """Run `agent tailor` in a subprocess (a clean import state — the
     in-process runner keeps the thread connection cached across cases)."""
     proc = subprocess.run(
-        [sys.executable, "-m", "applypilot.cli", "agent", "tailor",
+        [sys.executable, "-m", "kestrel.cli", "agent", "tailor",
          "--url", "https://x/t1", "--data", data],
         env=_subprocess_env(app_dir), capture_output=True, text=True,
         timeout=120)
@@ -450,7 +450,7 @@ def test_assembler_refuses_unvalidated_shape():
     """Defense in depth: the assembler can never disagree with validation
     about what a field is (an unvalidated wrong-typed skills once rendered
     an empty TECHNICAL SKILLS section)."""
-    from applypilot.scoring.tailor import assemble_resume_text
+    from kestrel.scoring.tailor import assemble_resume_text
     with pytest.raises(ValueError, match="skills"):
         assemble_resume_text({**json.loads(GOOD_TAILOR_DATA),
                               "skills": ["Rust", "C++"]}, {})
@@ -517,7 +517,7 @@ def test_cover_under_the_cap_still_passes(app_dir):
 def test_cover_cap_boundaries_in_lenient_mode():
     """Unit pass: 500 accepted, 501 refused, in lenient — the cap is 2x
     the 250-word target, enforced in every mode (audit F7)."""
-    from applypilot.scoring.validator import validate_cover_letter
+    from kestrel.scoring.validator import validate_cover_letter
     ok = validate_cover_letter(_letter(500), mode="lenient")
     assert ok["passed"] is True and ok["word_count"] == 500
     over = validate_cover_letter(_letter(501), mode="lenient")
@@ -556,7 +556,7 @@ def test_usage_errors_are_json_envelopes(app_dir, args):
 
 
 def test_bare_invocation_keeps_the_help_affordance(app_dir):
-    """Documented decision: `applypilot agent` with no verb still prints
+    """Documented decision: `kestrel agent` with no verb still prints
     the help page (exit 2) — a human affordance, not a host path; the
     protocol's host always passes a verb."""
     result = run()

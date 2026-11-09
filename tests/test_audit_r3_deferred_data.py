@@ -34,12 +34,12 @@ import re
 import pytest
 from typer.testing import CliRunner
 
-from applypilot import config, database
-from applypilot.apply import launcher, planning
-from applypilot.cli import app
-from applypilot.portal import queries
-from applypilot.scoring.docs import _safe_component, output_prefix
-from applypilot.scoring.scorer import persist_score, run_scoring
+from kestrel import config, database
+from kestrel.apply import launcher, planning
+from kestrel.cli import app
+from kestrel.portal import queries
+from kestrel.scoring.docs import _safe_component, output_prefix
+from kestrel.scoring.scorer import persist_score, run_scoring
 
 runner = CliRunner()
 
@@ -323,7 +323,7 @@ def test_manual_and_expired_rows_surface_on_the_portal_board(
 
 
 def test_progress_for_run_documents_the_wall_clock_window():
-    from applypilot.portal.automation import progress_for_run
+    from kestrel.portal.automation import progress_for_run
 
     assert progress_for_run.__doc__ is not None
     assert "WALL-CLOCK WINDOW" in progress_for_run.__doc__
@@ -341,7 +341,7 @@ def _cap_in(sql: str) -> int:
 
 
 def test_stage_queue_caps_come_from_config():
-    from applypilot.database import STAGE_CONDITIONS
+    from kestrel.database import STAGE_CONDITIONS
 
     assert _cap_in(STAGE_CONDITIONS["pending_tailor"]) == \
         config.DEFAULTS["max_tailor_attempts"]
@@ -350,7 +350,7 @@ def test_stage_queue_caps_come_from_config():
 
 
 def test_host_verb_caps_come_from_config():
-    import applypilot.agent_protocol as protocol
+    import kestrel.agent_protocol as protocol
 
     assert protocol._TAILOR_ATTEMPT_CAP == \
         config.DEFAULTS["max_tailor_attempts"]

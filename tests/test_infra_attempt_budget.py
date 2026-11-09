@@ -14,10 +14,10 @@ from pathlib import Path
 import httpx
 import pytest
 
-from applypilot import config, database
-from applypilot.database import get_connection
-import applypilot.scoring.cover_letter as cover_letter
-import applypilot.scoring.tailor as tailor
+from kestrel import config, database
+from kestrel.database import get_connection
+import kestrel.scoring.cover_letter as cover_letter
+import kestrel.scoring.tailor as tailor
 
 URL = "https://jobs.example/posting-1"
 
@@ -26,7 +26,7 @@ URL = "https://jobs.example/posting-1"
 def _pdf_stub(monkeypatch):
     """No Chromium in tests: patch the PDF converter the writers import at call time."""
     monkeypatch.setattr(
-        "applypilot.scoring.pdf.convert_to_pdf",
+        "kestrel.scoring.pdf.convert_to_pdf",
         lambda p: Path(str(p)).with_suffix(".pdf"),
     )
 
@@ -143,7 +143,7 @@ def test_cover_content_error_still_burns_attempts(queue, monkeypatch):
 def test_http_5xx_is_infra_but_4xx_is_not():
     """Server-side errors are the provider's fault (exempt); a 4xx is a
     configuration problem on this side and still counts."""
-    from applypilot.llm import is_infra_error
+    from kestrel.llm import is_infra_error
 
     def _status_error(code):
         request = httpx.Request("POST", "https://example.invalid/v1")

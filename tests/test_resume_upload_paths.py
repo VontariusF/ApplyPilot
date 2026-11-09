@@ -14,8 +14,8 @@ import threading
 
 import pytest
 
-from applypilot import config
-from applypilot.apply import prompt as prompt_mod
+from kestrel import config
+from kestrel.apply import prompt as prompt_mod
 
 
 @pytest.fixture

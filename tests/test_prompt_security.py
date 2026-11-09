@@ -1,7 +1,7 @@
 """S1: the job-site password must never enter an agent prompt or a log file.
 
 Root fix: build_prompt references the browser profile's credentials instead of
-embedding the password. Boundary fix: prompt files written to ~/.applypilot/
+embedding the password. Boundary fix: prompt files written to ~/.kestrel/
 logs/ pass through redact_prompt_for_log.
 """
 
@@ -9,9 +9,9 @@ import json
 
 import pytest
 
-from applypilot import config
-from applypilot.apply import prompt as prompt_mod
-from applypilot.security import REDACTED
+from kestrel import config
+from kestrel.apply import prompt as prompt_mod
+from kestrel.security import REDACTED
 
 PASSWORD = "S3cr3t-Passw0rd-XYZ"
 
@@ -150,8 +150,8 @@ def test_gen_prompt_secret_in_zero_output_files(app_dir, profile_with_password, 
     """The spec's S1 test: build a prompt from a profile with a password and
     run the gen-prompt write boundary -- the secret appears in zero output
     files under the app dir."""
-    from applypilot import database
-    from applypilot.apply import launcher
+    from kestrel import database
+    from kestrel.apply import launcher
 
     database.init_db()
     conn = database.get_connection()
@@ -185,8 +185,8 @@ def test_gen_prompt_capsolver_key_in_zero_output_files(
 ):
     """The spec's S2/F1 test: a scored run's gen-prompt write boundary keeps
     the CapSolver key out of every output file under the app dir."""
-    from applypilot import database
-    from applypilot.apply import launcher
+    from kestrel import database
+    from kestrel.apply import launcher
 
     capsolver_key = "CAP-TEST-harness-42"
     monkeypatch.setenv("CAPSOLVER_API_KEY", capsolver_key)

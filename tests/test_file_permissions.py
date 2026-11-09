@@ -11,7 +11,7 @@ import stat
 
 import pytest
 
-from applypilot import config
+from kestrel import config
 
 posix_only = pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
 
@@ -101,7 +101,7 @@ def test_portal_token_fresh_install_creates_app_dir(app_dir):
     import shutil
 
     shutil.rmtree(app_dir)
-    from applypilot.portal import auth
+    from kestrel.portal import auth
 
     token = auth.get_or_create_token()
     assert token
@@ -113,7 +113,7 @@ def test_wizard_secret_writes_route_through_helper():
     """The wizard flow is interactive, so pin its wiring instead: every
     secret-file write goes through config.write_secret_text, never bare
     write_text on PROFILE_PATH/ENV_PATH."""
-    from applypilot.wizard import init as wizard
+    from kestrel.wizard import init as wizard
 
     source = inspect.getsource(wizard)
     assert source.count("write_secret_text(") >= 3

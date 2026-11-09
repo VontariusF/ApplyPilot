@@ -12,9 +12,9 @@ from datetime import datetime, timezone
 
 import pytest
 
-from applypilot import database
-from applypilot.database import get_connection, init_db
-from applypilot.portal import runner
+from kestrel import database
+from kestrel.database import get_connection, init_db
+from kestrel.portal import runner
 
 HX = {"HX-Request": "true"}
 
@@ -79,7 +79,7 @@ def test_dismiss_stores_timestamp_and_filtered_jobs_excludes(portal_client, seed
     client, _ = portal_client
     url = seed_job()
     client.post("/jobs/dismiss", data={"url": url})
-    from applypilot.portal import queries
+    from kestrel.portal import queries
 
     assert queries.filtered_jobs(stage="discovered", min_score=None, limit=0) == []
     only = queries.filtered_jobs(stage="discovered", dismissed="only",
@@ -193,7 +193,7 @@ def test_apply_now_rejects_unknown_job(portal_client, seeded_profile, start_spy)
 
 def test_busy_card_shows_spinner_and_hides_actions(portal_client, seeded_profile,
                                                    monkeypatch):
-    from applypilot.portal import app as portal_app
+    from kestrel.portal import app as portal_app
 
     url = seed_job(tailored_resume_path="/x/resume.txt")
     monkeypatch.setattr(portal_app, "_busy_verbs", lambda: {url: "apply"})
@@ -207,7 +207,7 @@ def test_busy_card_shows_spinner_and_hides_actions(portal_client, seeded_profile
 
 
 def test_busy_card_tailor_verb_label(portal_client, seeded_profile, monkeypatch):
-    from applypilot.portal import app as portal_app
+    from kestrel.portal import app as portal_app
 
     url = seed_job()
     monkeypatch.setattr(portal_app, "_busy_verbs", lambda: {url: "tailor"})
@@ -222,7 +222,7 @@ def test_busy_card_tailor_verb_label(portal_client, seeded_profile, monkeypatch)
 
 def test_rescore_htx_renders_inline_feedback(portal_client, seeded_profile,
                                              monkeypatch):
-    from applypilot.portal import app as portal_app
+    from kestrel.portal import app as portal_app
 
     url = seed_job()
     monkeypatch.setattr(portal_app, "run_scoring", lambda **kwargs: None)
@@ -239,7 +239,7 @@ def test_rescore_htx_renders_inline_feedback(portal_client, seeded_profile,
 
 def test_board_snapshot_reflects_run_and_store_changes(portal_client, seeded_profile,
                                                        start_spy):
-    from applypilot.portal.app import _board_snapshot
+    from kestrel.portal.app import _board_snapshot
 
     before = _board_snapshot()
     url = seed_job(url="https://jobs.example/extra")
@@ -252,7 +252,7 @@ def test_board_snapshot_reflects_run_and_store_changes(portal_client, seeded_pro
 
 def test_busy_verbs_reads_registry_params(portal_client, seeded_profile,
                                           monkeypatch):
-    from applypilot.portal import app as portal_app
+    from kestrel.portal import app as portal_app
 
     url = seed_job()
     monkeypatch.setattr(portal_app.runner, "running_runs",
@@ -266,7 +266,7 @@ def test_rescore_noop_renders_honest_error(portal_client, seeded_profile,
                                            monkeypatch):
     """Portal sweep P3-3: a no-op rescore (no full description to assess,
     or every scoring call failed) must not render the success state."""
-    from applypilot.portal import app as portal_app
+    from kestrel.portal import app as portal_app
 
     url = seed_job()
     monkeypatch.setattr(portal_app, "run_scoring",

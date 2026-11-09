@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from applypilot import engine_auth
+from kestrel import engine_auth
 
 CLAUDE_BIN = "/usr/local/bin/claude"
 DROID_BIN = "/usr/local/bin/droid"
@@ -330,7 +330,7 @@ class TestLoginCapture:
 # ---------------------------------------------------------------------------
 
 def _tier3_env(monkeypatch):
-    from applypilot import config
+    from kestrel import config
 
     for key in ("LLM_PROVIDER", "LLM_URL", "LLM_MODEL", "GEMINI_API_KEY",
                 "OPENAI_API_KEY"):
@@ -352,7 +352,7 @@ def _patch_statuses(monkeypatch, claude_state, droid_state):
 
 
 def test_get_tier_3_with_signed_in_claude(monkeypatch):
-    from applypilot import config
+    from kestrel import config
 
     _tier3_env(monkeypatch)
     _patch_statuses(monkeypatch, engine_auth.SIGNED_IN, engine_auth.NOT_INSTALLED)
@@ -361,7 +361,7 @@ def test_get_tier_3_with_signed_in_claude(monkeypatch):
 
 def test_get_tier_2_when_claude_installed_but_signed_out(monkeypatch):
     """The bug this PR fixes: binary presence alone used to grant tier 3."""
-    from applypilot import config
+    from kestrel import config
 
     _tier3_env(monkeypatch)
     _patch_statuses(monkeypatch, engine_auth.SIGNED_OUT, engine_auth.NOT_INSTALLED)
@@ -369,7 +369,7 @@ def test_get_tier_2_when_claude_installed_but_signed_out(monkeypatch):
 
 
 def test_get_tier_3_with_keyed_droid_alone(monkeypatch):
-    from applypilot import config
+    from kestrel import config
 
     _tier3_env(monkeypatch)
     _patch_statuses(monkeypatch, engine_auth.NOT_INSTALLED, engine_auth.SIGNED_IN)
@@ -377,7 +377,7 @@ def test_get_tier_3_with_keyed_droid_alone(monkeypatch):
 
 
 def test_engine_gap_messages_name_the_signed_out_state(monkeypatch):
-    from applypilot import config
+    from kestrel import config
 
     _patch_statuses(monkeypatch, engine_auth.SIGNED_OUT, engine_auth.SIGNED_OUT)
     gaps = config._engine_gap_messages()
@@ -386,7 +386,7 @@ def test_engine_gap_messages_name_the_signed_out_state(monkeypatch):
 
 
 def test_engine_gap_messages_install_hint_when_nothing_installed(monkeypatch):
-    from applypilot import config
+    from kestrel import config
 
     _patch_statuses(monkeypatch, engine_auth.NOT_INSTALLED, engine_auth.NOT_INSTALLED)
     gaps = config._engine_gap_messages()

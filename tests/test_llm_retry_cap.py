@@ -11,9 +11,9 @@ header-derived sleep is now clamped to `llm.MAX_RATE_LIMIT_WAIT_SECONDS`.
 import httpx
 import pytest
 
-import applypilot.discovery.composio as composio
-from applypilot import llm
-from applypilot.discovery.composio import TOOL_REGISTRY, ComposioClient, ComposioError
+import kestrel.discovery.composio as composio
+from kestrel import llm
+from kestrel.discovery.composio import TOOL_REGISTRY, ComposioClient, ComposioError
 
 KEY = "AIzaSy-SECRET-KEY-VALUE"
 API_KEY = "test-key-not-a-real-credential"

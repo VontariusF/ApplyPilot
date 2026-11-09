@@ -1,11 +1,11 @@
 [project]
-name = "applypilot"
-version = "0.3.0"
+name = "kestrel-agent"
+version = "0.1.0"
 description = "AI-powered end-to-end job application pipeline"
 readme = "README.md"
 license = "AGPL-3.0-only"
 requires-python = ">=3.11"
-authors = [{name = "Pickle-Pixel"}]
+authors = [{name = "The Kestrel Authors"}]
 keywords = ["job-search", "automation", "ai", "resume", "apply", "job-application"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -31,7 +31,7 @@ dependencies = [
     ]
 
 [project.optional-dependencies]
-# [portal]: the web portal stack (applypilot portal). Kept mirrored in
+# [portal]: the web portal stack (kestrel portal). Kept mirrored in
 # `dev` so CI's single `pip install -e ".[dev]"` runs the portal tests too.
 portal = [
     "fastapi>=0.104",
@@ -56,22 +56,22 @@ dev = [
 ]
 
 [project.scripts]
-applypilot = "applypilot.cli:app"
+kestrel = "kestrel.cli:app"
 
 [project.urls]
-Homepage = "https://github.com/Pickle-Pixel/ApplyPilot"
-Repository = "https://github.com/Pickle-Pixel/ApplyPilot"
-Issues = "https://github.com/Pickle-Pixel/ApplyPilot/issues"
+Homepage = "https://github.com/Vontarius-Ventures/kestrel"
+Repository = "https://github.com/Vontarius-Ventures/kestrel"
+Issues = "https://github.com/Vontarius-Ventures/kestrel/issues"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/applypilot"]
+packages = ["src/kestrel"]
 
 [tool.hatch.build]
-artifacts = ["src/applypilot/config/*.yaml"]
+artifacts = ["src/kestrel/config/*.yaml"]
 
 [tool.ruff]
 target-version = "py311"

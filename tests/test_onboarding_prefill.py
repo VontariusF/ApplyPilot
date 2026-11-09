@@ -10,7 +10,7 @@ never prefilled from extraction, and a recorded answer always beats it.
 import json
 import re
 
-from applypilot import config, onboarding
+from kestrel import config, onboarding
 
 from tests.test_onboarding_choices import _qid, _walk
 
@@ -18,7 +18,7 @@ from tests.test_onboarding_choices import _qid, _walk
 # would yield — INCLUDING gated work-auth claims the resume has no
 # authority to answer (the PR #22 fabrication guard).
 RAW_DRAFT = {
-    "_applypilot_profile": {
+    "_kestrel_profile": {
         "personal": {
             "full_name": "Jane Doe", "email": "jane@example.com",
             "phone": "+1 555 0100", "city": "Austin", "country": "United States",
@@ -38,7 +38,7 @@ RAW_DRAFT = {
         },
         "resume_facts": {}, "eeo_voluntary": {},
     },
-    "_applypilot_search": {
+    "_kestrel_search": {
         "queries": ["Data Engineer"], "location": "Austin, TX", "remote": True,
     },
 }
@@ -51,7 +51,7 @@ def seeded_state(answers: dict[str, str] | None = None) -> onboarding.InterviewS
     profile, meta = onboarding.normalize_profile(RAW_DRAFT, answers or {})
     return onboarding.InterviewState(
         answers=dict(answers or {}),
-        profile_draft={**profile, "_applypilot_search": meta},
+        profile_draft={**profile, "_kestrel_search": meta},
     )
 
 
@@ -107,7 +107,7 @@ def test_bridge_prefills_only_on_extraction_evidence():
     empty/absent draft fills nothing; currency never bridges."""
     assert onboarding.draft_to_answers(RAW_DRAFT, {})["work_style"] == "remote"
 
-    offsite = {**RAW_DRAFT, "_applypilot_search": {"queries": [], "location": "", "remote": False}}
+    offsite = {**RAW_DRAFT, "_kestrel_search": {"queries": [], "location": "", "remote": False}}
     filled = onboarding.draft_to_answers(offsite, {})
     assert "work_style" not in filled  # False is the default, not an answer
     assert "currency" not in filled  # normalize's USD default is not evidence
@@ -122,9 +122,9 @@ def test_bridge_only_plants_representable_choice_values():
     years answer (review could neither show nor keep it — Codex P2 on
     58ba3be), while an allow_free_text question bridges its off-list
     text ("BSc") because the wizard accepts typed answers too."""
-    offlist = {**RAW_DRAFT, "_applypilot_profile": {
-        **RAW_DRAFT["_applypilot_profile"],
-        "experience": {**RAW_DRAFT["_applypilot_profile"]["experience"],
+    offlist = {**RAW_DRAFT, "_kestrel_profile": {
+        **RAW_DRAFT["_kestrel_profile"],
+        "experience": {**RAW_DRAFT["_kestrel_profile"]["experience"],
                        "education_level": "BSc"}}}
     filled = onboarding.draft_to_answers(offlist, {})
     assert "experience_years" not in filled  # unrepresentable: wizard asks
@@ -138,11 +138,11 @@ def test_offlist_extracted_country_still_asks_the_gated_pair():
     """An extracted country outside the choice list ("Australia") must
     not lock the work-auth pair out of the agenda: the pair opens for
     any decided country, so its values are confirmed, never assumed."""
-    draft = {**RAW_DRAFT, "_applypilot_profile": {
-        **RAW_DRAFT["_applypilot_profile"],
-        "personal": {**RAW_DRAFT["_applypilot_profile"]["personal"], "country": "Australia"}}}
+    draft = {**RAW_DRAFT, "_kestrel_profile": {
+        **RAW_DRAFT["_kestrel_profile"],
+        "personal": {**RAW_DRAFT["_kestrel_profile"]["personal"], "country": "Australia"}}}
     profile, meta = onboarding.normalize_profile(draft, {})
-    state = onboarding.InterviewState(profile_draft={**profile, "_applypilot_search": meta})
+    state = onboarding.InterviewState(profile_draft={**profile, "_kestrel_search": meta})
     open_ids = [q.id for q in onboarding.remaining_questions(state)]
     assert "work_authorized" in open_ids and "sponsorship" in open_ids
     # The wizard's own typed country hits the same gate:
@@ -491,13 +491,13 @@ def test_review_select_shows_and_keeps_offlist_prefills(portal_client, fake_llm,
     pure-choice question still rejects junk."""
     client, _ = portal_client
     monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
-    draft = {**RAW_DRAFT, "_applypilot_profile": {
-        **RAW_DRAFT["_applypilot_profile"],
-        "experience": {**RAW_DRAFT["_applypilot_profile"]["experience"],
+    draft = {**RAW_DRAFT, "_kestrel_profile": {
+        **RAW_DRAFT["_kestrel_profile"],
+        "experience": {**RAW_DRAFT["_kestrel_profile"]["experience"],
                        "education_level": "BSc"}}}
     profile, meta = onboarding.normalize_profile(draft, {})
     onboarding.save_state(onboarding.InterviewState(
-        profile_draft={**profile, "_applypilot_search": meta}, phase=onboarding.REVIEW))
+        profile_draft={**profile, "_kestrel_search": meta}, phase=onboarding.REVIEW))
 
     page = client.get("/onboarding/chat").text
     select = re.search(r'<select id="answer-education".*?</select>', page, re.S)
@@ -630,7 +630,7 @@ def test_salary_bridge_normalizes_currency_formatted_numbers(app_dir):
     anything else ("competitive", "120k") stays unbridged so the wizard
     asks with its own widget (sweep art_kvtM7h6B)."""
     def draft(expectation):
-        return {"_applypilot_profile": {"compensation": {"salary_expectation": expectation}}}
+        return {"_kestrel_profile": {"compensation": {"salary_expectation": expectation}}}
 
     assert onboarding.draft_to_answers(draft("$120,000"), {})["salary_band"] == "120000"
     assert onboarding.draft_to_answers(draft("£90,000"), {})["salary_band"] == "90000"

@@ -14,8 +14,8 @@ import time
 
 import pytest
 
-from applypilot.database import get_connection
-from applypilot.portal import runner
+from kestrel.database import get_connection
+from kestrel.portal import runner
 
 
 def wait_for_status(run_id: str, timeout: float = 5.0) -> dict:
@@ -35,7 +35,7 @@ def test_pipeline_command_shape(portal_env, monkeypatch):
         "stages": "score,tailor", "min_score": "8", "workers": "2",
         "validation": "strict", "stream": "1", "dry_run": "1",
     })
-    assert argv[1:4] == ["-m", "applypilot", "run"]
+    assert argv[1:4] == ["-m", "kestrel", "run"]
     assert argv[4:6] == ["score", "tailor"]
     assert "--min-score" in argv and "8" in argv
     assert "--stream" in argv and "--dry-run" in argv
@@ -47,7 +47,7 @@ def test_apply_command_shape(portal_env):
         "limit": "5", "workers": "2", "min_score": "6",
         "model": "sonnet", "dry_run": "1", "headless": "1",
     })
-    assert argv[1:4] == ["-m", "applypilot", "apply"]
+    assert argv[1:4] == ["-m", "kestrel", "apply"]
     assert "--limit" in argv and "5" in argv
     assert "--model" in argv and "sonnet" in argv
     assert "--dry-run" in argv and "--headless" in argv
@@ -125,7 +125,7 @@ def test_pipeline_command_results_per_site(portal_env):
 
 def test_tailor_command_shape(portal_env):
     argv = runner.build_tailor_command({"url": "https://jobs.example/1"})
-    assert argv[1:4] == ["-m", "applypilot", "run"]
+    assert argv[1:4] == ["-m", "kestrel", "run"]
     assert argv[4:7] == ["tailor", "cover", "pdf"]
     assert "--url" in argv and "https://jobs.example/1" in argv
     assert "--min-score" in argv and "0" in argv
@@ -311,7 +311,7 @@ def test_cancel_does_not_signal_reused_pid(portal_env):
     victim = _spawn_unrelated_process()
     try:
         _insert_run("reuse1", victim.pid, start_time=None,
-                    cmdline=[sys.executable, "-m", "applypilot", "run", "all"],
+                    cmdline=[sys.executable, "-m", "kestrel", "run", "all"],
                     started_at=runner._now())
         assert runner.cancel_run("reuse1") is True
         time.sleep(0.2)
@@ -356,7 +356,7 @@ def test_sweep_orphans_sweeps_reused_pid_but_keeps_live_child(portal_env):
     try:
         # Identity mismatch (argv differs from the victim's) -> swept.
         _insert_run("reuse2", victim.pid, start_time=None,
-                    cmdline=[sys.executable, "-m", "applypilot", "run", "all"],
+                    cmdline=[sys.executable, "-m", "kestrel", "run", "all"],
                     started_at=runner._now())
         # Identity match -> the run is genuinely alive, left alone.
         _insert_run("live1", victim.pid, start_time=runner._proc_start_time(victim.pid),
@@ -468,7 +468,7 @@ def test_scheduler_guard_delegates_to_the_runner_guard(portal_env, monkeypatch):
         return {"id": "via-runner", "status": "running"}
 
     monkeypatch.setattr(runner, "start_run", fake_start)
-    from applypilot.portal import automation
+    from kestrel.portal import automation
 
     row = automation.start_guarded("pipeline", {})
     assert row == {"id": "via-runner", "status": "running"}

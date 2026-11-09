@@ -40,7 +40,7 @@ async def freeze_board(page):
 
 def seed_jobs(count=1, **overrides):
     """Seed scored jobs in the isolated store; returns their urls."""
-    from applypilot.database import init_db
+    from kestrel.database import init_db
 
     conn = init_db()
     now = datetime.now(timezone.utc)
@@ -169,7 +169,7 @@ def test_needs_attention_chip_filters_the_board(
     async def journey():
         base = portal_server.base_url
         seed_jobs(2, fit_score=8)  # e2e-0 healthy, e2e-1 made broken below
-        from applypilot.database import init_db
+        from kestrel.database import init_db
 
         conn = init_db()
         conn.execute("UPDATE jobs SET title='Broken Job', fit_score=NULL, "

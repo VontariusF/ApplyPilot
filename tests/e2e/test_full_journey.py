@@ -32,7 +32,7 @@ def alive_presets(monkeypatch):
     the board's empty-state find must clear their busy/strip states, so
     they keep the fast child.
     """
-    from applypilot.portal import automation, runner
+    from kestrel.portal import automation, runner
 
     original_start = runner.start_run
     original_preset = automation.start_preset
@@ -62,7 +62,7 @@ def alive_presets(monkeypatch):
 
 def seed_journey_jobs() -> None:
     """Two scored jobs: A tailorable+applyable, B plain."""
-    from applypilot.database import init_db
+    from kestrel.database import init_db
 
     conn = init_db()
     now = datetime.now(timezone.utc)
@@ -86,7 +86,7 @@ def seed_applied(n: int) -> None:
     """n applications recorded right now (the daily-cap counter's input)."""
     import time as time_mod
 
-    from applypilot.database import init_db
+    from kestrel.database import init_db
 
     conn = init_db()
     now = time_mod.strftime("%Y-%m-%dT%H:%M:%S+00:00", time_mod.gmtime())
@@ -185,7 +185,7 @@ def test_full_user_journey_end_to_end(run_journey, chromium, portal_server,
     """The spec's whole journey in one session: login → wizard → review →
     confirm → find jobs → card actions → automation → agent → system check."""
 
-    from applypilot import onboarding
+    from kestrel import onboarding
 
     monkeypatch.setattr(onboarding, "provider_ready", lambda: True)
 

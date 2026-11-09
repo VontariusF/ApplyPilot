@@ -2,7 +2,7 @@
 
 `agent job-next --stage score` and `agent score` turn the driving agent
 into the scoring intelligence: the queue, the rubric, and the persistence
-stay ApplyPilot's. The wire contract is the protocol's — one pure-JSON
+stay Kestrel's. The wire contract is the protocol's — one pure-JSON
 success document, the {"error": {...}} envelope with exit 1, redaction
 by default.
 
@@ -17,8 +17,8 @@ import json
 import pytest
 from typer.testing import CliRunner
 
-from applypilot import config, database, onboarding
-from applypilot.cli import app
+from kestrel import config, database, onboarding
+from kestrel.cli import app
 
 runner = CliRunner()
 
@@ -29,12 +29,12 @@ FACTS_MARKER = "GHOST_PROJECT_MARKER_7C2B"
 
 
 def run(*args):
-    """Invoke `applypilot agent ...` and return the CliRunner result."""
+    """Invoke `kestrel agent ...` and return the CliRunner result."""
     return runner.invoke(app, ["agent", *args])
 
 
 def run_cli(*args):
-    """Invoke a top-level `applypilot ...` verb (status)."""
+    """Invoke a top-level `kestrel ...` verb (status)."""
     return runner.invoke(app, list(args))
 
 
@@ -110,8 +110,8 @@ def exploding_llm(monkeypatch):
 
         return _BoomBackend
 
-    import applypilot.llm as llm
-    import applypilot.scoring.scorer as scorer
+    import kestrel.llm as llm
+    import kestrel.scoring.scorer as scorer
 
     monkeypatch.setattr(llm, "_instance", _Boom())
     monkeypatch.setattr(llm, "get_client", lambda: _Boom())
@@ -131,7 +131,7 @@ def test_host_scoring_journey_runs_zero_backend_calls(seeded_store, exploding_ll
     alone, with every LLM/Claude seam patched to raise-and-record: the
     loop terminates, makes zero backend calls, reports unscored == 0, and
     every default payload stayed redacted."""
-    from applypilot.scoring.scorer import SCORE_PROMPT
+    from kestrel.scoring.scorer import SCORE_PROMPT
 
     all_stdout: list[str] = []
     served: list[str] = []
@@ -303,7 +303,7 @@ def test_job_next_skips_stranded_jobs_and_terminates(seeded_store):
 
 
 def test_job_next_excerpt_caps_at_the_llm_window(seeded_store):
-    from applypilot.scoring.scorer import SCORE_PROMPT
+    from kestrel.scoring.scorer import SCORE_PROMPT
 
     long_desc = "x" * 9000
     seeded_store.execute(
@@ -354,8 +354,8 @@ def test_persistence_parity_host_vs_llm(seeded_store, monkeypatch):
     """A host-scored row and an LLM-scored row are identical except
     scored_by (and the wall-clock scored_at): same blob shape, same
     score_error clearing, same portal split."""
-    import applypilot.scoring.scorer as scorer
-    from applypilot.portal.queries import split_score_reasoning
+    import kestrel.scoring.scorer as scorer
+    from kestrel.portal.queries import split_score_reasoning
 
     class _FakeClient:
         provider_name = "test-provider"
@@ -411,7 +411,7 @@ def test_status_json_provenance_split(app_dir, isolated_db):
 
 def test_status_rich_label_reads_provenance(app_dir, isolated_db):
     """The 'Scored by ...' row renders the authorship, not an assumption."""
-    from applypilot.cli import _scored_label
+    from kestrel.cli import _scored_label
 
     assert _scored_label({"host": 0, "provider": 0, "unattributed": 0}) == "Scored by LLM"
     # Legacy rows keep today's wording — unattributed renders as it always has.

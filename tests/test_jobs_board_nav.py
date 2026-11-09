@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from applypilot.database import init_db
+from kestrel.database import init_db
 
 HX = {"HX-Request": "true"}
 
@@ -18,7 +18,7 @@ HX = {"HX-Request": "true"}
 @pytest.fixture()
 def start_spy(monkeypatch):
     """Replace runner.start_run (the real spawn) with a recording fake."""
-    from applypilot.portal import runner
+    from kestrel.portal import runner
 
     calls: list[tuple[str, dict]] = []
 

@@ -14,18 +14,18 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from applypilot import engine_auth, onboarding
-from applypilot.portal.app import create_app
+from kestrel import engine_auth, onboarding
+from kestrel.portal.app import create_app
 
-TEMPLATES = sorted((Path(__file__).parents[1] / "src" / "applypilot" / "portal" / "templates").rglob("*.html"))
+TEMPLATES = sorted((Path(__file__).parents[1] / "src" / "kestrel" / "portal" / "templates").rglob("*.html"))
 
 # Patterns that must never reach user-facing copy.
 FORBIDDEN = [
     ("shell command", r"claude\s+auth|claude\s+-p\b"),
     ("shell variable export", r"export\s+[A-Z_]{2,}="),
     ("package-manager command", r"\b(?:pip3?|npm|bun)\s+(?:install|add|i)\b"),
-    ("CLI invocation", r"\bapplypilot\s+(?:init|doctor|onboard)\b"),
-    ("config file path", r"~/\.applypilot"),
+    ("CLI invocation", r"\bkestrel\s+(?:init|doctor|onboard)\b"),
+    ("config file path", r"~/\.kestrel"),
     ("terminal wording", r"\bterminal\b"),
     ("wizard wording", r"\bwizard\b"),
 ]
@@ -97,7 +97,7 @@ def test_login_page_hides_token_but_offers_reveal(portal_env):
     assert r.status_code == 401
     assert "Reveal token" in r.text
     assert app.state.token not in r.text  # the token itself is not on the page
-    assert "~/.applypilot" not in r.text  # no file-path references
+    assert "~/.kestrel" not in r.text  # no file-path references
     assert "terminal" not in r.text.lower()
 
 
@@ -144,12 +144,12 @@ def test_chip_surfaces_are_zero_terminal(portal_client, fake_llm, monkeypatch):
     template-source scan cannot see (layer 2 only walks static pages)."""
     client, _ = portal_client
     draft_reply = "Read your resume.\n\n```json\n" + json.dumps({
-        "_applypilot_profile": {
+        "_kestrel_profile": {
             "personal": {"full_name": "Jane Doe", "email": "jane@example.com",
                          "country": "United States"},
             "experience": {"education_level": "Bachelor's"},
         },
-        "_applypilot_search": {"queries": ["Data Engineer"], "location": "Austin, TX",
+        "_kestrel_search": {"queries": ["Data Engineer"], "location": "Austin, TX",
                                "remote": True},
     }) + "\n```"
     monkeypatch.setattr(onboarding, "provider_ready", lambda: True)

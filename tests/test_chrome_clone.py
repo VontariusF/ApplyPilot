@@ -8,8 +8,8 @@ worker-to-worker clone path.
 
 import pytest
 
-from applypilot import config
-from applypilot.apply import chrome
+from kestrel import config
+from kestrel.apply import chrome
 
 CREDENTIAL_NAMES = {
     "Login Data", "Login Data-journal", "Login Data-wal",

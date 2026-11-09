@@ -15,10 +15,10 @@ from pathlib import Path
 
 import pytest
 
-from applypilot import config, database
-from applypilot.scoring import docs
-import applypilot.scoring.cover_letter as cover_letter
-import applypilot.scoring.tailor as tailor
+from kestrel import config, database
+from kestrel.scoring import docs
+import kestrel.scoring.cover_letter as cover_letter
+import kestrel.scoring.tailor as tailor
 
 URL = "https://jobs.example/posting-1"
 
@@ -40,7 +40,7 @@ def doc_dirs(app_dir, monkeypatch):
 def _pdf_stub(monkeypatch):
     """No Chromium in tests: patch the PDF converter the writers import at call time."""
     monkeypatch.setattr(
-        "applypilot.scoring.pdf.convert_to_pdf",
+        "kestrel.scoring.pdf.convert_to_pdf",
         lambda p: Path(str(p)).with_suffix(".pdf"),
     )
 
@@ -284,7 +284,7 @@ def test_regenerate_cli_clears_and_requeues(isolated_db, doc_dirs, monkeypatch):
     """The CLI command clears state through the same path (typer wiring)."""
     from typer.testing import CliRunner
 
-    from applypilot.cli import app as cli_app
+    from kestrel.cli import app as cli_app
 
     runner = CliRunner()
     conn = database.init_db(str(database.DB_PATH))
@@ -293,7 +293,7 @@ def test_regenerate_cli_clears_and_requeues(isolated_db, doc_dirs, monkeypatch):
     def _fake_bootstrap():
         database.init_db(str(database.DB_PATH))
 
-    monkeypatch.setattr("applypilot.cli._bootstrap", _fake_bootstrap)
+    monkeypatch.setattr("kestrel.cli._bootstrap", _fake_bootstrap)
     result = runner.invoke(cli_app, ["regenerate", URL])
     assert result.exit_code == 0, result.output
     row = conn.execute("SELECT tailored_resume_path FROM jobs WHERE url = ?", (URL,)).fetchone()
@@ -306,7 +306,7 @@ def test_regenerate_cli_clears_and_requeues(isolated_db, doc_dirs, monkeypatch):
 
 
 def test_apply_snapshot_linkage(isolated_db, doc_dirs):
-    from applypilot.apply.launcher import acquire_job, mark_result
+    from kestrel.apply.launcher import acquire_job, mark_result
 
     conn = database.init_db(str(database.DB_PATH))
     _seed_job(conn, application_url=URL)
@@ -333,7 +333,7 @@ def test_apply_snapshot_linkage(isolated_db, doc_dirs):
 
 
 def test_manual_mark_applied_snapshots_version(isolated_db, doc_dirs):
-    from applypilot.apply.launcher import mark_job
+    from kestrel.apply.launcher import mark_job
 
     conn = database.init_db(str(database.DB_PATH))
     _seed_job(conn)

@@ -34,10 +34,10 @@ from datetime import datetime, timezone
 import pytest
 from typer.testing import CliRunner
 
-from applypilot import config, database, engine_auth, onboarding
-from applypilot.apply import launcher
-from applypilot.apply.launcher import mark_result, new_claim_token
-from applypilot.cli import app
+from kestrel import config, database, engine_auth, onboarding
+from kestrel.apply import launcher
+from kestrel.apply.launcher import mark_result, new_claim_token
+from kestrel.cli import app
 from tests.test_agent_materials import (
     DESCRIPTION,
     GOOD_COVER,
@@ -108,7 +108,7 @@ def exploding_backends(monkeypatch):
 
 
 def run(*args):
-    """Invoke `applypilot agent ...` and return the CliRunner result."""
+    """Invoke `kestrel agent ...` and return the CliRunner result."""
     return runner.invoke(app, ["agent", *args])
 
 
@@ -117,12 +117,12 @@ def payload_of(result):
 
 
 def _subprocess_env(app_dir):
-    return {**os.environ, "APPLYPILOT_DIR": str(app_dir)}
+    return {**os.environ, "KESTREL_DIR": str(app_dir)}
 
 
 def _spawn_cli(app_dir, *args):
     return subprocess.Popen(
-        [sys.executable, "-m", "applypilot.cli", "agent", *args],
+        [sys.executable, "-m", "kestrel.cli", "agent", *args],
         env=_subprocess_env(app_dir), stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, text=True)
 
@@ -147,8 +147,8 @@ def store(app_dir, isolated_db, monkeypatch):
     """Profile + document dirs wired to app_dir, and an initialized db —
     the shared ground for the materials and apply probes below."""
     config.write_secret_text(config.PROFILE_PATH, json.dumps(PROFILE))
-    import applypilot.scoring.cover_letter as cover_letter
-    import applypilot.scoring.tailor as tailor
+    import kestrel.scoring.cover_letter as cover_letter
+    import kestrel.scoring.tailor as tailor
 
     monkeypatch.setattr(tailor, "TAILORED_DIR", config.TAILORED_DIR)
     monkeypatch.setattr(cover_letter, "COVER_LETTER_DIR", config.COVER_LETTER_DIR)
@@ -338,7 +338,7 @@ def test_next_eligible_is_cap_aware(store):
     apply-acquire runs: when the cap binds, it advertises nothing and says
     so (the termination signals can no longer contradict each other)."""
     conn = store
-    from applypilot.apply.planning import AGENT_DEFAULT_DAILY_CAP
+    from kestrel.apply.planning import AGENT_DEFAULT_DAILY_CAP
 
     now = datetime.now(timezone.utc).isoformat()
     # AGENT_DEFAULT_DAILY_CAP - 1 applications recorded today, two jobs

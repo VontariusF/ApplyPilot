@@ -19,8 +19,8 @@ import json
 import pytest
 from typer.testing import CliRunner
 
-from applypilot import config, database, onboarding
-from applypilot.cli import app
+from kestrel import config, database, onboarding
+from kestrel.cli import app
 
 runner = CliRunner()
 
@@ -72,7 +72,7 @@ DESCRIPTION = "Responsibilities: build pipelines. Requirements: Python, SQL."
 
 
 def run(*args):
-    """Invoke `applypilot agent ...` and return the CliRunner result."""
+    """Invoke `kestrel agent ...` and return the CliRunner result."""
     return runner.invoke(app, ["agent", *args])
 
 
@@ -117,8 +117,8 @@ def seeded_store(app_dir, isolated_db, monkeypatch):
               full_description=None, location="Austin, TX", salary="$140k")
     # The document writers bind TAILORED_DIR/COVER_LETTER_DIR at import
     # time — repoint them at the app_dir fixture, as the other suites do.
-    import applypilot.scoring.cover_letter as cover_letter
-    import applypilot.scoring.tailor as tailor
+    import kestrel.scoring.cover_letter as cover_letter
+    import kestrel.scoring.tailor as tailor
 
     monkeypatch.setattr(tailor, "TAILORED_DIR", config.TAILORED_DIR)
     monkeypatch.setattr(cover_letter, "COVER_LETTER_DIR", config.COVER_LETTER_DIR)
@@ -157,11 +157,11 @@ def exploding_llm(monkeypatch):
 
         return _BoomBackend
 
-    import applypilot.enrichment.detail as detail
-    import applypilot.llm as llm
-    import applypilot.scoring.cover_letter as cover_letter
-    import applypilot.scoring.scorer as scorer
-    import applypilot.scoring.tailor as tailor
+    import kestrel.enrichment.detail as detail
+    import kestrel.llm as llm
+    import kestrel.scoring.cover_letter as cover_letter
+    import kestrel.scoring.scorer as scorer
+    import kestrel.scoring.tailor as tailor
 
     monkeypatch.setattr(llm, "_instance", _Boom())
     monkeypatch.setattr(llm, "get_client", lambda: _Boom())

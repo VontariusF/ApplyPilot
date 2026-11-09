@@ -12,7 +12,7 @@ import sqlite3
 import pytest
 from typer.testing import CliRunner
 
-from applypilot.cli import app
+from kestrel.cli import app
 
 runner = CliRunner()
 
@@ -65,7 +65,7 @@ def _clear_provider_env(monkeypatch: pytest.MonkeyPatch) -> None:
 # ---------------------------------------------------------------------------
 
 def test_status_json_emits_get_stats_dict(monkeypatch):
-    import applypilot.database as database
+    import kestrel.database as database
 
     monkeypatch.setattr(database, "get_stats", lambda: dict(STATS))
 
@@ -76,7 +76,7 @@ def test_status_json_emits_get_stats_dict(monkeypatch):
 
 
 def test_status_json_is_pure_json_on_stdout_alone(monkeypatch):
-    import applypilot.database as database
+    import kestrel.database as database
 
     monkeypatch.setattr(database, "get_stats", lambda: dict(STATS))
 
@@ -89,7 +89,7 @@ def test_status_json_is_pure_json_on_stdout_alone(monkeypatch):
 
 
 def test_status_json_error_path(monkeypatch):
-    import applypilot.database as database
+    import kestrel.database as database
 
     def boom():
         raise sqlite3.OperationalError("no such table: jobs")
@@ -107,7 +107,7 @@ def test_status_json_error_path(monkeypatch):
 
 
 def test_status_rich_mode_unaffected(monkeypatch):
-    import applypilot.database as database
+    import kestrel.database as database
 
     monkeypatch.setattr(database, "get_stats", lambda: dict(STATS))
 
@@ -149,7 +149,7 @@ def test_doctor_json_contract(app_dir, monkeypatch):
     # A fresh app dir has no profile or resume: both fail with run_init hints.
     profile = next(c for c in payload["checks"] if c["name"] == "profile.json")
     assert profile["status"] == "fail"
-    assert profile["fix"] == {"code": "run_init", "command": "applypilot init"}
+    assert profile["fix"] == {"code": "run_init", "command": "kestrel init"}
     resume = next(c for c in payload["checks"] if c["name"] == "resume.txt")
     assert resume["status"] == "fail"
     assert resume["fix"]["code"] == "run_init"
@@ -160,7 +160,7 @@ def test_doctor_json_contract(app_dir, monkeypatch):
 
 def test_doctor_json_ok_when_everything_available(app_dir, monkeypatch):
     """A fully provisioned setup reads ok: true with no fail checks."""
-    from applypilot import config, engine_auth
+    from kestrel import config, engine_auth
 
     monkeypatch.chdir(app_dir)
     _clear_provider_env(monkeypatch)
@@ -192,7 +192,7 @@ def test_doctor_json_ok_when_everything_available(app_dir, monkeypatch):
 
 
 def test_doctor_json_error_path(app_dir, monkeypatch):
-    import applypilot.discovery.composio as composio
+    import kestrel.discovery.composio as composio
 
     def boom():
         raise RuntimeError("composio exploded")
@@ -217,6 +217,6 @@ def test_doctor_rich_mode_survives_refactor(app_dir, monkeypatch):
     result = runner.invoke(app, ["doctor"])
 
     assert result.exit_code == 0
-    assert "ApplyPilot Doctor" in result.output
+    assert "Kestrel Doctor" in result.output
     assert "MISSING" in result.output
     assert "Current tier" in result.output

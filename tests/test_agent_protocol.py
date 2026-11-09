@@ -1,4 +1,4 @@
-"""Contract tests for the `applypilot agent` JSON protocol (spec art_A71wyYS4).
+"""Contract tests for the `kestrel agent` JSON protocol (spec art_A71wyYS4).
 
 The wire contract: every verb prints ONE pure-JSON document on stdout
 alone — the authoritative next payload, or the
@@ -15,8 +15,8 @@ import stat
 import pytest
 from typer.testing import CliRunner
 
-from applypilot import engine_auth, onboarding
-from applypilot.cli import app
+from kestrel import engine_auth, onboarding
+from kestrel.cli import app
 
 runner = CliRunner()
 
@@ -55,7 +55,7 @@ def envelope(result, is_error=False):
 PROFILE_BLOCK = """Here is your profile.
 
 ```json
-{"_applypilot_profile": {
+{"_kestrel_profile": {
     "personal": {"full_name": "Test Person", "email": "test@example.com",
                  "phone": "555-0100", "city": "Austin, TX"},
     "work_authorization": {"legally_authorized_to_work": "Yes",
@@ -69,7 +69,7 @@ PROFILE_BLOCK = """Here is your profile.
     "resume_facts": {"preserved_companies": ["Acme Corp"],
                      "preserved_projects": ["Built the GHOST_PROJECT_MARKER_7C2B data platform"]},
     "eeo_voluntary": {}},
- "_applypilot_search": {"queries": ["Data Engineer", "Analytics Engineer"],
+ "_kestrel_search": {"queries": ["Data Engineer", "Analytics Engineer"],
                         "location": "Austin, TX", "remote": true}}
 ```
 """
@@ -108,7 +108,7 @@ def no_backend(monkeypatch):
 
 
 def run(*args):
-    """Invoke `applypilot agent ...` and return the CliRunner result."""
+    """Invoke `kestrel agent ...` and return the CliRunner result."""
     return runner.invoke(app, ["agent", *args])
 
 
@@ -409,7 +409,7 @@ def test_host_journey_runs_zero_backend_calls(app_dir, no_backend, exploding_bac
     → confirm, with both backend classes patched to raise-and-record — the
     journey completes (phase done, the three files written) and the recorded
     backend call count is 0."""
-    from applypilot import config
+    from kestrel import config
 
     resume_file = tmp_path / "resume.txt"
     resume_file.write_text("Test Person — data engineer résumé.", encoding="utf-8")
