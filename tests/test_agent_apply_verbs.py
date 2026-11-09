@@ -337,6 +337,71 @@ def test_status_vocabulary_persists(seeded_apply_store, status):
         assert row["apply_attempts"] == 99
 
 
+def test_prepared_status_is_a_checkpoint_not_an_outcome(seeded_apply_store):
+    """The human-confirmation wait finally has an honest report: prepared
+    records the checkpoint — the daily cap never counts it, the lock and
+    claim stay held, no attempt burns, and the same claim reports the
+    final outcome later."""
+    conn = seeded_apply_store
+    acquire = payload_of(run("apply-acquire"))
+    claim, url = acquire["claim"], acquire["job"]["url"]
+    cap_before = acquire["apply"]["applied_today"]
+
+    result = run("apply-result", "--url", url, "--status", "prepared",
+                 "--claim", claim)
+    assert result.exit_code == 0, result.stdout
+    payload = payload_of(result)
+    assert payload["recorded"]["status"] == "prepared"
+    assert payload["recorded"]["terminal"] is False
+    # Not counted toward the daily cap — nothing was applied.
+    assert payload["apply"]["applied_today"] == cap_before
+
+    row = _row(conn, url)
+    assert row["apply_status"] == "prepared"
+    assert row["applied_at"] is None
+    assert row["apply_error"] is None  # a checkpoint is not an error
+    assert row["apply_task_id"] == claim  # the lock (and claim) stay held
+    assert row["apply_attempts"] in (None, 0)  # no attempt burned
+
+    # Resumable: the same claim reports the final outcome, which consumes
+    # the token and releases the lock — and only then does the cap count.
+    result = run("apply-result", "--url", url, "--status", "applied",
+                 "--claim", claim)
+    assert result.exit_code == 0, result.stdout
+    payload = payload_of(result)
+    assert payload["recorded"]["status"] == "applied"
+    assert payload["apply"]["applied_today"] == cap_before + 1
+    row = _row(conn, url)
+    assert row["apply_status"] == "applied"
+    assert row["applied_at"] is not None
+    assert row["apply_task_id"] is None
+
+
+def test_stale_prepared_checkpoint_is_reclaimable(seeded_apply_store):
+    """A driver that dies while awaiting human confirmation leaves a stale
+    prepared lock — the queue's stale cutoff recovers it exactly like a
+    stale in_progress lock, with a fresh claim token for the new holder."""
+    from datetime import timedelta
+
+    conn = seeded_apply_store
+    acquire = payload_of(run("apply-acquire"))
+    claim, url = acquire["claim"], acquire["job"]["url"]
+    assert run("apply-result", "--url", url, "--status", "prepared",
+               "--claim", claim).exit_code == 0
+
+    stale_minutes = config.DEFAULTS["apply_stale_lock_minutes"]
+    stale = (datetime.now(timezone.utc)
+             - timedelta(minutes=stale_minutes + 1)).isoformat()
+    conn.execute("UPDATE jobs SET last_attempted_at = ? WHERE url = ?",
+                 (stale, url))
+    conn.commit()
+
+    reclaimed = payload_of(run("apply-acquire"))
+    assert reclaimed["job"]["url"] == url  # the queue re-served the job
+    assert reclaimed["claim"] != claim  # a fresh token displaced the dead holder
+    assert _row(conn, url)["apply_status"] == "in_progress"
+
+
 def test_captcha_is_terminal_and_never_requeued(app_dir, isolated_db):
     """A captcha outcome is recorded with the attempts ban and the queue
     predicate keeps the job out — reset_failed never requeues it either."""
@@ -368,7 +433,7 @@ def test_unknown_status_values_are_refused(seeded_apply_store):
     envelope = payload_of(result)
     assert envelope["error"]["code"] == "invalid_status"
     assert envelope["error"]["details"]["valid"] == [
-        "applied", "failed", "expired", "captcha", "login_issue"]
+        "applied", "prepared", "failed", "expired", "captcha", "login_issue"]
 
     # The refusal wrote nothing: the lock still stands.
     assert _row(conn, url)["apply_status"] == "in_progress"

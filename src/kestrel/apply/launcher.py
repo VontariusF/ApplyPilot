@@ -210,7 +210,10 @@ def _queue_where(min_score: int) -> tuple[str, list]:
     where = f"""
         WHERE tailored_resume_path IS NOT NULL
           AND (apply_status IS NULL OR apply_status = 'failed'
-               OR (apply_status = 'in_progress' AND last_attempted_at IS NOT NULL
+               -- a stale prepared checkpoint (the driver died awaiting the
+               -- human) recovers exactly like a stale in_progress lock
+               OR (apply_status IN ('in_progress', 'prepared')
+                   AND last_attempted_at IS NOT NULL
                    AND last_attempted_at <= ?))
           -- captcha is terminal by decision: a blocked job is never requeued
           AND COALESCE(apply_status, '') != 'captcha'
@@ -356,7 +359,10 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                        OR url LIKE ? ESCAPE '\\' OR application_url LIKE ? ESCAPE '\\'
                        OR url LIKE ? ESCAPE '\\' OR application_url LIKE ? ESCAPE '\\')
                   AND tailored_resume_path IS NOT NULL
-                  AND (apply_status IS NULL OR apply_status != 'in_progress')
+                  -- a prepared checkpoint is a held lock: targeted
+                  -- acquisition may not steal it, same as in_progress
+                  AND (apply_status IS NULL
+                       OR apply_status NOT IN ('in_progress', 'prepared'))
                 ORDER BY CASE WHEN url IN (?, ?) OR application_url IN (?, ?)
                               THEN 0 ELSE 1 END, url
             """, (target_url, core, target_url, core,
@@ -439,7 +445,7 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
             UPDATE jobs SET apply_status = 'in_progress',
                            agent_id = ?,
                            last_attempted_at = ?,
-                           apply_attempts = CASE WHEN apply_status = 'in_progress'
+                           apply_attempts = CASE WHEN apply_status IN ('in_progress', 'prepared')
                                                  THEN COALESCE(apply_attempts, 0) + 1
                                                  ELSE apply_attempts END,
                            {task_clause}
@@ -619,6 +625,29 @@ def mark_result(url: str, status: str, error: str | None = None,
     # pre-claim UPDATE — V4 keeps their unenforceability documented.
     claim_predicate = " AND apply_task_id = ?" if claim_guard is not None else ""
     claim_params = (claim_guard,) if claim_guard is not None else ()
+
+    if status == "prepared":
+        # Checkpoint, not an outcome (host-protocol vocabulary): materials
+        # are ready and the run stopped at the human-confirmation gate.
+        # The lock stays held under the same claim token — the final
+        # report (applied/failed/...) consumes it later. applied_at stays
+        # NULL (the daily cap never counts a checkpoint), no attempt
+        # burns (nothing was attempted), and apply_error clears (a
+        # checkpoint is not an error — the apply_errors stat must not
+        # count one). A driver that dies here leaves a stale prepared
+        # lock the queue's stale cutoff reclaims.
+        cursor = conn.execute(f"""
+            UPDATE jobs SET apply_status = 'prepared', apply_error = NULL,
+                           apply_conflict = ?, apply_duration_ms = ?
+            WHERE url = ?{claim_predicate}
+        """, (superseded_note, duration_ms, url, *claim_params))
+        if claim_guard is not None and cursor.rowcount == 0:
+            # Lost race: a reclaim replaced our token between the check and
+            # this write — the reclaimer's state stands (same as outcomes).
+            conn.rollback()
+            return "superseded"
+        conn.commit()
+        return "recorded"
 
     if status == "applied":
         cursor = conn.execute(f"""

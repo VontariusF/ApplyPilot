@@ -1471,7 +1471,10 @@ def count_apply_eligible(min_score: int = 7) -> int:
         SELECT COUNT(*) FROM jobs
         WHERE tailored_resume_path IS NOT NULL
           AND (apply_status IS NULL OR apply_status = 'failed'
-               OR (apply_status = 'in_progress' AND last_attempted_at IS NOT NULL
+               -- stale prepared checkpoints recover like stale in_progress
+               -- locks (launcher._queue_where is the one selection truth)
+               OR (apply_status IN ('in_progress', 'prepared')
+                   AND last_attempted_at IS NOT NULL
                    AND last_attempted_at <= ?))
           -- captcha is terminal by decision: a blocked job is never requeued
           AND COALESCE(apply_status, '') != 'captcha'

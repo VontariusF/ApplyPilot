@@ -1301,7 +1301,8 @@ def cover_cmd(
 # The PR #57 status vocabulary (engines.scan_result's RESULT markers plus
 # failed:<reason> collapsed to failed) — the only outcomes apply-result
 # records.
-_APPLY_STATUSES = ("applied", "failed", "expired", "captcha", "login_issue")
+_APPLY_STATUSES = ("applied", "prepared", "failed", "expired", "captcha",
+                   "login_issue")
 
 # The apply-status vocabulary's terminal set — canonical in database.py
 # (one source of truth: reset_failed's sweep reads the same tuple, so the
@@ -1460,6 +1461,12 @@ def _host_apply_result(url: str, status: str, reason: str | None,
     engine paths, stale reclaims by other paths) keep the pre-claim
     behavior — reportable as before, no check enforced. A refused outcome
     writes nothing.
+
+    The vocabulary's `prepared` is a checkpoint, not an outcome: the
+    driver reports it when materials are ready and the run stops at the
+    human-confirmation gate. It keeps the lock and claim token — the
+    final report (applied/failed/...) with the same --claim consumes the
+    token and releases the lock.
     """
     from kestrel.apply.launcher import (
         ClaimMismatch,
@@ -1484,7 +1491,7 @@ def _host_apply_result(url: str, status: str, reason: str | None,
     job = _load_job(conn, url)
     if job is None:
         _fail("unknown_job", f"no job at {url}", {"url": url})
-    if job["apply_status"] != "in_progress":
+    if job["apply_status"] not in ("in_progress", "prepared"):
         _fail("not_acquired",
               f"{url} is not under an apply lock — acquire it with "
               "`agent apply-acquire` first; apply-result records outcomes "
@@ -1564,8 +1571,12 @@ def apply_result_cmd(
         None, "--url", help="Job URL from the apply-acquire payload."),
     status: Optional[str] = typer.Option(
         None, "--status",
-        help="One of applied, failed, expired, captcha, login_issue (the "
-             "PR #57 vocabulary; captcha is terminal)."),
+        help="One of applied, prepared, failed, expired, captcha, "
+             "login_issue (the PR #57 vocabulary; captcha is terminal). "
+             "prepared: materials are ready and the run stopped at the "
+             "human-confirmation gate — it does NOT count toward the "
+             "daily cap, keeps the lock and claim, and the same --claim "
+             "reports the final outcome later."),
     claim: Optional[str] = typer.Option(
         None, "--claim",
         help="The one-time ownership token apply-acquire returned (audit "
