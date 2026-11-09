@@ -8,6 +8,7 @@ search configuration YAML (searches.yaml) rather than being hardcoded.
 """
 
 import logging
+import re
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -17,6 +18,8 @@ from jobspy import scrape_jobs
 from applypilot import config
 from applypilot.database import get_connection, init_db, store_jobs
 from applypilot.discovery.filters import location_filters, location_ok as _location_ok
+from applypilot.discovery.salary import parse_salary_display
+from applypilot.enrichment.seniority import classify_seniority
 from applypilot.security import redact_proxy
 
 log = logging.getLogger(__name__)
@@ -107,6 +110,33 @@ def _clean_cell(value) -> str | None:
     return text
 
 
+def _iso_date(value) -> str | None:
+    """Normalize one JobSpy `date_posted` cell to an ISO date (YYYY-MM-DD).
+
+    JobSpy delivers pandas Timestamps, datetimes, or strings depending on
+    the board; unparseable cells become SQL NULL — never an exception.
+    """
+    text = _clean_cell(value)
+    if text is None:
+        return None
+    iso = getattr(value, "isoformat", None)
+    if callable(iso):
+        try:
+            text = iso()
+        except (ValueError, TypeError):
+            return None
+    text = str(text).strip()
+    if not text:
+        return None
+    # Full timestamp → date part; bare YYYY-MM-DD strings pass through.
+    if re.match(r"^\d{4}-\d{2}-\d{2}", text):
+        return text[:10]
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).date().isoformat()
+    except ValueError:
+        return None
+
+
 def store_jobspy_results(conn: sqlite3.Connection, df, source_label: str) -> tuple[int, int]:
     """Store JobSpy DataFrame results into the DB. Returns (new, existing)."""
     now = datetime.now(timezone.utc).isoformat()
@@ -146,6 +176,13 @@ def store_jobspy_results(conn: sqlite3.Connection, df, source_label: str) -> tup
         site_name = _clean_cell(row.get("site")) or source_label
         is_remote = row.get("is_remote", False)
 
+        # Structured discovery fields (spec Layer 1): pay/date/seniority
+        # become columns, not just display text. Guarded per field (B10's
+        # keep-the-row pattern) — one bad cell keeps the job with NULLs.
+        structured = parse_salary_display(salary) if salary else None
+        date_posted = _iso_date(row.get("date_posted"))
+        seniority = classify_seniority(title, description)
+
         site_label = f"{site_name}"
         if is_remote:
             location_str = f"{location_str} (Remote)" if location_str else "Remote"
@@ -166,10 +203,17 @@ def store_jobspy_results(conn: sqlite3.Connection, df, source_label: str) -> tup
         try:
             conn.execute(
                 "INSERT INTO jobs (url, title, salary, description, location, site, strategy, discovered_at, "
-                "full_description, application_url, detail_scraped_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "full_description, application_url, detail_scraped_at, "
+                "date_posted, salary_min, salary_max, salary_currency, salary_interval, seniority) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (url, title, salary, description, location_str, site_label, strategy, now,
-                 full_description, apply_url, detail_scraped_at),
+                 full_description, apply_url, detail_scraped_at,
+                 date_posted,
+                 structured.min_annual if structured else None,
+                 structured.max_annual if structured else None,
+                 structured.currency if structured else None,
+                 structured.interval if structured else None,
+                 seniority),
             )
             new += 1
         except sqlite3.IntegrityError:

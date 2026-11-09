@@ -5,6 +5,7 @@ job description. All personal data is loaded at runtime from the user's
 profile and resume file.
 """
 
+import hashlib
 import json
 import logging
 import re
@@ -166,20 +167,32 @@ def _scored_by_provider() -> str:
     return getattr(get_client(), "provider_name", "") or "llm"
 
 
+def resume_sha256(resume_text: str) -> str:
+    """Bind a score to the resume it was judged against (spec Layer 1).
+
+    The hex digest of resume.txt's text, stamped into
+    jobs.scored_resume_hash at persist time; a later mismatch (or a
+    pre-binding NULL) marks the score stale for the rerank flow.
+    """
+    return hashlib.sha256(resume_text.encode("utf-8")).hexdigest()
+
+
 def persist_score(conn, url: str, score: int, keywords: str, reasoning: str,
-                  scored_by: str, when: str) -> None:
+                  scored_by: str, when: str,
+                  resume_hash: str | None = None) -> None:
     """Write one job's score — the single UPDATE shared by the LLM path
     and the host protocol (spec art_IMViYTMU: no parallel write path).
 
     Clears any prior score_error; `scored_by` stamps provenance ('host'
     for protocol writes, the provider name for LLM ones). The stored
     blob is `keywords\\nreasoning` — split_score_reasoning depends on
-    that shape. Callers commit.
+    that shape. `resume_hash` binds the score to the resume text it was
+    judged against (None = unbound, treated as stale). Callers commit.
     """
     conn.execute(
         "UPDATE jobs SET fit_score = ?, score_reasoning = ?, scored_at = ?, "
-        "score_error = NULL, scored_by = ? WHERE url = ?",
-        (score, f"{keywords}\n{reasoning}", when, scored_by, url),
+        "score_error = NULL, scored_by = ?, scored_resume_hash = ? WHERE url = ?",
+        (score, f"{keywords}\n{reasoning}", when, scored_by, resume_hash, url),
     )
 
 
@@ -296,6 +309,7 @@ def run_scoring(limit: int = 0, rescore: bool = False, url: str | None = None) -
     # get the failure recorded instead.
     now = datetime.now(timezone.utc).isoformat()
     scored_by = _scored_by_provider()
+    resume_hash = resume_sha256(resume_text)
     for r in results:
         if r.get("error"):
             conn.execute(
@@ -303,7 +317,7 @@ def run_scoring(limit: int = 0, rescore: bool = False, url: str | None = None) -
             )
             continue
         persist_score(conn, r["url"], r["score"], r["keywords"], r["reasoning"],
-                      scored_by, now)
+                      scored_by, now, resume_hash=resume_hash)
     conn.commit()
 
     elapsed = time.time() - t0

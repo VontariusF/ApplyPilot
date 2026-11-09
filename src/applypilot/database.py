@@ -174,6 +174,21 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             -- the UI must label it inferred.
             is_remote             INTEGER,
 
+            -- Structured discovery fields (spec art_we4AUxEy Layer 1):
+            -- parsed at ingestion, backfilled from the salary display
+            -- string. salary_min/max are ANNUALIZED; salary_interval
+            -- keeps the delivered unit. NULL = unknown, never zero.
+            date_posted           TEXT,
+            salary_min            REAL,
+            salary_max            REAL,
+            salary_currency       TEXT,
+            salary_interval       TEXT,
+
+            -- Deterministic seniority tier (spec Layer 1): one of
+            -- intern|junior|mid|senior|staff|principal|lead|manager,
+            -- NULL = not classified.
+            seniority             TEXT,
+
             -- Enrichment stage (detail_scraper)
             full_description      TEXT,
             application_url       TEXT,
@@ -185,6 +200,11 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             score_reasoning       TEXT,
             scored_at             TEXT,
             score_error           TEXT,
+
+            -- Resume binding for the score (spec art_we4AUxEy Layer 1):
+            -- sha256 of resume.txt at persist time. NULL = pre-binding
+            -- (scored before this column existed) — treated as stale.
+            scored_resume_hash    TEXT,
 
             -- Tailoring stage (resume tailor)
             tailored_resume_path  TEXT,
@@ -241,6 +261,11 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
     # Run migrations for any columns added after initial schema
     ensure_columns(conn)
     backfill_is_remote(conn)
+    # Structured pay + seniority backfills (spec Layer 1): parse the legacy
+    # salary display zoo and tier the unclassified rows. Both are idempotent
+    # and never overwrite non-NULL values.
+    backfill_salary_data(conn)
+    backfill_seniority(conn)
     # B1: idempotent repair of the pre-_clean_cell 'None'/'n/a' URL class
     # (no migration — see normalize_polluted_urls).
     normalize_polluted_urls(conn)
@@ -275,6 +300,73 @@ def backfill_is_remote(conn: sqlite3.Connection) -> int:
     return len(rows)
 
 
+def backfill_salary_data(conn: sqlite3.Connection) -> int:
+    """Parse legacy salary display strings into the structured columns.
+
+    Rows discovered before the structured pay columns (spec Layer 1,
+    art_we4AUxEy) carry only the rendered display string. One tolerant
+    parse pass at startup gives every parseable row filterable
+    salary_min/max (annualized), salary_currency and salary_interval.
+
+    Idempotent: only rows with a salary string but NULL structured range
+    are candidates, so a row that parsed once is never re-touched and
+    non-NULL values are never overwritten. Rows whose string defeats the
+    parser stay candidates (re-parsed each startup — cheap and pure) and
+    keep NULLs. Returns the number of rows that gained a range.
+    """
+    from applypilot.discovery.salary import parse_salary_display
+
+    rows = conn.execute(
+        "SELECT url, salary FROM jobs "
+        "WHERE salary IS NOT NULL AND salary_min IS NULL AND salary_max IS NULL"
+    ).fetchall()
+    updated = 0
+    for row in rows:
+        parsed = parse_salary_display(row["salary"])
+        if parsed is None:
+            continue
+        conn.execute(
+            "UPDATE jobs SET salary_min = ?, salary_max = ?, "
+            "salary_currency = ?, salary_interval = ? WHERE url = ?",
+            (parsed.min_annual, parsed.max_annual,
+             parsed.currency, parsed.interval, row["url"]),
+        )
+        updated += 1
+    if updated:
+        conn.commit()
+    return updated
+
+
+def backfill_seniority(conn: sqlite3.Connection) -> int:
+    """Classify seniority for rows the classifier hasn't tiered yet.
+
+    Deterministic keyword pass over title + best description (spec Layer
+    1) — no LLM in the loop. Idempotent: only rows with NULL seniority
+    AND a title are touched (a titleless row has nothing to classify and
+    would otherwise be re-classified on every startup). Never overwrites
+    a non-NULL tier. Returns the number of rows classified.
+    """
+    from applypilot.enrichment.seniority import classify_seniority
+
+    rows = conn.execute(
+        "SELECT url, title, description, full_description "
+        "FROM jobs WHERE seniority IS NULL AND title IS NOT NULL"
+    ).fetchall()
+    updated = 0
+    for row in rows:
+        tier = classify_seniority(row["title"],
+                                  row["full_description"] or row["description"])
+        if tier is None:
+            continue
+        conn.execute(
+            "UPDATE jobs SET seniority = ? WHERE url = ?", (tier, row["url"])
+        )
+        updated += 1
+    if updated:
+        conn.commit()
+    return updated
+
+
 # Complete column registry: column_name -> SQL type with optional default.
 # This is the single source of truth. Adding a column here is all that's needed
 # for it to appear in both new databases and migrated ones.
@@ -290,6 +382,15 @@ _ALL_COLUMNS: dict[str, str] = {
     "discovered_at": "TEXT",
     # Inferred remote-work flag (spec PR D) — heuristic, labeled inferred in the UI.
     "is_remote": "INTEGER",
+    # Structured discovery fields (spec art_we4AUxEy Layer 1). salary_min/max
+    # are annualized; salary_interval keeps the delivered unit.
+    "date_posted": "TEXT",
+    "salary_min": "REAL",
+    "salary_max": "REAL",
+    "salary_currency": "TEXT",
+    "salary_interval": "TEXT",
+    # Deterministic seniority tier (spec Layer 1); NULL = not classified.
+    "seniority": "TEXT",
     # Enrichment
     "full_description": "TEXT",
     "application_url": "TEXT",
@@ -298,6 +399,9 @@ _ALL_COLUMNS: dict[str, str] = {
     # Scoring
     "fit_score": "INTEGER",
     "score_reasoning": "TEXT",
+    # Resume binding for the score (spec Layer 1): sha256 of resume.txt at
+    # persist time; NULL = pre-binding, treated as stale.
+    "scored_resume_hash": "TEXT",
     "scored_at": "TEXT",
     # Last scoring failure, cleared on the next successful score (E).
     "score_error": "TEXT",
