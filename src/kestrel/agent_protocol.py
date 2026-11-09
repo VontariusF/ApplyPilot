@@ -1597,3 +1597,184 @@ def apply_result_cmd(
     if not status:
         _fail("invalid_usage", "--status is required")
     _verb(lambda: _host_apply_result(url, status, reason, min_score, claim))
+
+
+# ---------------------------------------------------------------------------
+# Hiring leads (hiring-leads spec art_u0YGUqpk §5): discover and list.
+#
+# The verbs discover and list — they never send anything. No LinkedIn
+# credential is read, no linkedin.com page is fetched, no outbound
+# message exists anywhere on these paths (spec locked decisions); the
+# guardrails block rides every payload so the host can hold the code to
+# the statement. Personal data (lead names, profile URLs) is redacted
+# by default because protocol stdout lands in host chat logs; --reveal
+# opts back in per call, the same contract as the resume text.
+# ---------------------------------------------------------------------------
+
+# The mask for --reveal-gated personal data (the spec §5 payload shape).
+_LEADS_REDACTED = "--reveal-gated--"
+
+
+def _leads_guardrails() -> dict:
+    """The guardrails block: what Kestrel deliberately does not do, plus
+    the daily discovery-cap usage the host needs to pace its runs."""
+    from kestrel.discovery.hiring_leads import discovery_runs_used
+
+    cap = config.leads_daily_discovery_cap()
+    used = discovery_runs_used()
+    return {
+        "sends_nothing": True,
+        "credentials_stored": "none",
+        "profile_pages_fetched": False,
+        "daily_discovery_cap": cap,
+        "discovery_used_today": used,
+        "discovery_remaining_today": max(0, cap - used),
+    }
+
+
+def _lead_block(row: dict, reveal: bool) -> dict:
+    """The wire shape of one lead — identity redacted unless --reveal."""
+    return {
+        "profile_url": row["profile_url"] if reveal else _LEADS_REDACTED,
+        "full_name": row["full_name"] if reveal else _LEADS_REDACTED,
+        "title": row["title"],
+        "company_key": row["company_key"],
+        "source": row["source"],
+        "evidence_url": row["evidence_url"],
+        "status": row["last_status"],
+    }
+
+
+def _validated_leads_limit(limit_raw: str | None) -> int | None:
+    if limit_raw is None:
+        return None
+    if not re.fullmatch(r"\d+", limit_raw.strip()):
+        _fail("invalid_limit", f"--limit must be a non-negative integer, "
+              f"got {limit_raw!r}", {"limit": limit_raw})
+    return int(limit_raw)
+
+
+def _validated_min_fit(min_fit_raw: str | None) -> float | None:
+    if min_fit_raw is None:
+        return None
+    if not re.fullmatch(r"\d+(?:\.\d+)?", min_fit_raw.strip()):
+        _fail("invalid_min_fit", f"--min-fit must be a non-negative number, "
+              f"got {min_fit_raw!r}", {"min_fit": min_fit_raw})
+    return float(min_fit_raw)
+
+
+def _leads_discover(company_key: str | None, min_fit: float | None,
+                    limit: int | None, reveal: bool) -> dict:
+    """Run discovery (spec §4 entrypoint) and report the new leads."""
+    from kestrel.database import hiring_leads_rows
+    from kestrel.discovery.hiring_leads import (
+        HiringLeadsError,
+        LeadsRefusal,
+        discover_hiring_leads,
+    )
+
+    before = {row["profile_url"]
+              for row in hiring_leads_rows(company_key=company_key)}
+    try:
+        result = discover_hiring_leads(company_key=company_key,
+                                       min_fit=min_fit, limit=limit)
+    except LeadsRefusal as exc:
+        # The typed refusals surface verbatim: code, fix-naming message,
+        # details — plus the guardrails block, which rides every payload.
+        _fail(exc.code, str(exc), {**exc.details,
+                                   "guardrails": _leads_guardrails()})
+    except HiringLeadsError as exc:
+        # A source-level failure that is not one of the five refusals —
+        # still an envelope, never a stack trace.
+        _fail("source_error", str(exc), {"guardrails": _leads_guardrails()})
+
+    cap = result["guardrails"]["daily_discovery_cap"]
+    used = result["guardrails"]["discovery_used_today"]
+    new_rows = [row for row in hiring_leads_rows(company_key=company_key)
+                if row["profile_url"] not in before]
+    return {
+        "verb": "leads-discover",
+        "sources_requested": result["sources_requested"],
+        "sources_used": result["sources_used"],
+        "retired_sources": result["retired_sources"],
+        "companies_scanned": result["companies_scanned"],
+        "companies_without_domain": result["companies_without_domain"],
+        "scored_jobs_without_company": result["scored_jobs_without_company"],
+        "discovered": result["discovered"],
+        "skipped_existing": result["skipped_existing"],
+        "leads": [_lead_block(row, reveal) for row in new_rows],
+        "guardrails": {**result["guardrails"],
+                       "discovery_remaining_today": max(0, cap - used)},
+        "next": "Show the person the Leads board, or `kestrel-agent "
+                "leads-list` — the connection itself is always the "
+                "person's own action; Kestrel never sends anything.",
+    }
+
+
+def _leads_list(company_key: str | None, status: str | None,
+                reveal: bool) -> dict:
+    """The stored-lead queue document, filtered by company/status."""
+    from kestrel.database import LEAD_STATUSES, hiring_leads_rows
+
+    if status is not None and status not in LEAD_STATUSES:
+        _fail("invalid_status",
+              f"--status must be one of {', '.join(LEAD_STATUSES)}",
+              {"status": status, "valid": list(LEAD_STATUSES)})
+    rows = hiring_leads_rows(company_key=company_key, status=status)
+    return {
+        "verb": "leads-list",
+        "count": len(rows),
+        "leads": [_lead_block(row, reveal) for row in rows],
+        "guardrails": _leads_guardrails(),
+        "next": "Show the person the Leads board, or `kestrel-agent "
+                "leads-list --reveal` for the profile links to open "
+                "yourself in your own browser.",
+    }
+
+
+@agent_app.command("leads-discover")
+def leads_discover_cmd(
+    company: Optional[str] = typer.Option(
+        None, "--company",
+        help="Discover for one company key only; omit for every high-match "
+             "company (default threshold: leads.yaml min_company_fit)."),
+    min_fit: Optional[str] = typer.Option(
+        None, "--min-fit",
+        help="High-match threshold override for this run (default: "
+             "leads.yaml min_company_fit)."),
+    limit: Optional[str] = typer.Option(
+        None, "--limit",
+        help="Max companies scanned this run (provider spend), highest "
+             "fit first."),
+    reveal: bool = typer.Option(
+        False, "--reveal",
+        help="Include lead names and profile URLs (redacted by default — "
+             "stdout lands in host chat logs)."),
+) -> None:
+    """Discover hiring leads at high-match companies — metadata only.
+
+    Reads search-result metadata through the configured sources; never
+    fetches a LinkedIn page, stores a LinkedIn credential, or sends
+    anything. The daily discovery cap (leads.yaml) paces provider spend.
+    """
+    _prepare_db()
+    _verb(lambda: _leads_discover(
+        company, _validated_min_fit(min_fit),
+        _validated_leads_limit(limit), reveal))
+
+
+@agent_app.command("leads-list")
+def leads_list_cmd(
+    company: Optional[str] = typer.Option(
+        None, "--company", help="Filter by company key."),
+    status: Optional[str] = typer.Option(
+        None, "--status",
+        help="Filter by lead status: discovered, dismissed, or connected."),
+    reveal: bool = typer.Option(
+        False, "--reveal",
+        help="Include lead names and profile URLs (redacted by default — "
+             "stdout lands in host chat logs)."),
+) -> None:
+    """List stored hiring leads — the queue the person works down."""
+    _prepare_db()
+    _verb(lambda: _leads_list(company, status, reveal))
