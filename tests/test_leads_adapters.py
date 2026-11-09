@@ -131,7 +131,7 @@ def test_hiring_leads_table_exists_with_expected_columns():
 
 def test_lead_vocabularies_are_shared_constants():
     assert LEAD_STATUSES == ("discovered", "dismissed", "connected")
-    assert LEAD_SOURCES == ("serp", "public_page", "manual")
+    assert LEAD_SOURCES == ("serp", "tavily", "public_page", "manual")
 
 
 def test_upsert_hiring_lead_dedupes_on_profile_url():
@@ -208,6 +208,60 @@ def test_map_serp_result_strips_trackers_for_stable_dedupe():
 
 
 # ---------------------------------------------------------------------------
+# Attribution precision (dogfood 2026-11-09): the metadata the provider
+# already served must name the company before a result is attributed to it
+# ---------------------------------------------------------------------------
+
+
+def test_affiliation_filter_accepts_title_match():
+    field = hl.company_affiliation_field(
+        title="Jane Doe - Head of Talent - Stripe | LinkedIn",
+        snippet="Jane Doe builds developer tools.",
+        display_name="Stripe", domain="stripe.com")
+    assert field == "title"
+
+
+def test_affiliation_filter_accepts_snippet_match():
+    field = hl.company_affiliation_field(
+        title="Jane Doe - Head of Talent | LinkedIn",
+        snippet="Jane Doe leads recruiting at Supabase.",
+        display_name="Supabase", domain="supabase.com")
+    assert field == "snippet"
+
+
+def test_affiliation_filter_accepts_domain_match():
+    field = hl.company_affiliation_field(
+        title="Jane Doe — hiring, see careers on stripe.com",
+        snippet=None,
+        display_name="Stripe Incorporated", domain="stripe.com")
+    assert field == "title"
+
+
+def test_affiliation_filter_drops_no_mention_result():
+    field = hl.company_affiliation_field(
+        title="Jane Doe - Student at State University | LinkedIn",
+        snippet="Jane Doe founded a robotics club at her school.",
+        display_name="Stripe", domain="stripe.com")
+    assert field is None
+
+
+def test_affiliation_filter_matches_whole_words_only():
+    field = hl.company_affiliation_field(
+        title="Jane Doe - Striped Apparel | LinkedIn",
+        snippet=None,
+        display_name="Stripe", domain=None)
+    assert field is None  # "striped" is not "Stripe"
+
+
+def test_affiliation_filter_is_case_insensitive():
+    field = hl.company_affiliation_field(
+        title="JANE DOE - HEAD OF TALENT AT SUPABASE | LinkedIn",
+        snippet=None,
+        display_name="supabase", domain=None)
+    assert field == "title"
+
+
+# ---------------------------------------------------------------------------
 # Composio-shape transport: retryable set, clamped backoff, injectable sleep
 # ---------------------------------------------------------------------------
 
@@ -276,7 +330,7 @@ def test_no_high_match_companies_refusal_names_threshold_and_orphans(app_dir,
     with pytest.raises(LeadsRefusal) as refused:
         discover_hiring_leads(conn, now=NOW)
     assert refused.value.code == NO_HIGH_MATCH_COMPANIES
-    assert refused.value.details["min_fit"] == 75
+    assert refused.value.details["min_fit"] == 8
     assert refused.value.details["scored_jobs_without_company"] == 1
 
 
@@ -325,9 +379,12 @@ def test_discovery_dedupes_across_runs_on_profile_url(app_dir, monkeypatch):
     first = discover_hiring_leads(conn, now=NOW)
     second = discover_hiring_leads(conn, now=NOW)
     # 2 companies x 2 taxonomy terms; the mock returns the same pair for
-    # every query, so within-run collisions also count as skipped_existing.
-    assert first["discovered"] == 2 and first["skipped_existing"] == 2
-    assert second["discovered"] == 0 and second["skipped_existing"] == 4
+    # every query, but only Acme's results pass the affiliation filter
+    # (the titles name Acme Robotics) — Bolt's are dropped and counted,
+    # never stored.
+    assert first["discovered"] == 2 and first["skipped_existing"] == 0
+    assert first["dropped_no_affiliation"] == 2
+    assert second["discovered"] == 0 and second["skipped_existing"] == 2
     assert conn.execute("SELECT COUNT(*) FROM hiring_leads").fetchone()[0] == 2
     lead = conn.execute("SELECT * FROM hiring_leads LIMIT 1").fetchone()
     assert lead["company_key"] in ("acme-robotics.com",
@@ -539,7 +596,7 @@ def test_tavily_happy_path_dedupes_on_profile_url(app_dir, monkeypatch):
     assert first["discovered"] == 2 and second["skipped_existing"] == 2
     lead = conn.execute("SELECT * FROM hiring_leads").fetchone()
     assert lead["profile_url"] == "https://www.linkedin.com/in/jane-doe-8b21435"
-    assert lead["source"] == "serp"  # same X-ray surface class, by design
+    assert lead["source"] == "tavily"  # the provider that served the metadata
 
 
 def test_tavily_drops_non_profile_urls_not_trusted(app_dir, monkeypatch):
@@ -561,6 +618,41 @@ def test_tavily_drops_non_profile_urls_not_trusted(app_dir, monkeypatch):
     payload = discover_hiring_leads(conn, now=NOW)
     assert payload["discovered"] == 1
     assert conn.execute("SELECT COUNT(*) FROM hiring_leads").fetchone()[0] == 1
+
+
+def test_serp_drops_no_affiliation_results_and_counts_them(app_dir,
+                                                           monkeypatch):
+    conn = init_db()
+    _seed_companies(conn, ACME)
+    unaffiliated = _profile_result("jane-doe")
+    unaffiliated["title"] = "Jane Doe - Student | LinkedIn"
+    unaffiliated["snippet"] = "Jane Doe is finishing her degree."
+    responder = lambda request: httpx.Response(200, json={  # noqa: E731
+        "organic_results": [_profile_result("sam-smith"), unaffiliated]})
+    _patch_build_source(monkeypatch, _serp_source(responder, []))
+
+    payload = discover_hiring_leads(conn, now=NOW)
+    assert payload["discovered"] == 1
+    assert payload["dropped_no_affiliation"] == 1
+    assert conn.execute("SELECT COUNT(*) FROM hiring_leads").fetchone()[0] == 1
+
+
+def test_tavily_drops_no_affiliation_results_and_counts_them(app_dir,
+                                                             monkeypatch):
+    conn = init_db()
+    _seed_companies(conn, ACME)
+    unaffiliated = _tavily_result("jane-doe")
+    unaffiliated["title"] = "Jane Doe - Student | LinkedIn"
+    unaffiliated["content"] = "Jane Doe is finishing her degree."
+    responder = lambda request: httpx.Response(200, json={  # noqa: E731
+        "results": [_tavily_result("sam-smith"), unaffiliated]})
+    _patch_build_source(monkeypatch, _tavily_source(responder, []))
+
+    payload = discover_hiring_leads(conn, now=NOW)
+    assert payload["discovered"] == 1
+    assert payload["dropped_no_affiliation"] == 1
+    stored = conn.execute("SELECT source FROM hiring_leads").fetchall()
+    assert [row["source"] for row in stored] == ["tavily"]
 
 
 def test_tavily_no_provider_key_refusal_names_the_provider(app_dir,
@@ -665,6 +757,22 @@ def test_leads_config_defaults_and_loud_override_refusal(app_dir):
                                         encoding="utf-8")
     with pytest.raises(ValueError, match="daily_discovery_cap"):
         config.leads_daily_discovery_cap()
+
+
+def test_default_min_company_fit_is_on_scorer_scale(app_dir):
+    # Dogfood 2026-11-09: the scorer scores 1-10, so a 0-100-scale
+    # default (75) made the default threshold unreachable — no company
+    # could ever qualify for discovery without a manual override.
+    assert config.DEFAULTS["min_company_fit"] == 8
+    assert config.leads_min_company_fit() == 8
+
+
+def test_packaged_leads_yaml_threshold_matches_default():
+    import yaml
+
+    packaged = yaml.safe_load(
+        (config.CONFIG_DIR / "leads.yaml").read_text(encoding="utf-8"))
+    assert packaged["min_company_fit"] == config.DEFAULTS["min_company_fit"]
 
 
 def test_provider_keys_join_the_redaction_boundary(monkeypatch):
