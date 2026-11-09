@@ -1,0 +1,12 @@
+# Hiring-leads configuration (spec art_u0YGUqpk).
+# Copy to ~/.kestrel/leads.yaml to override.
+#
+# A company is high-match when MAX(fit_score) across its member jobs
+# reaches min_company_fit and at least one member job is scored.
+# Scale note: the job scorer scores 1-10 — size this threshold to the
+# scale your pipeline uses (the spec's 75 presumes a 0-100 scale).
+min_company_fit: 75
+
+# Keys that arrive with the discovery-adapter PRs (spec §4) are listed
+# here only once they have a consumer: daily_discovery_cap, role_taxonomy,
+# serp, firecrawl.

@@ -341,12 +341,56 @@ def load_base_urls() -> dict[str, str | None]:
     return cfg.get("base_urls", {})
 
 
+def load_leads_config() -> dict:
+    """Load hiring-leads settings from ~/.kestrel/leads.yaml.
+
+    Falls back to the packaged example (config/leads.yaml) when the user
+    has no copy — the searches.yaml pattern. Returns {} when neither
+    exists; every reader falls back to config.DEFAULTS per key.
+    """
+    import yaml
+    path = APP_DIR / "leads.yaml"
+    if not path.exists():
+        path = CONFIG_DIR / "leads.yaml"
+        if not path.exists():
+            return {}
+    loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    return loaded or {}
+
+
+def leads_min_company_fit() -> float:
+    """High-match company threshold (hiring-leads spec art_u0YGUqpk §2).
+
+    A company is high-match when MAX(fit_score) across its member jobs
+    reaches this floor and at least one member job is scored. A
+    leads.yaml value overrides the default; the default's one home is
+    DEFAULTS. An unparseable override is refused loudly, not silently
+    defaulted — a typo'd threshold must not quietly change what the
+    pipeline considers high-match.
+    """
+    raw = load_leads_config().get("min_company_fit")
+    if raw is None:
+        return DEFAULTS["min_company_fit"]
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"leads.yaml min_company_fit must be a number, got {raw!r}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Default values — referenced across modules instead of magic numbers
 # ---------------------------------------------------------------------------
 
 DEFAULTS = {
     "min_score": 7,
+    # Hiring-leads spec art_u0YGUqpk §2: a company is high-match when
+    # MAX(fit_score) across its member jobs reaches this floor. The
+    # packaged leads.yaml ships the same number; the loader falls back
+    # here when that file is absent. Note: the job scorer's scale is
+    # 1-10, so deployments must size this threshold to their scale.
+    "min_company_fit": 75,
     "max_apply_attempts": 3,
     # The tailor/cover stage-attempts cap (V3): the one number every
     # consumer reads — the queue predicates in database.STAGE_CONDITIONS,

@@ -211,12 +211,15 @@ def store_jobspy_results(conn: sqlite3.Connection, df, source_label: str) -> tup
         apply_url = _clean_cell(row.get("job_url_direct"))
 
         try:
+            # The parsed company persists now that the store has a column
+            # for it (hiring-leads spec art_u0YGUqpk §1) — identity source
+            # (a) for backfill_company_identity.
             conn.execute(
-                "INSERT INTO jobs (url, title, salary, description, location, site, strategy, discovered_at, "
+                "INSERT INTO jobs (url, title, company, salary, description, location, site, strategy, discovered_at, "
                 "full_description, application_url, detail_scraped_at, "
                 "date_posted, salary_min, salary_max, salary_currency, salary_interval, seniority) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (url, title, salary, description, location_str, site_label, strategy, now,
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (url, title, company, salary, description, location_str, site_label, strategy, now,
                  full_description, apply_url, detail_scraped_at,
                  date_posted,
                  structured.min_annual if structured else None,
