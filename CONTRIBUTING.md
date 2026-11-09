@@ -22,8 +22,11 @@ playwright install chromium
 ```
 
 This installs Kestrel in editable mode with the development dependencies
-(pytest, ruff, and the portal stack) and downloads the Chromium browser
-binary for Playwright.
+(pytest, ruff, the optional `[browser]` extra, and the portal stack) and
+downloads the Chromium browser binary for Playwright. The `[browser]` extra
+is a dev/test dependency only: an agent-driven Kestrel doesn't need
+Playwright (the host agent's own browser covers page fetching), but the
+built-in fallback engine, built-in scraping, and the e2e suite use it.
 
 ### Verify the installation
 
@@ -104,7 +107,8 @@ kestrel/
 │   ├── apply/            # Stage 6: browser automation (Claude/Droid engines)
 │   ├── portal/           # Localhost web portal
 │   ├── wizard/           # Onboarding wizard
-│   ├── agent_protocol.py # Host-driven agent protocol (JSON verbs)
+│   ├── agent_protocol.py # The agent-native pipeline protocol (JSON verbs)
+│   ├── browser.py        # Guarded access to the optional Playwright [browser] extra
 │   ├── database.py       # SQLite store
 │   └── config/           # Bundled YAML configs (employers, sites, searches)
 ├── tests/                # Test suite (unit + e2e)

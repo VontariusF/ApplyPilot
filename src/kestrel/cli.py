@@ -22,7 +22,7 @@ logging.basicConfig(
 
 app = typer.Typer(
     name="kestrel",
-    help="AI-powered end-to-end job application pipeline.",
+    help="The job-application pipeline your coding agent drives — onboarding, scoring, tailoring, cover letters, and apply bookkeeping over a JSON protocol. Provider-backed and built-in-browser modes are optional.",
     no_args_is_help=True,
 )
 console = Console()
@@ -39,7 +39,7 @@ VALID_STAGES = ("discover", "enrich", "score", "tailor", "cover", "pdf")
 app.add_typer(
     agent_app,
     name="agent",
-    help="JSON onboarding protocol for host coding agents (any-agent chat mode).",
+    help="The agent-native pipeline protocol: your host coding agent drives onboarding, scoring, tailoring, cover letters, and apply bookkeeping — one JSON document per verb on stdout.",
     cls=_ProtocolUsageGroup,
 )
 
@@ -124,7 +124,7 @@ def main(
         is_eager=True,
     ),
 ) -> None:
-    """Kestrel — AI-powered end-to-end job application pipeline."""
+    """Kestrel — the job-application pipeline your coding agent drives."""
 
 
 @app.command()

@@ -27,9 +27,9 @@ from urllib.parse import quote_plus
 import httpx
 import yaml
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
 
 from kestrel import config
+from kestrel.browser import sync_playwright
 from kestrel.config import CONFIG_DIR
 from kestrel.database import get_connection, init_db, store_jobs, get_stats
 from kestrel.discovery.filters import location_filters, location_ok as _location_ok
