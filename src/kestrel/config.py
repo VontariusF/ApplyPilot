@@ -379,6 +379,87 @@ def leads_min_company_fit() -> float:
         )
 
 
+# Hiring-lead role taxonomy (hiring-leads spec art_u0YGUqpk §4): the
+# titles the SERP X-ray queries search for at high-match companies.
+# Overridable per deployment via leads.yaml role_taxonomy; "Founder"
+# covers small companies where the founder does the hiring.
+DEFAULT_ROLE_TAXONOMY = (
+    "Head of Talent",
+    "Head of Talent Acquisition",
+    "VP Talent Acquisition",
+    "Director of Recruiting",
+    "Recruiting Manager",
+    "Talent Partner",
+    "Founder",
+    "COO",
+)
+
+
+def leads_daily_discovery_cap() -> int:
+    """Discovery runs allowed per UTC day (hiring-leads spec §4).
+
+    Caps provider spend, not sends — nothing is ever sent. A leads.yaml
+    value overrides the default; a bad override is refused loudly, like
+    min_company_fit.
+    """
+    raw = load_leads_config().get("daily_discovery_cap")
+    if raw is None:
+        return DEFAULTS["daily_discovery_cap"]
+    try:
+        cap = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"leads.yaml daily_discovery_cap must be an integer, got {raw!r}"
+        )
+    if cap < 0:
+        raise ValueError(
+            f"leads.yaml daily_discovery_cap must be >= 0, got {raw!r}")
+    return cap
+
+
+def leads_role_taxonomy() -> tuple[str, ...]:
+    """Role titles the lead-discovery X-ray queries target (spec §4)."""
+    raw = load_leads_config().get("role_taxonomy")
+    if raw is None:
+        return DEFAULT_ROLE_TAXONOMY
+    if (not isinstance(raw, list) or not raw
+            or not all(isinstance(t, str) and t.strip() for t in raw)):
+        raise ValueError(
+            "leads.yaml role_taxonomy must be a non-empty list of strings")
+    return tuple(t.strip() for t in raw)
+
+
+def leads_serp_results_per_query() -> int:
+    """Organic results fetched per X-ray query (spec §4, default 10)."""
+    raw = (load_leads_config().get("serp") or {}).get("results_per_query")
+    if raw is None:
+        return DEFAULTS["serp_results_per_query"]
+    try:
+        num = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"leads.yaml serp.results_per_query must be an integer, got {raw!r}"
+        )
+    if not 1 <= num <= 20:
+        raise ValueError(
+            f"leads.yaml serp.results_per_query must be in 1..20, got {raw!r}")
+    return num
+
+
+def firecrawl_enabled() -> bool:
+    """Firecrawl public-page source gate (spec §4): off by default.
+
+    Opt in via leads.yaml firecrawl.enabled: true plus FIRECRAWL_API_KEY.
+    The source touches public careers/team pages only — never
+    linkedin.com — but stays a two-key opt-out-by-default so no provider
+    call happens without deliberate configuration.
+    """
+    raw = (load_leads_config().get("firecrawl") or {}).get("enabled")
+    if raw is None:
+        return False
+    return bool(raw)
+
+
 # ---------------------------------------------------------------------------
 # Default values — referenced across modules instead of magic numbers
 # ---------------------------------------------------------------------------
@@ -391,6 +472,13 @@ DEFAULTS = {
     # here when that file is absent. Note: the job scorer's scale is
     # 1-10, so deployments must size this threshold to their scale.
     "min_company_fit": 75,
+    # Hiring-leads spec §4: discovery runs per UTC day. Caps provider
+    # spend, not sends — nothing is ever sent. The packaged leads.yaml
+    # ships the same number; the loader falls back here when absent.
+    "daily_discovery_cap": 10,
+    # Spec §4 serp.results_per_query: organic results read per X-ray
+    # query. Metadata only — profile pages are never fetched.
+    "serp_results_per_query": 10,
     "max_apply_attempts": 3,
     # The tailor/cover stage-attempts cap (V3): the one number every
     # consumer reads — the queue predicates in database.STAGE_CONDITIONS,
@@ -458,6 +546,10 @@ SECRET_ENV_KEYS = (
     "OPENAI_API_KEY",
     "LLM_API_KEY",
     "FACTORY_API_KEY",
+    # Hiring-leads discovery providers (spec art_u0YGUqpk §4): any value
+    # these hold must cross the redaction boundary like every other key.
+    "SERP_API_KEY",
+    "FIRECRAWL_API_KEY",
 )
 
 

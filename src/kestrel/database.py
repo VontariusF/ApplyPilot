@@ -147,6 +147,9 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
       - Apply:      applied_at, apply_status, apply_error, apply_attempts,
                    agent_id, last_attempted_at, apply_duration_ms, apply_task_id,
                    verification_confidence
+      - Leads (spec §3): hiring_leads — profile_url (PK), full_name, title,
+                    company_key, source, evidence_url, last_status,
+                    discovered_at, decided_at
 
     Args:
         db_path: Override the default DB_PATH.
@@ -299,6 +302,30 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             -- data, recomputed from jobs on every init_db.
             fit_score     REAL,
             updated_at    TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS hiring_leads (
+            -- One row per hiring lead (hiring-leads spec art_u0YGUqpk
+            -- §3). Dedupe rides on profile_url exactly as jobs dedupes
+            -- on url. last_status and source hold the LEAD_* vocabularies
+            -- defined in this module — the discovery adapters write them
+            -- and the agent verbs + portal /leads board read the same
+            -- constants, so no surface can drift.
+            profile_url   TEXT PRIMARY KEY,
+            full_name     TEXT NOT NULL,
+            title         TEXT NOT NULL,
+            -- FK-by-convention to company_identity (this store enforces
+            -- no SQLite FKs; jobs ↔ document_versions works the same way).
+            company_key   TEXT NOT NULL,
+            source        TEXT NOT NULL,
+            -- Where the lead was found — a public evidence page, never a
+            -- LinkedIn fetch. NULL when the search result itself is the
+            -- only discovery surface.
+            evidence_url  TEXT,
+            last_status   TEXT NOT NULL,
+            discovered_at TEXT NOT NULL,
+            decided_at    TEXT
         )
     """)
     conn.commit()
@@ -539,6 +566,69 @@ def high_match_companies(conn: sqlite3.Connection | None = None,
         min_fit = config.leads_min_company_fit()
     return [agg for agg in company_fit_aggregates(conn=conn)
             if agg["fit_score"] >= min_fit]
+
+
+# ---------------------------------------------------------------------------
+# Hiring-lead vocabulary (hiring-leads spec art_u0YGUqpk §3)
+#
+# One home: the discovery adapters write these values, and the agent
+# verbs and portal /leads board read the same constants, so no surface
+# can drift. Statuses are deliberately minimal — discovered → dismissed
+# | connected, set by the person from the portal; there is no outreach
+# state machine because nothing is ever sent.
+# ---------------------------------------------------------------------------
+
+LEAD_STATUS_DISCOVERED = "discovered"
+LEAD_STATUS_DISMISSED = "dismissed"
+LEAD_STATUS_CONNECTED = "connected"
+LEAD_STATUSES = (LEAD_STATUS_DISCOVERED, LEAD_STATUS_DISMISSED,
+                 LEAD_STATUS_CONNECTED)
+
+LEAD_SOURCE_SERP = "serp"
+LEAD_SOURCE_PUBLIC_PAGE = "public_page"
+LEAD_SOURCE_MANUAL = "manual"
+LEAD_SOURCES = (LEAD_SOURCE_SERP, LEAD_SOURCE_PUBLIC_PAGE, LEAD_SOURCE_MANUAL)
+
+
+def upsert_hiring_lead(conn: sqlite3.Connection,
+                       *,
+                       profile_url: str,
+                       full_name: str,
+                       title: str,
+                       company_key: str,
+                       source: str,
+                       evidence_url: str | None = None,
+                       discovered_at: str | None = None,
+                       last_status: str = LEAD_STATUS_DISCOVERED) -> bool:
+    """Insert one hiring lead; dedupe on profile_url. True when new.
+
+    The one write path for hiring_leads — adapters now, the verbs and
+    portal later — so the vocabulary checks cannot be bypassed. A status
+    or source outside the LEAD_* vocabulary raises ValueError (a caller
+    bug, never silently coerced); so does a missing identity field.
+    """
+    if last_status not in LEAD_STATUSES:
+        raise ValueError(
+            f"unknown lead status {last_status!r}; expected one of {LEAD_STATUSES}")
+    if source not in LEAD_SOURCES:
+        raise ValueError(
+            f"unknown lead source {source!r}; expected one of {LEAD_SOURCES}")
+    profile_url = (profile_url or "").strip()
+    full_name = (full_name or "").strip()
+    title = (title or "").strip()
+    company_key = (company_key or "").strip()
+    if not profile_url or not full_name or not title or not company_key:
+        raise ValueError(
+            "lead requires profile_url, full_name, title and company_key")
+    cursor = conn.execute(
+        "INSERT INTO hiring_leads (profile_url, full_name, title, company_key, "
+        "source, evidence_url, last_status, discovered_at, decided_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(profile_url) DO NOTHING",
+        (profile_url, full_name, title, company_key, source, evidence_url,
+         last_status, discovered_at or _utc_now(), None),
+    )
+    conn.commit()
+    return cursor.rowcount == 1
 
 
 # Complete column registry: column_name -> SQL type with optional default.
