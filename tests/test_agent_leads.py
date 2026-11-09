@@ -233,7 +233,7 @@ def test_guardrails_block_rides_every_success_payload(conn, monkeypatch,
 
 def test_guardrails_block_rides_every_refusal_envelope(conn, monkeypatch,
                                                        no_network):
-    monkeypatch.delenv("SERP_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)  # default provider
 
     result = run("leads-discover")  # no key — refusal
     assert result.exit_code != 0
@@ -249,17 +249,17 @@ def test_guardrails_block_rides_every_refusal_envelope(conn, monkeypatch,
 
 
 def test_no_provider_key_refusal(conn, monkeypatch, no_network):
-    monkeypatch.delenv("SERP_API_KEY", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)  # default provider
 
     result = run("leads-discover")
     assert result.exit_code == 1
     payload = payload_of(result)
     assert payload["error"]["code"] == "no_provider_key"
-    assert payload["error"]["details"]["required_env"] == ["SERP_API_KEY"]
+    assert payload["error"]["details"]["required_env"] == ["TAVILY_API_KEY"]
 
 
 def test_no_high_match_companies_refusal(app_dir, monkeypatch, no_network):
-    monkeypatch.setenv("SERP_API_KEY", SERP_KEY)  # source builds; data gate fires
+    monkeypatch.setenv("TAVILY_API_KEY", SERP_KEY)  # source builds; data gate fires
     init_db()  # no scored companies at all
 
     result = run("leads-discover")
@@ -272,7 +272,7 @@ def test_no_high_match_companies_refusal(app_dir, monkeypatch, no_network):
 
 
 def test_company_unresolved_refusal(conn, monkeypatch, no_network):
-    monkeypatch.setenv("SERP_API_KEY", SERP_KEY)
+    monkeypatch.setenv("TAVILY_API_KEY", SERP_KEY)
 
     result = run("leads-discover", "--company=nowhere.example")
     assert result.exit_code == 1
@@ -299,14 +299,14 @@ def test_quota_exhausted_refusal_with_utc_cap(conn, monkeypatch, no_network,
 
 
 def test_source_retired_refusal(conn, monkeypatch, no_network):
-    monkeypatch.setenv("SERP_API_KEY", SERP_KEY)
-    hl.retire_source("serp", "test wall", now=NOW)  # durable, session-long
+    monkeypatch.setenv("TAVILY_API_KEY", SERP_KEY)
+    hl.retire_source("tavily", "test wall", now=NOW)  # durable, session-long
 
     result = run("leads-discover")
     assert result.exit_code == 1
     payload = payload_of(result)
     assert payload["error"]["code"] == "source_retired"
-    assert "serp" in payload["error"]["details"]["retired"]
+    assert "tavily" in payload["error"]["details"]["retired"]
 
 
 # ---------------------------------------------------------------------------

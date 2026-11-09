@@ -1,20 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Hiring-lead discovery sources (hiring-leads spec art_u0YGUqpk §4).
 
-Two source adapters follow the Composio adapter shape (env-keyed client,
+Source adapters follow the Composio adapter shape (env-keyed client,
 retryable-status set with exponential backoff clamped to
 MAX_RATE_LIMIT_WAIT_SECONDS, injectable sleep for tests, B10 per-row
-guards): a SERP X-ray source (the default) and an optional Firecrawl
+guards): the X-ray sources — SERP and Tavily, selectable via
+leads.yaml ``provider`` (default tavily) — and an optional Firecrawl
 public-page source (off by default).
 
 Guardrails are structural, not conventional (spec locked decisions):
 
 - Discovery reads search-result METADATA and public non-LinkedIn pages
   only. No code path here fetches a linkedin.com page: the SERP client
-  talks to the SERP provider host, the Firecrawl client to the
-  Firecrawl API, and ``_refuse_linkedin_target`` runs before any request
-  is built. The person's browser is the only thing that ever touches
-  LinkedIn.
+  talks to the SERP provider host, the Tavily client to the Tavily API,
+  the Firecrawl client to the Firecrawl API, and
+  ``_refuse_linkedin_target`` runs before any request is built. The
+  person's browser is the only thing that ever touches LinkedIn.
 - Nothing is ever sent: this module holds no outreach code, and no
   LinkedIn credential is ever read or stored.
 - A bot-wall or CAPTCHA challenge retires a source terminally (recorded
@@ -22,8 +23,8 @@ Guardrails are structural, not conventional (spec locked decisions):
   the store's terminal-captcha policy.
 
 Typed refusals (LeadsRefusal) surface through the agent verbs as _fail
-envelopes: no_provider_key, quota_exhausted, no_high_match_companies,
-source_retired, company_unresolved.
+envelopes: no_provider_key, provider_unsupported, quota_exhausted,
+no_high_match_companies, source_retired, company_unresolved.
 """
 
 from __future__ import annotations
@@ -53,11 +54,12 @@ from kestrel.llm import MAX_RATE_LIMIT_WAIT_SECONDS
 
 log = logging.getLogger(__name__)
 
-# Firecrawl is strictly opt-in (spec §4): absent an explicit sources
-# argument, only the SERP X-ray runs.
-DEFAULT_SOURCES = ("serp",)
+# The default source set comes from config (leads.yaml ``provider``,
+# default tavily) — read by the discovery entrypoint, which refuses an
+# unknown name with the typed provider_unsupported refusal.
 
 _SERP_BASE_URL = "https://serpapi.com"
+_TAVILY_BASE_URL = "https://api.tavily.com"
 _FIRECRAWL_BASE_URL = "https://api.firecrawl.dev"
 _RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 _TIMEOUT_SECONDS = 30.0
@@ -68,6 +70,7 @@ _TIMEOUT_SECONDS = 30.0
 # ---------------------------------------------------------------------------
 
 NO_PROVIDER_KEY = "no_provider_key"
+PROVIDER_UNSUPPORTED = "provider_unsupported"
 QUOTA_EXHAUSTED = "quota_exhausted"
 NO_HIGH_MATCH_COMPANIES = "no_high_match_companies"
 SOURCE_RETIRED = "source_retired"
@@ -75,6 +78,7 @@ COMPANY_UNRESOLVED = "company_unresolved"
 
 ALL_REFUSALS = (
     NO_PROVIDER_KEY,
+    PROVIDER_UNSUPPORTED,
     QUOTA_EXHAUSTED,
     NO_HIGH_MATCH_COMPANIES,
     SOURCE_RETIRED,
@@ -206,29 +210,37 @@ def clean_profile_title(raw_title: object) -> str | None:
     return title or None
 
 
-def map_serp_result(raw: dict, company_key: str) -> dict:
-    """Map one SERP organic result to a hiring_leads row (pure).
+def map_search_result(*, link: str, title: object,
+                      company_key: str) -> dict:
+    """Map one search-provider result to a hiring_leads row (pure).
 
-    Reads only result metadata (title, link). Raises ValueError when the
-    result is not a usable LinkedIn-profile metadata hit — callers skip
-    the row and keep the batch alive (B10). Non-profile links (company
-    pages, posts) are filter, not error: they are simply not people.
+    Shared by the SERP and Tavily X-ray sources: both return result
+    METADATA (title, link) — never page fetches — so one mapping holds
+    the LinkedIn-only and tracker-stripping rules. Raises ValueError
+    when the result is not a usable LinkedIn-profile metadata hit —
+    callers skip the row and keep the batch alive (B10). Non-profile
+    links (company pages, posts) are filter, not error: they are simply
+    not people.
     """
-    link = str(raw.get("link") or "").strip()
+    link = str(link or "").strip()
     if not is_linkedin_profile_url(link):
         raise ValueError("result is not a linkedin.com/in profile link")
     parsed = urlparse(link)
     # Strip query/fragment (trackers) so the person key dedupes stably.
     profile_url = f"https://{parsed.hostname.lower()}{parsed.path.rstrip('/')}"
-    title = clean_profile_title(raw.get("title"))
+    cleaned = clean_profile_title(title)
     full_name = display_name_from_slug(profile_url)
-    if not title or not full_name:
+    if not cleaned or not full_name:
         raise ValueError("profile metadata lacks a usable title or name slug")
     return {
         "profile_url": profile_url,
         "full_name": full_name,
-        "title": title,
+        "title": cleaned,
         "company_key": company_key,
+        # The source column classifies the discovery surface (X-ray
+        # search metadata vs public page vs manual); the provider that
+        # served the metadata (serp | tavily) is configuration, not
+        # provenance, so both X-ray providers store the same label.
         "source": LEAD_SOURCE_SERP,
         # The search result is its own discovery surface; there is no
         # separate evidence page (and fetching one is out of bounds).
@@ -236,9 +248,21 @@ def map_serp_result(raw: dict, company_key: str) -> dict:
     }
 
 
+def map_serp_result(raw: dict, company_key: str) -> dict:
+    """Map one SERP organic result to a hiring_leads row (pure)."""
+    return map_search_result(link=raw.get("link"), title=raw.get("title"),
+                             company_key=company_key)
+
+
+def map_tavily_result(raw: dict, company_key: str) -> dict:
+    """Map one Tavily search result to a hiring_leads row (pure)."""
+    return map_search_result(link=raw.get("url"), title=raw.get("title"),
+                             company_key=company_key)
+
+
 def xray_query(display_name: str,
                taxonomy: tuple[str, ...] | list[str]) -> str:
-    """One X-ray query per company: role taxonomy OR-ed (spec §4).
+    """One SERP X-ray query per company: role taxonomy OR-ed (spec §4).
 
     site:-scoped so hits are LinkedIn profile metadata; the roles ride
     as quoted OR terms so one query covers the whole taxonomy instead
@@ -246,6 +270,20 @@ def xray_query(display_name: str,
     """
     roles = " OR ".join(f'"{term}"' for term in taxonomy)
     return f'site:linkedin.com/in "{display_name}" ({roles})'
+
+
+def xray_query_plain(display_name: str,
+                     taxonomy: tuple[str, ...] | list[str]) -> str:
+    """The Tavily X-ray query: the same taxonomy ORs, PLAIN text.
+
+    No ``site:`` prefix — Tavily does not guarantee search-operator
+    support, so the LinkedIn restriction rides in the request body as
+    ``include_domains=["linkedin.com"]`` (restrict mode) instead. The
+    adapter's host+path /in/ validation stays the final gate on every
+    result URL regardless of what the provider returned.
+    """
+    roles = " OR ".join(f'"{term}"' for term in taxonomy)
+    return f'"{display_name}" ({roles})'
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +368,7 @@ class SerpClient:
                 raise LeadsRefusal(
                     NO_PROVIDER_KEY,
                     "SERP provider rejected SERP_API_KEY — set a valid key",
-                    {"required_env": ["SERP_API_KEY"]})
+                    {"required_env": ["SERP_API_KEY"], "provider": "serp"})
             if (response.status_code in _RETRYABLE_STATUSES
                     and attempt < self._max_retries):
                 self._sleep(self._retry_wait_seconds(response, attempt))
@@ -373,6 +411,126 @@ class SerpClient:
                 return min(max(0.0, float(value)), MAX_RATE_LIMIT_WAIT_SECONDS)
             except ValueError:
                 log.debug("SERP Retry-After header not numeric: %r", value)
+        return self._backoff_seconds(attempt)
+
+
+class TavilyClient:
+    """Thin HTTP client for the Tavily search API — result metadata only.
+
+    Wire format (docs.tavily.com search endpoint): POST /search with a
+    JSON body of ``{query, include_domains, max_results, api_key}``;
+    the response's ``results[]`` carry ``title`` / ``url`` / ``content``.
+    Only the metadata is read — the profile pages themselves are never
+    fetched (spec locked decision).
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        base_url: str = _TAVILY_BASE_URL,
+        timeout: float = _TIMEOUT_SECONDS,
+        transport: httpx.BaseTransport | None = None,
+        max_retries: int = 2,
+        backoff_base: float = 2.0,
+        sleep: Callable[[float], None] = time.sleep,
+    ):
+        if not api_key:
+            raise ValueError("Tavily API key is required (TAVILY_API_KEY)")
+        self._api_key = api_key
+        self._max_retries = max_retries
+        self._backoff_base = backoff_base
+        self._sleep = sleep
+        self._http = httpx.Client(
+            base_url=base_url.rstrip("/"),
+            timeout=timeout,
+            transport=transport,
+        )
+
+    def __enter__(self) -> "TavilyClient":
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
+
+    def close(self) -> None:
+        self._http.close()
+
+    def search_results(self, query: str, *,
+                       include_domains: list[str],
+                       max_results: int) -> list[dict]:
+        """Search-result metadata for one query — never page fetches."""
+        body = self._request("POST", "/search", {
+            "query": query,
+            "include_domains": list(include_domains),
+            "max_results": max_results,
+            "api_key": self._api_key,
+        })
+        results = body.get("results")
+        if not isinstance(results, list):
+            return []
+        return [r for r in results if isinstance(r, dict)]
+
+    # -- Transport (same shape as SerpClient) -------------------------------
+
+    def _request(self, method: str, path: str, payload: dict) -> dict:
+        for attempt in range(self._max_retries + 1):
+            try:
+                response = self._http.request(method, path, json=payload)
+            except httpx.TransportError as exc:
+                if attempt >= self._max_retries:
+                    raise HiringLeadsError(
+                        f"Tavily request failed: {type(exc).__name__}") from exc
+                self._sleep(self._backoff_seconds(attempt))
+                continue
+            if response.status_code == 403:
+                raise SourceRetired("Tavily served a block (HTTP 403)")
+            if response.status_code == 401:
+                raise LeadsRefusal(
+                    NO_PROVIDER_KEY,
+                    "Tavily rejected TAVILY_API_KEY — set a valid key",
+                    {"required_env": ["TAVILY_API_KEY"],
+                     "provider": "tavily"})
+            if (response.status_code in _RETRYABLE_STATUSES
+                    and attempt < self._max_retries):
+                self._sleep(self._retry_wait_seconds(response, attempt))
+                continue
+            return self._parse_response(response)
+        raise HiringLeadsError("Tavily request retry loop exited unexpectedly")
+
+    def _parse_response(self, response: httpx.Response) -> dict:
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise HiringLeadsError(
+                f"Tavily returned non-JSON response "
+                f"(HTTP {response.status_code})") from exc
+        if not isinstance(body, dict):
+            raise HiringLeadsError(
+                f"Tavily returned an unexpected response shape "
+                f"(HTTP {response.status_code})")
+        if not response.is_success:
+            raise HiringLeadsError(
+                f"Tavily returned HTTP {response.status_code}")
+        error = body.get("error")
+        if isinstance(error, str) and error.strip():
+            raise HiringLeadsError(f"Tavily error: {error}")
+        return body
+
+    def _backoff_seconds(self, attempt: int) -> float:
+        return min(self._backoff_base * (2 ** attempt),
+                   MAX_RATE_LIMIT_WAIT_SECONDS)
+
+    def _retry_wait_seconds(self, response: httpx.Response,
+                            attempt: int) -> float:
+        """Rate-limit wait: Retry-After hint, clamped to the shared ceiling
+        so a bogus epoch header cannot sleep for years."""
+        value = response.headers.get("retry-after")
+        if value:
+            try:
+                return min(max(0.0, float(value)), MAX_RATE_LIMIT_WAIT_SECONDS)
+            except ValueError:
+                log.debug("Tavily Retry-After header not numeric: %r", value)
         return self._backoff_seconds(attempt)
 
 
@@ -445,7 +603,8 @@ class FirecrawlClient:
                 raise LeadsRefusal(
                     NO_PROVIDER_KEY,
                     "Firecrawl rejected FIRECRAWL_API_KEY — set a valid key",
-                    {"required_env": ["FIRECRAWL_API_KEY"]})
+                    {"required_env": ["FIRECRAWL_API_KEY"],
+                     "provider": "firecrawl"})
             if (response.status_code in _RETRYABLE_STATUSES
                     and attempt < self._max_retries):
                 self._sleep(self._backoff_seconds(attempt))
@@ -527,6 +686,62 @@ class SerpXRaySource:
         return leads
 
 
+class TavilyXRaySource:
+    """X-ray source over the Tavily search API — result metadata only.
+
+    Builds the same role-taxonomy X-ray queries as the SERP source but
+    as PLAIN query text (no ``site:`` prefix — Tavily does not
+    guarantee operator support); the LinkedIn restriction rides in the
+    request body as ``include_domains=["linkedin.com"]``. The
+    host+path /in/ validation inside ``map_tavily_result`` remains the
+    final gate: a result that fails it is dropped, not trusted.
+    """
+
+    name = "tavily"
+    # Same surface class as the SERP source: search-engine X-ray
+    # metadata. The provider is configuration, not provenance.
+    source_label = LEAD_SOURCE_SERP
+
+    def __init__(self,
+                 client: TavilyClient | None = None,
+                 *,
+                 max_results: int | None = None,
+                 taxonomy: tuple[str, ...] | list[str] | None = None,
+                 sleep: Callable[[float], None] = time.sleep):
+        if client is None:
+            key = os.getenv("TAVILY_API_KEY", "").strip()
+            if not key:
+                # Before any network call: the refusal names the provider
+                # it wanted and the exact fix.
+                raise LeadsRefusal(
+                    NO_PROVIDER_KEY,
+                    "TAVILY_API_KEY is not set — export it to enable "
+                    "hiring-lead discovery via the Tavily provider",
+                    {"required_env": ["TAVILY_API_KEY"],
+                     "provider": "tavily"})
+            client = TavilyClient(key, sleep=sleep)
+        self._client = client
+        self._max_results = (max_results
+                             if max_results is not None
+                             else config.leads_tavily_max_results())
+        self._taxonomy = (tuple(taxonomy) if taxonomy is not None
+                          else config.leads_role_taxonomy())
+
+    def discover_for_company(self, company: dict) -> list[dict]:
+        query = xray_query_plain(company["display_name"], self._taxonomy)
+        raw_results = self._client.search_results(
+            query, include_domains=[_LINKEDIN_HOST_SUFFIX],
+            max_results=self._max_results)
+        leads: list[dict] = []
+        for raw in raw_results:
+            try:
+                leads.append(map_tavily_result(raw, company["company_key"]))
+            except ValueError as exc:
+                # B10, same as the SERP source: dropped, not trusted.
+                log.debug("Skipping unusable Tavily result: %s", exc)
+        return leads
+
+
 class FirecrawlPageSource:
     """Public careers/team pages via Firecrawl — off by default (spec §4).
 
@@ -562,7 +777,8 @@ class FirecrawlPageSource:
                     NO_PROVIDER_KEY,
                     "FIRECRAWL_API_KEY is not set — export it to enable "
                     "public-page discovery",
-                    {"required_env": ["FIRECRAWL_API_KEY"]})
+                    {"required_env": ["FIRECRAWL_API_KEY"],
+                     "provider": "firecrawl"})
             client = FirecrawlClient(key, sleep=sleep)
         self._client = client
         self._taxonomy = (tuple(taxonomy) if taxonomy is not None
@@ -585,6 +801,7 @@ class FirecrawlPageSource:
 
 SOURCE_BUILDERS: dict[str, type] = {
     "serp": SerpXRaySource,
+    "tavily": TavilyXRaySource,
     "firecrawl": FirecrawlPageSource,
 }
 
@@ -749,16 +966,29 @@ def discover_hiring_leads(conn: sqlite3.Connection | None = None,
     contract. ``limit`` caps the companies scanned this run (provider
     spend), highest fit first.
 
-    Sources default to the SERP X-ray only; Firecrawl is opt-in by
-    explicit name plus its config flag. Unavailable requested sources
-    are skipped with a warning when at least one other source can run;
-    the typed refusals raise LeadsRefusal otherwise. Returns the payload
-    dict the agent verb prints.
+    Sources default to the configured provider (leads.yaml
+    ``provider``, default tavily — the X-ray source); Firecrawl is
+    opt-in by explicit name plus its config flag. An unknown configured
+    provider is the typed provider_unsupported refusal. Unavailable
+    requested sources are skipped with a warning when at least one
+    other source can run; the typed refusals raise LeadsRefusal
+    otherwise. Returns the payload dict the agent verb prints.
     """
     if conn is None:
         conn = get_connection()
     now = now or datetime.now(timezone.utc)
-    requested = tuple(sources) if sources else DEFAULT_SOURCES
+    if sources:
+        requested = tuple(sources)
+    else:
+        provider = config.leads_provider()
+        if provider not in SOURCE_BUILDERS:
+            raise LeadsRefusal(
+                PROVIDER_UNSUPPORTED,
+                f"leads.yaml provider {provider!r} is not supported — "
+                f"known providers: {', '.join(sorted(SOURCE_BUILDERS))}",
+                {"provider": provider,
+                 "known_providers": sorted(SOURCE_BUILDERS)})
+        requested = (provider,)
 
     # Everything checkable without the network is checked first: cap,
     # provider keys/config gates, retirements, company identity.

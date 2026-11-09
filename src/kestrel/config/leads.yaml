@@ -1,6 +1,12 @@
 # Hiring-leads configuration (spec art_u0YGUqpk).
 # Copy to ~/.kestrel/leads.yaml to override.
 #
+# Search provider that runs X-ray lead discovery: serp | tavily.
+# Default tavily per the user's provider decision (Tavily free tier:
+# 1,000 credits/month, basic search = 1 credit). Key: TAVILY_API_KEY
+# (tavily) or SERP_API_KEY (serp).
+provider: tavily
+
 # A company is high-match when MAX(fit_score) across its member jobs
 # reaches min_company_fit and at least one member job is scored.
 # Scale note: the job scorer scores 1-10 — size this threshold to the
@@ -25,6 +31,9 @@ role_taxonomy:
 serp:
   provider: serpapi # SerpAPI-compatible wire format; key: SERP_API_KEY
   results_per_query: 10
+
+tavily:
+  max_results: 10 # results per X-ray query; key: TAVILY_API_KEY
 
 firecrawl:
   enabled: false # opt-in; public careers/team pages only, never
