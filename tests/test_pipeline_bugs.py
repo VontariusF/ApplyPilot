@@ -452,6 +452,62 @@ def test_b11_location_filters_handles_absent_and_none():
     assert location_filters({"location_accept": None}) == ([], [])
 
 
+# Dogfood 2026-11-09: only the flat keys were read, so both other config
+# shapes silently disabled location filtering — a wizard-generated config
+# stored ~3,350 out-of-area employer-site jobs.
+
+
+def test_b11_example_file_nested_shape_is_read():
+    from kestrel.discovery.filters import location_filters
+
+    cfg = {"location": {"accept_patterns": ["San Francisco"],
+                        "reject_patterns": ["London"]}}
+    assert location_filters(cfg) == (["San Francisco"], ["London"])
+
+
+def test_b11_wizard_shape_derives_accept_patterns():
+    from kestrel.discovery.filters import location_filters
+
+    cfg = {"locations": [{"location": "New York, NY", "remote": False},
+                         {"location": "Remote", "remote": True}]}
+    accept, reject = location_filters(cfg)
+    # Full string plus each comma part; the Remote entry contributes
+    # nothing (remote jobs always pass).
+    assert accept == ["New York, NY", "New York", "NY"]
+    assert reject == []
+
+
+def test_b11_wizard_shape_falls_back_to_defaults_location():
+    from kestrel.discovery.filters import location_filters
+
+    cfg = {"defaults": {"location": "Austin, TX"}}
+    assert location_filters(cfg)[0] == ["Austin, TX", "Austin", "TX"]
+
+
+def test_b11_flat_keys_win_over_derived_and_nested():
+    from kestrel.discovery.filters import location_filters
+
+    cfg = {"location_accept": [],
+           "location_reject_non_remote": ["London"],
+           "location": {"accept_patterns": ["SF"]},
+           "locations": [{"location": "Austin, TX"}]}
+    # Explicit flat keys — even an empty accept list — keep B11 semantics.
+    assert location_filters(cfg) == ([], ["London"])
+
+
+def test_b11_derived_patterns_filter_workday_postings():
+    from kestrel.discovery.filters import location_filters, location_ok
+
+    cfg = {"locations": [{"location": "New York, NY", "remote": False}]}
+    accept, reject = location_filters(cfg)
+
+    assert location_ok("New York, NY, USA", accept, reject) is True
+    assert location_ok("Brooklyn, NY", accept, reject) is True
+    assert location_ok("Santa Clara, CA, USA", accept, reject) is False
+    assert location_ok("Bangalore, India", accept, reject) is False
+    assert location_ok("Remote — NYC", accept, reject) is True
+
+
 def test_b11_all_sources_share_one_implementation(jobspy_stub):
     from kestrel.discovery import jobspy as jobspy_mod
     from kestrel.discovery import workday as workday_mod
