@@ -9,6 +9,14 @@ falls back to the configured LLM provider (the A1 reversal, applied at
 runtime). If neither backend exists, the portal shows setup instructions
 rather than a dead end.
 
+The third backend needs no setup at all: "host" (the agent-protocol
+route, spec art_v7WOlPfz + W0) makes the DRIVING AGENT the interviewer —
+the protocol hands it the agenda and records what it composes
+(`record_answer` for the guided questions, `send_message` for free-form
+turns), and the service layer makes zero LLM/Claude calls. The claude
+and provider backends stay exactly as they were, for users who want
+Kestrel-composed reply text; the portal never selects "host".
+
 State lives in ~/.kestrel/onboarding-state.json (0600 via
 write_secret_text — it holds resume text and preference answers), so a
 portal restart never loses an in-flight interview.
@@ -1776,13 +1784,17 @@ def send_message(text: str) -> InterviewState:
         if state is None or state.phase != INTERVIEW:
             raise OnboardingError("the interview is not active")
         if state.backend == "host":
-            # Free-form chat stays backend-only in host mode (spec
-            # art_v7WOlPfz): no canned echo, no local reply generation — the
-            # host agent is the interlocutor and drives the guided agenda.
-            # "interview backend" maps to the provider_setup protocol code.
-            raise OnboardingError(
-                "free-form chat needs an interview backend — drive the wizard "
-                "with agent answer / resume / review instead.")
+            # Host-driven interview (spec art_v7WOlPfz + W0): the driving
+            # agent IS the interlocutor. The message records as the user
+            # turn and no backend turn runs — there is nothing here to
+            # compute a reply, and the host composes its next question
+            # from the returned payload's agenda. The pending resume
+            # context stays queued: no backend turn ever spends it (the
+            # driver reads the document via `agent next --reveal`).
+            state.messages.append({"role": _ROLE_USER, "content": text})
+            state.error = None
+            save_state(state)
+            return state
         state.messages.append({"role": _ROLE_USER, "content": text})
         prompt = text
         context = state.pending_context
@@ -2175,13 +2187,6 @@ def set_agent_led(enabled: bool) -> InterviewState:
         state = load_state()
         if state is None or state.phase != INTERVIEW:
             raise OnboardingError("the interview is not active")
-        if enabled and state.backend == "host":
-            # Agent-led mode is free-form chat (send_message's channel) —
-            # it stays backend-only in host mode, like send (spec
-            # art_v7WOlPfz): no backend exists to take the directive turn.
-            raise OnboardingError(
-                "agent-led free-form chat needs an interview backend — drive "
-                "the wizard with agent answer / resume / review instead.")
         if (state.mode == MODE_AGENT) == enabled:
             # Idempotent — double-clicks and stale tabs — except that
             # returning to buttons with an empty agenda is the one exit
@@ -2197,6 +2202,18 @@ def set_agent_led(enabled: bool) -> InterviewState:
             save_state(state)
             return state
         save_state(state)
+        if state.backend == "host":
+            # Host mode: no backend exists to take the directive turn —
+            # the driving agent reads the new mode from the returned
+            # payload and conducts the agenda itself (W0). The note marks
+            # the switch where a backend ack would have gone.
+            _note(state, "Switched to agent-led: the host agent asks in its "
+                         "own words now (host-driven, no backend ack)."
+                  if enabled else
+                  "Switched back to the guided questions (host-driven, no "
+                  "backend ack).")
+            save_state(state)
+            return state
         if enabled:
             remaining = ", ".join(spec.prompt.strip("?") for spec in remaining_questions(state))
             directive = _AGENT_LED_DIRECTIVE.format(fields=remaining or "anything the profile still needs")
