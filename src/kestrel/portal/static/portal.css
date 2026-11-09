@@ -1,4 +1,4 @@
-/* ApplyPilot portal — single stylesheet, no build step.
+/* Kestrel portal — single stylesheet, no build step.
  *
  * Token-driven (spec PR G, D4): design tokens first, components after.
  * Light theme is the default on :root; dark applies under
@@ -50,12 +50,13 @@
   --ink-2: #56616c;
   --ink-3: #8a939e;
 
-  /* One restrained accent */
-  --accent: #2b5fd9;
-  --accent-hover: #1f4ab8;
+  /* Brand accent — Rufous per the Kestrel brand kit (kit v1.0: hover/pressed
+   * #B44F1E). Applies to every interactive element via the --accent tokens. */
+  --accent: #d2622a;
+  --accent-hover: #b44f1e;
   --accent-ink: #ffffff;
-  --accent-soft: #eaf0fd;
-  --accent-border: #c4d5f6;
+  --accent-soft: #faece3;
+  --accent-border: #ecc7ae;
 
   /* Status (muted text-on-tint) */
   --ok: #1a7f37;
@@ -68,7 +69,7 @@
   --info-bg: #e9f1fc;
 
   /* Focus */
-  --focus-ring: 0 0 0 3px rgba(43, 95, 217, 0.22);
+  --focus-ring: 0 0 0 3px rgba(210, 98, 42, 0.25);
 
   /* Code surfaces */
   --code-bg: #f6f8fa;
@@ -86,11 +87,12 @@
   --ink-2: #a2adb9;
   --ink-3: #75828f;
 
-  --accent: #6f97ea;
-  --accent-hover: #86a9f0;
-  --accent-ink: #0d1521;
-  --accent-soft: #1c2a44;
-  --accent-border: #31456e;
+  /* Rufous, lightened for dark surfaces (brand kit pairing). */
+  --accent: #e08a54;
+  --accent-hover: #eda273;
+  --accent-ink: #241209;
+  --accent-soft: #33200f;
+  --accent-border: #5e3a1e;
 
   --ok: #63c184;
   --ok-bg: #17301f;
@@ -102,7 +104,7 @@
   --info-bg: #1a2a44;
 
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --focus-ring: 0 0 0 3px rgba(111, 151, 234, 0.35);
+  --focus-ring: 0 0 0 3px rgba(224, 138, 84, 0.35);
 
   --code-bg: #10171f;
   --log-bg: #0a0f15;
@@ -120,11 +122,12 @@
     --ink-2: #a2adb9;
     --ink-3: #75828f;
 
-    --accent: #6f97ea;
-    --accent-hover: #86a9f0;
-    --accent-ink: #0d1521;
-    --accent-soft: #1c2a44;
-    --accent-border: #31456e;
+    /* Rufous, lightened for dark surfaces (brand kit pairing). */
+    --accent: #e08a54;
+    --accent-hover: #eda273;
+    --accent-ink: #241209;
+    --accent-soft: #33200f;
+    --accent-border: #5e3a1e;
 
     --ok: #63c184;
     --ok-bg: #17301f;
@@ -136,7 +139,7 @@
     --info-bg: #1a2a44;
 
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
-    --focus-ring: 0 0 0 3px rgba(111, 151, 234, 0.35);
+    --focus-ring: 0 0 0 3px rgba(224, 138, 84, 0.35);
 
     --code-bg: #10171f;
     --log-bg: #0a0f15;
@@ -201,7 +204,9 @@ h3:first-child { margin-top: 0; }
 }
 
 .sidebar-brand {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   font-size: var(--text-lg);
   font-weight: 700;
   letter-spacing: -0.01em;
@@ -209,7 +214,8 @@ h3:first-child { margin-top: 0; }
   padding: var(--space-1) var(--space-3) var(--space-4);
 }
 .sidebar-brand:hover { text-decoration: none; }
-.sidebar-brand .brand-pilot { color: var(--accent); }
+/* The mark is the drawn brand art (brand kit v1.0) — fixed square, no tint. */
+.sidebar-brand .brand-mark { width: 26px; height: 26px; flex-shrink: 0; }
 
 .side-nav { display: flex; flex-direction: column; gap: 2px; }
 .side-nav a {
