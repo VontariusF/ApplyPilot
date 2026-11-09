@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -293,9 +294,28 @@ def count_queue_exclusions(min_score: int = 7) -> dict[str, int]:
     return excluded
 
 
+# F8 (audit art_YLnPMn0i): host-path claim tokens. A `claim:`-prefixed UUID
+# stamped into apply_task_id at lock time is a one-time ownership proof: only
+# the holder of the token can report the outcome. The prefix is deliberately
+# distinguishable from every pre-existing marker value — 'reclaimed',
+# 'manual-applied'/'manual-failed', and real engine task ids — so old stores
+# and the engine paths keep their exact prior behavior.
+CLAIM_TOKEN_PREFIX = "claim:"
+
+
+class ClaimMismatch(RuntimeError):
+    """mark_result was called with a --claim that does not own the lock."""
+
+
+def new_claim_token() -> str:
+    """One-time claim token for a fresh host-path apply lock."""
+    return f"{CLAIM_TOKEN_PREFIX}{uuid.uuid4()}"
+
+
 def acquire_job(target_url: str | None = None, min_score: int = 7,
                 worker_id: int = 0, agent_label: str = "claude",
-                allowed_urls: set[str] | None = None) -> dict | None:
+                allowed_urls: set[str] | None = None,
+                claim_token: bool = False) -> dict | None:
     """Atomically acquire the next job to apply to.
 
     Args:
@@ -306,6 +326,10 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
         allowed_urls: Gate 2 pin — when set (with no target_url), the queue
             is narrowed to exactly these URLs: a confirmed plan's batch is
             the batch that runs. Same transaction, same lock path.
+        claim_token: Stamp a one-time `claim:<uuid>` ownership token into
+            apply_task_id and return it as job["claim"] — the host protocol's
+            apply-acquire path (audit F8). Engine paths leave it False and
+            keep the exact prior apply_task_id behavior.
 
     Returns:
         Job dict or None if the queue is empty.
@@ -380,6 +404,23 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
             return None
 
         now = datetime.now(timezone.utc).isoformat()
+        # F8: the host path stamps a fresh one-time claim token on every
+        # acquisition — a stale-lock reclaim included. The displaced
+        # holder's token stops matching (its report is refused), the
+        # host-path analogue of the engine path's 'reclaimed' marker below;
+        # with an ownership token the lost-race write is prevented outright
+        # instead of merely noted. Engine paths (claim_token=False) keep
+        # the exact prior CASE behavior.
+        claim = new_claim_token() if claim_token else None
+        if claim_token:
+            task_clause = "apply_task_id = ?"
+            params: list[object] = [f"{agent_label}-worker-{worker_id}", now, claim]
+        else:
+            task_clause = ("apply_task_id = CASE WHEN apply_status = 'in_progress' "
+                           "THEN 'reclaimed' ELSE apply_task_id END")
+            # No placeholder in this clause — the engine path binds three
+            # values, not four.
+            params = [f"{agent_label}-worker-{worker_id}", now]
         # P2-1: reclaiming a stale lock marks the row, so the reclaiming
         # worker's result is distinguishable from a human mark when the
         # original worker finally reports (a lost race, not a conflict).
@@ -393,21 +434,21 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
         # (mark_result) counts that attempt, so a normal failed cycle
         # costs exactly one, and the F-3 refund reverses a reclaim
         # increment on an environment failure.
-        conn.execute("""
+        conn.execute(f"""
             UPDATE jobs SET apply_status = 'in_progress',
                            agent_id = ?,
                            last_attempted_at = ?,
                            apply_attempts = CASE WHEN apply_status = 'in_progress'
                                                  THEN COALESCE(apply_attempts, 0) + 1
                                                  ELSE apply_attempts END,
-                           apply_task_id = CASE WHEN apply_status = 'in_progress'
-                                                THEN 'reclaimed'
-                                                ELSE apply_task_id END
+                           {task_clause}
             WHERE url = ?
-        """, (f"{agent_label}-worker-{worker_id}", now, row["url"]))
+        """, [*params, row["url"]])
         conn.commit()
 
         job = dict(row)
+        if claim:
+            job["claim"] = claim
         # Apply-time snapshot (spec D3): pin the document versions this worker
         # will upload so mark_result can record what was actually sent. None
         # for pre-history documents is stored honestly.
@@ -449,12 +490,21 @@ def mark_result(url: str, status: str, error: str | None = None,
                 permanent: bool = False, duration_ms: int | None = None,
                 task_id: str | None = None,
                 resume_version_id: int | None = None,
-                cover_version_id: int | None = None) -> str:
+                cover_version_id: int | None = None,
+                claim: str | None = None) -> str:
     """Record a worker's apply outcome with writer coordination (fix 5).
 
     On 'applied', records the apply-time snapshot (spec D3): the version ids
     of the documents the worker actually uploaded. None means the document
     had no version row (pre-history or history disabled) — stored as NULL.
+
+    Ownership (audit F8): when the locked row's apply_task_id carries a
+    `claim:<uuid>` token (stamped by acquire_job's claim_token path),
+    `claim` must match it or ClaimMismatch is raised before any write —
+    the token is one-time, cleared by the recording UPDATE. Rows holding
+    anything else (NULL, 'reclaimed', 'manual-*' markers, engine task ids:
+    old stores and engine paths) keep the exact pre-claim behavior — no
+    ownership check exists for them, so they stay reportable as before.
 
     Coordination rule: the later writer wins only over matching state.
 
@@ -478,6 +528,18 @@ def mark_result(url: str, status: str, error: str | None = None,
     if row is None:
         conn.rollback()
         return "recorded"  # job vanished (e.g. removed mid-run) — nothing to write
+
+    # F8: ownership check before any write (see the docstring). Claim-token
+    # rows only exist on the host protocol's path; everything else — the
+    # engine paths and pre-claim stores — is untouched by this branch.
+    stored_claim = row["apply_task_id"]
+    if (isinstance(stored_claim, str)
+            and stored_claim.startswith(CLAIM_TOKEN_PREFIX)
+            and stored_claim != claim):
+        conn.rollback()
+        raise ClaimMismatch(
+            f"{url} is locked under a different claim token — re-acquire it "
+            "with `agent apply-acquire` and report with the returned claim")
 
     # P2-1: a 'reclaimed' marker means a B4 stale-lock reclaim happened while
     # the reporting worker believed it still held the job. Its report is a
