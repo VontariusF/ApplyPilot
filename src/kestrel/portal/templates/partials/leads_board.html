@@ -1,0 +1,25 @@
+<div id="leads-board">
+  {# Swap target for the mark actions (spec §6). Same composition as the
+     jobs board: chips live on the page, this partial owns the cards so
+     an htmx mark POST re-renders just the grid. #}
+  {% if toast_message %}
+  <div class="toast {{ toast_kind or 'info' }}" role="status">{{ toast_message }}</div>
+  {% endif %}
+  <p class="result-count">{{ total_leads }} lead{{ "" if total_leads == 1 else "s" }} in this view</p>
+  {% if leads %}
+  <div class="card-grid">
+    {% for lead in leads %}{% with uid = "lead-" ~ loop.index %}{% include "partials/lead_card.html" %}{% endwith %}{% endfor %}
+  </div>
+  {% elif total_all_leads == 0 %}
+  <div class="empty-state">
+    <p><strong>No hiring leads yet.</strong> Run discovery against your high-match companies:</p>
+    <p><code>kestrel-agent leads-discover</code></p>
+    <p class="dim">Leads appear here as cards. Connecting is always your move — Kestrel stops at the profile.</p>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <p>No leads in this view.</p>
+    <a class="button secondary-button" href="/leads?status=all">All leads</a>
+  </div>
+  {% endif %}
+</div>

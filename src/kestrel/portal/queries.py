@@ -3,7 +3,28 @@
 
 import re
 
-from kestrel.database import STAGE_CONDITIONS, get_connection
+from kestrel import config
+from kestrel.database import (LEAD_STATUS_CONNECTED, LEAD_STATUS_DISMISSED,
+                               LEAD_STATUS_DISCOVERED, STAGE_CONDITIONS,
+                               get_connection)
+
+# Valid mark targets for POST /leads/mark (spec §6): the two decided
+# statuses. "discovered" is ingestion, never a decision — the shared
+# write path (database.mark_hiring_lead) refuses it too. Derived from
+# the shared vocabulary, never a local copy.
+LEAD_MARK_STATUSES = (LEAD_STATUS_DISMISSED, LEAD_STATUS_CONNECTED)
+
+# Chips for the leads board's status views, in canonical vocabulary order
+# (spec §3: three states, no outreach state machine) plus the "all" view,
+# whose value "" means no status filter.
+LEAD_STATUS_VIEWS = (("discovered", LEAD_STATUS_DISCOVERED),
+                     ("dismissed", LEAD_STATUS_DISMISSED),
+                     ("connected", LEAD_STATUS_CONNECTED),
+                     ("all", ""))
+
+# The board's default view: the discovered queue (spec §6 — the person
+# works down fresh leads; dismissed/connected history sits behind chips).
+LEADS_DEFAULT_VIEW = LEAD_STATUS_DISCOVERED
 
 # Stage filter keys for the Jobs page — mirrors get_jobs_by_stage's
 # condition registry, plus a row-count subquery for the outcome feed.
@@ -320,3 +341,70 @@ def dismissed_count() -> int:
 def count_jobs() -> int:
     """Total rows in the store — the empty state's 'why it's empty' signal."""
     return get_connection().execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+
+
+# ---------------------------------------------------------------------------
+# Hiring-lead board (hiring-leads spec art_u0YGUqpk §6)
+# ---------------------------------------------------------------------------
+
+_LEAD_LIST_COLUMNS = (
+    "l.profile_url, l.full_name, l.title, l.company_key, l.source, "
+    "l.evidence_url, l.last_status, l.discovered_at, l.decided_at, "
+    "c.display_name AS company_display, c.fit_score AS company_fit"
+)
+
+
+def stored_leads(status: str = "") -> list[dict]:
+    """Leads for the /leads board, newest first (spec §6).
+
+    Joins company_identity by convention (the store enforces no FKs) so
+    each card shows the company's display name and its MAX fit score;
+    a lead whose company key has no identity row yet still renders,
+    falling back to the raw key. `status` filters to one lead state —
+    the board chips' vocabulary; empty means all.
+    """
+    where, params = "", []
+    if status:
+        where = " WHERE l.last_status = ?"
+        params.append(status)
+    rows = get_connection().execute(
+        f"SELECT {_LEAD_LIST_COLUMNS} FROM hiring_leads l "
+        "LEFT JOIN company_identity c ON c.company_key = l.company_key"
+        f"{where} ORDER BY l.discovered_at DESC, l.profile_url",
+        params,
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def count_leads(status: str = "") -> int:
+    """How many leads a board view holds — the pagination/count line."""
+    if status:
+        row = get_connection().execute(
+            "SELECT COUNT(*) FROM hiring_leads WHERE last_status = ?",
+            (status,),
+        ).fetchone()
+    else:
+        row = get_connection().execute(
+            "SELECT COUNT(*) FROM hiring_leads").fetchone()
+    return row[0]
+
+
+def matched_role(title: str | None,
+                 taxonomy: tuple[str, ...] | list[str] | None = None) -> str | None:
+    """The role-taxonomy term a lead's title hits, first match wins.
+
+    Pure so the board annotation is testable without a store. Case-
+    insensitive substring, matching the adapters' deliberately shallow
+    page-text rule (discovery/hiring_leads.py). A lead with no taxonomy
+    hit (source 'manual', or a title the taxonomy does not name) renders
+    no role badge — honest absence, not a guess.
+    """
+    if taxonomy is None:
+        taxonomy = config.leads_role_taxonomy()
+    if not title:
+        return None
+    lowered = title.lower()
+    for term in taxonomy:
+        if term.lower() in lowered:
+            return term
+    return None

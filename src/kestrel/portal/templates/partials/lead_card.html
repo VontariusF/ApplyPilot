@@ -1,0 +1,42 @@
+{# One hiring-lead card (hiring-leads spec art_u0YGUqpk §6). Displays the
+   person, their title, the company and its fit score, the role-taxonomy
+   hit, and a plain "Open on LinkedIn" href — the user's click in their
+   own browser; Kestrel never contacts anyone. Actions record the user's
+   decision (dismissed / connected) via the shared vocabulary. #}
+<article class="job-card lead-card">
+  <header class="card-head">
+    {% if lead.company_fit is not none %}
+    <span class="score-pill {{ 'hot' if lead.company_fit >= 8 else 'warm' if lead.company_fit >= 6 else 'cool' }}"
+          title="Best fit score across the company's discovered jobs">{{ lead.company_fit | int }}/10</span>
+    {% endif %}
+    <span class="badge {{ lead.last_status }}">{{ lead.last_status }}</span>
+    <span class="badge source" title="Where this lead was found">{{ lead.source }}</span>
+  </header>
+  <h3 class="card-title">{{ lead.full_name }}</h3>
+  <p class="card-meta">
+    <span>{{ lead.title }}</span>
+    {% if lead.matched_role %}<span class="role-hit" title="Matches the hiring-lead role taxonomy">{{ lead.matched_role }}</span>{% endif %}
+  </p>
+  <p class="card-facts">
+    <span class="card-site">{{ lead.company_display or lead.company_key }}</span>
+    {% if lead.discovered_at %}<span class="card-age dim">discovered {{ lead.discovered_at | age }}</span>{% endif %}
+    {% if lead.evidence_url %}<a class="card-evidence" href="{{ lead.evidence_url }}" target="_blank" rel="noopener noreferrer">evidence</a>{% endif %}
+  </p>
+  <div class="card-actions">
+    <a class="button" href="{{ lead.profile_url }}"
+       target="_blank" rel="noopener noreferrer"
+       title="Opens in your browser, on your account — Kestrel never sends anything">Open on LinkedIn</a>
+    <form hx-post="/leads/mark" hx-target="#leads-board" hx-swap="outerHTML">
+      <input type="hidden" name="profile_url" value="{{ lead.profile_url }}">
+      <input type="hidden" name="status" value="dismissed">
+      <input type="hidden" name="view" value="{{ status }}">
+      <button type="submit" class="secondary">Dismiss</button>
+    </form>
+    <form hx-post="/leads/mark" hx-target="#leads-board" hx-swap="outerHTML">
+      <input type="hidden" name="profile_url" value="{{ lead.profile_url }}">
+      <input type="hidden" name="status" value="connected">
+      <input type="hidden" name="view" value="{{ status }}">
+      <button type="submit">Connected</button>
+    </form>
+  </div>
+</article>

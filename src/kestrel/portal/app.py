@@ -478,6 +478,95 @@ def create_app() -> FastAPI:
         return RedirectResponse("/jobs", status_code=303)
 
     # ------------------------------------------------------------------
+    # Hiring-lead board (hiring-leads spec art_u0YGUqpk §6)
+    #
+    # Read-only display plus exactly one user-driven write: marking a
+    # lead dismissed or connected. No outbound anything exists on this
+    # board — "Open on LinkedIn" is a plain href the person clicks in
+    # their own browser, on their own account.
+    # ------------------------------------------------------------------
+
+    def _leads_view_param(raw: str) -> str:
+        """Resolve a ?status= param to a stored_leads filter value.
+
+        The default view is the discovered queue; "all" (or anything
+        unrecognized) means no filter. Vocabulary membership rides the
+        shared constants.
+        """
+        raw = (raw or "").strip().lower()
+        if raw == "all":
+            return ""
+        if raw in database.LEAD_STATUSES:
+            return raw
+        return queries.LEADS_DEFAULT_VIEW
+
+    def _leads_context(status: str) -> dict:
+        """Shared board context for the page and the htmx partial.
+
+        `status` here is the stored_leads filter ("" = all views); the
+        unfiltered count rides along so an empty view can say whether
+        the store itself is empty.
+        """
+        leads = queries.stored_leads(status)
+        for lead in leads:
+            lead["matched_role"] = queries.matched_role(lead["title"])
+        return {"leads": leads, "status": status,
+                "total_leads": queries.count_leads(status),
+                "total_all_leads": queries.count_leads()}
+
+    def _lead_chip_links(status: str) -> list[dict]:
+        """Status-view chips built from the shared vocabulary tuple."""
+        return [{"label": label.capitalize(),
+                 "href": "/leads" if value == queries.LEADS_DEFAULT_VIEW
+                 else f"/leads?status={value}",
+                 "active": value == status}
+                for label, value in queries.LEAD_STATUS_VIEWS]
+
+    @app.get("/leads", response_class=HTMLResponse)
+    async def leads_page(request: Request):
+        """The leads board: discovered people at high-match companies."""
+        status = _leads_view_param(request.query_params.get("status", ""))
+        return _render(request, "leads.html",
+                       chip_links=_lead_chip_links(status),
+                       **_leads_context(status))
+
+    @app.get("/leads/table", response_class=HTMLResponse)
+    async def leads_table(request: Request):
+        """Board partial — the swap target after a mark action."""
+        status = _leads_view_param(request.query_params.get("status", ""))
+        return _render(request, "partials/leads_board.html",
+                       chip_links=_lead_chip_links(status),
+                       **_leads_context(status))
+
+    @app.post("/leads/mark")
+    async def leads_mark(request: Request):
+        """Record the person's decision: dismissed or connected.
+
+        The only write the leads board performs. Both the target status
+        and the refusal to mark an ingested lead come from the shared
+        LEAD_* vocabulary (single source — spec A6); the decision
+        timestamp is the shared write path's to set.
+        """
+        form = await request.form()
+        profile_url = str(form.get("profile_url", "")).strip()
+        mark_status = str(form.get("status", "")).strip()
+        view = _leads_view_param(str(form.get("view", "")))
+        if mark_status not in queries.LEAD_MARK_STATUSES or not profile_url:
+            return PlainTextResponse("invalid mark request", status_code=400)
+        if not database.mark_hiring_lead(database.get_connection(),
+                                         profile_url, mark_status):
+            return PlainTextResponse("lead not found", status_code=404)
+        if request.headers.get("HX-Request"):
+            toast = ("Marked connected — the intro is yours to make, in your own browser."
+                     if mark_status == database.LEAD_STATUS_CONNECTED
+                     else "Lead dismissed.")
+            return _render(request, "partials/leads_board.html",
+                           toast_message=toast, toast_kind="info",
+                           chip_links=_lead_chip_links(view),
+                           **_leads_context(view))
+        return RedirectResponse("/leads", status_code=303)
+
+
     # Document preview / download / version history (spec PR G)
     # ------------------------------------------------------------------
     @app.get("/jobs/preview", response_class=HTMLResponse)

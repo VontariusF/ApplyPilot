@@ -17,6 +17,7 @@
       </a>
       <nav class="side-nav" aria-label="Main">
         <a href="/jobs" {% if request.url.path.startswith("/jobs") %}class="active" aria-current="page"{% endif %}>Jobs</a>
+        <a href="/leads" {% if request.url.path.startswith("/leads") %}class="active" aria-current="page"{% endif %}>Leads</a>
         <a href="/" {% if request.url.path == "/" %}class="active" aria-current="page"{% endif %}>Dashboard</a>
         <a href="/runs" {% if request.url.path.startswith("/runs") %}class="active" aria-current="page"{% endif %}>Runs</a>
         <a href="/automation" {% if request.url.path.startswith("/automation") %}class="active" aria-current="page"{% endif %}>Automation</a>
