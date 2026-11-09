@@ -176,7 +176,23 @@ def test_rescore_targeted_url_without_description_fails_visibly(app_dir, resume,
     assert result["errors"] == 1
     assert result["scored"] == 0
     assert fake.calls == 0  # nothing was sent to the LLM
-    assert "not scoreable" in job_row(url)["score_error"]
+    # F1: the failure is visible (nonzero exit) but persists nothing —
+    # the row's truthful state is pending detail, not "scoring failed".
+    assert job_row(url)["score_error"] is None
+
+
+def test_rescore_targeted_unknown_url_fails_without_persistence(app_dir, resume, monkeypatch):
+    """A rescore of a URL that is not in the store fails visibly and
+    writes nothing — the old path's UPDATE was a silent no-op anyway."""
+    database.init_db()
+    fake = FakeClient([GOOD])
+    monkeypatch.setattr(scorer, "get_client", lambda: fake)
+
+    result = scorer.run_scoring(url="https://jobs.example/ghost")
+    assert result["errors"] == 1
+    assert result["scored"] == 0
+    assert fake.calls == 0
+    assert database.get_stats()["score_failed"] == 0
 
 
 # ---------------------------------------------------------------------------

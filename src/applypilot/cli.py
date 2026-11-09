@@ -579,7 +579,7 @@ def status(
     summary.add_row("Pending enrichment", str(stats["pending_detail"]))
     summary.add_row("Enrichment errors", str(stats["detail_errors"]))
     summary.add_row(_scored_label(stats["score_provenance"]), str(stats["scored"]))
-    summary.add_row("Pending scoring", str(stats["unscored"]))
+    summary.add_row("Pending scoring", str(stats["pending_score"]))
     # S2: visible accounting for errored scores (a failed rescore keeps
     # its previous score, so it counts in `scored` too — by design).
     summary.add_row("Score failures", str(stats["score_failed"]))

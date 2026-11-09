@@ -28,6 +28,7 @@ STATS = {
     "scored_fresh": 1,
     "score_failed": 1,
     "unscored": 2,
+    "pending_score": 3,
     "tailored": 1,
     "tailor_exhausted": 0,
     "untailored_eligible": 1,

@@ -215,11 +215,19 @@ def run_scoring(limit: int = 0, rescore: bool = False, url: str | None = None) -
         ).fetchall()
         if not jobs:
             # Targeted rescore of a missing or description-less job: fail
-            # visibly (exit code on the CLI, score_error when the row exists).
-            _record_score_errors(
-                conn, [url],
-                f"Rescore target not scoreable: no job with a full description at {url}",
-            )
+            # visibly (exit code on the CLI) but persist nothing. An
+            # undescribed row's truthful state is pending detail, not
+            # "scoring failed" — stamping score_error here used to put a
+            # score_failed count on a row outside every described-row
+            # bucket and break the S2 identity (F1).
+            exists = conn.execute("SELECT 1 FROM jobs WHERE url = ?", (url,)).fetchone()
+            if exists:
+                log.error(
+                    "Rescore target %s has no full description yet — "
+                    "enrich the job first, then rescore.", url,
+                )
+            else:
+                log.error("Rescore target not found: %s", url)
             return {"scored": 0, "errors": 1, "elapsed": 0.0, "distribution": []}
     elif rescore:
         query = "SELECT * FROM jobs WHERE full_description IS NOT NULL"

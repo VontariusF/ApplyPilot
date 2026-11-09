@@ -56,6 +56,23 @@ def test_parse_salary_lower_bound():
 # Filter-query tests per parameter
 # ---------------------------------------------------------------------------
 
+def test_multi_stage_filter_binds_one_param_per_score_gated_stage(isolated_db):
+    """F5 regression: selecting two score-gated stages in one `stages=`
+    filter ORs two `?`-bearing conditions but used to bind a single
+    min-score param — sqlite3.ProgrammingError instead of a count."""
+    seed_job(fit_score=8, tailored_resume_path="/tmp/fake/a.pdf")
+    seed_job(url="https://jobs.example/p2", fit_score=9,
+             tailored_resume_path="/tmp/fake/b.pdf")
+
+    count = queries.count_filtered_jobs(
+        stages="pending_tailor,pending_cover", min_score=7)
+    assert count == 2  # one per job — the query ran, bindings matched
+    rows = queries.filtered_jobs(stages="pending_tailor,pending_cover",
+                                 min_score=7)
+    assert sorted(r["url"] for r in rows) == [
+        "https://jobs.example/p2", "https://jobs.example/posting-1"]
+
+
 def test_filter_no_params_returns_everything(isolated_db):
     seed_job()
     seed_job(url="https://jobs.example/p2", fit_score=5, is_remote=0)
