@@ -684,6 +684,14 @@ def _doctor_checks() -> list[dict]:
     ({code, command}) or None. Both the Rich renderer and the --json
     contract consume this, so the two surfaces cannot drift apart.
     """
+
+    # Agent-native onboarding is the primary route (PR #81/#82); the
+    # wizard stays as the interactive alternative. Both doctor hints and
+    # the machine-readable fix commands lead with the agent route.
+    AGENT_HINT = ("run 'kestrel agent start --mode agent' — your agent conducts "
+                  "the onboarding interview (no provider needed)")
+    WIZARD_HINT = "run 'kestrel init' — guided wizard for interactive setups"
+
     import os
     import shutil
 
@@ -702,8 +710,9 @@ def _doctor_checks() -> list[dict]:
     if PROFILE_PATH.exists():
         _check("profile.json", "ok", str(PROFILE_PATH))
     else:
-        _check("profile.json", "fail", "Run 'kestrel init' to create",
-               {"code": "run_init", "command": "kestrel init"})
+        _check("profile.json", "fail",
+               f"Missing — {AGENT_HINT}, or {WIZARD_HINT}",
+               {"code": "run_init", "command": "kestrel agent start --mode agent"})
 
     # Resume
     if RESUME_PATH.exists():
@@ -712,15 +721,17 @@ def _doctor_checks() -> list[dict]:
         _check("resume.txt", "warn", "Only PDF found — plain-text needed for AI stages",
                {"code": "add_plain_text_resume", "command": None})
     else:
-        _check("resume.txt", "fail", "Run 'kestrel init' to add your resume",
-               {"code": "run_init", "command": "kestrel init"})
+        _check("resume.txt", "fail",
+               f"Missing — {AGENT_HINT} to add your resume, or {WIZARD_HINT}",
+               {"code": "run_init", "command": "kestrel agent start --mode agent"})
 
     # Search config
     if SEARCH_CONFIG_PATH.exists():
         _check("searches.yaml", "ok", str(SEARCH_CONFIG_PATH))
     else:
-        _check("searches.yaml", "warn", "Will use example config — run 'kestrel init'",
-               {"code": "run_init", "command": "kestrel init"})
+        _check("searches.yaml", "warn",
+               f"Will use example config — {AGENT_HINT}, or {WIZARD_HINT}",
+               {"code": "run_init", "command": "kestrel agent start --mode agent"})
 
     # jobspy (discovery dep installed separately)
     try:
@@ -752,7 +763,7 @@ def _doctor_checks() -> list[dict]:
                f"{info['provider']}: {info['base_url']} (model {info['model']}, key {info['key_hint']})")
     except RuntimeError as exc:
         _check("LLM provider", "fail", str(exc),
-               {"code": "configure_llm_provider", "command": "kestrel init"})
+               {"code": "configure_llm_provider", "command": "kestrel agent start --mode agent"})
 
     # --- Tier 3 checks ---
     from kestrel import engine_auth
@@ -865,7 +876,8 @@ def doctor(
     console.print(f"[bold]Current tier: Tier {tier} — {TIER_LABELS[tier]}[/bold]")
 
     if tier == 1:
-        console.print("[dim]  → Tier 2 unlocks: scoring, tailoring, cover letters (needs an LLM provider — run 'kestrel init')[/dim]")
+        console.print("[dim]  → Tier 2 unlocks: scoring, tailoring, cover letters (needs an LLM provider — "
+                      "run 'kestrel agent start --mode agent', or 'kestrel init' for the guided wizard)[/dim]")
         console.print("[dim]  → Tier 3 unlocks: auto-apply (needs Claude Code or Droid CLI + Chrome + Node.js)[/dim]")
     elif tier == 2:
         console.print("[dim]  → Tier 3 unlocks: auto-apply (needs Claude Code or Droid CLI + Chrome + Node.js)[/dim]")

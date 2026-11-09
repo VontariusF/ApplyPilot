@@ -146,10 +146,12 @@ def test_doctor_json_contract(app_dir, monkeypatch):
         if check["status"] == "fail":
             assert isinstance(check["fix"], dict) and check["fix"]["code"]
 
-    # A fresh app dir has no profile or resume: both fail with run_init hints.
+    # A fresh app dir has no profile or resume: both fail with onboarding
+    # hints. The agent route leads; the wizard is the alternative.
     profile = next(c for c in payload["checks"] if c["name"] == "profile.json")
     assert profile["status"] == "fail"
-    assert profile["fix"] == {"code": "run_init", "command": "kestrel init"}
+    assert profile["fix"] == {"code": "run_init", "command": "kestrel agent start --mode agent"}
+    assert profile["note"].index("agent start --mode agent") < profile["note"].index("kestrel init")
     resume = next(c for c in payload["checks"] if c["name"] == "resume.txt")
     assert resume["status"] == "fail"
     assert resume["fix"]["code"] == "run_init"
