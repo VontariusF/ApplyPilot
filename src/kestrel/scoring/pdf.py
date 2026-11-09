@@ -348,7 +348,7 @@ def render_pdf(html: str, output_path: str) -> None:
         html: Complete HTML string.
         output_path: Path to write the PDF file.
     """
-    from playwright.sync_api import sync_playwright
+    from kestrel.browser import sync_playwright
 
     with sync_playwright() as p:
         browser = p.chromium.launch()

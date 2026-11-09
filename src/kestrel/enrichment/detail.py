@@ -21,9 +21,9 @@ from datetime import datetime, timezone
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
 
 from kestrel import config
+from kestrel.browser import sync_playwright
 from kestrel.config import DB_PATH
 from kestrel.database import (
     SKIP_DETAIL_CLAUSE,
