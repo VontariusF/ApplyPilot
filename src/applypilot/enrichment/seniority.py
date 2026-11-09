@@ -3,10 +3,16 @@
 Deterministic and table-driven — no LLM in the loop (locked decision,
 spec art_we4AUxEy). The rule list is ordered; the FIRST rule whose pattern
 matches wins, so more specific tiers (`intern`) outrank generic ones
-(`senior`) regardless of position in the text. Description text is only
-consulted when the title yields nothing, and then only for weak signals
-(`mid` via an explicit years-of-experience hint) — a description mention
-of "lead" in "you will lead a team" must not manufacture a tier.
+(`senior`) regardless of position in the text. Rules run over the title
+first, then — only when the title yielded nothing — over the FULL rule
+list on the description; a years-of-experience hint in the description
+upgrades an otherwise unclassified row to `mid`.
+
+Running full rules over the description can mislabel: "you will lead a
+team" tiers a neutral title as `lead`. That false-positive risk is
+accepted — seniority is advisory data, never a gate, and the alternative
+(weaker description matching) would strand correctly-tiered rows whose
+titles carry no signal at all.
 """
 
 import re

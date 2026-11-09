@@ -18,7 +18,7 @@ from jobspy import scrape_jobs
 from applypilot import config
 from applypilot.database import get_connection, init_db, store_jobs
 from applypilot.discovery.filters import location_filters, location_ok as _location_ok
-from applypilot.discovery.salary import parse_salary_display
+from applypilot.discovery.salary import parse_salary_row
 from applypilot.enrichment.seniority import classify_seniority
 from applypilot.security import redact_proxy
 
@@ -128,8 +128,15 @@ def _iso_date(value) -> str | None:
     text = str(text).strip()
     if not text:
         return None
-    # Full timestamp → date part; bare YYYY-MM-DD strings pass through.
+    # Full timestamp → date part; bare YYYY-MM-DD strings pass through —
+    # but only if the calendar date is real ("2026-99-99" must not be
+    # stored verbatim, where Layer 2's --posted-within arithmetic would
+    # misbehave on it).
     if re.match(r"^\d{4}-\d{2}-\d{2}", text):
+        try:
+            datetime.strptime(text[:10], "%Y-%m-%d")
+        except ValueError:
+            return None
         return text[:10]
     try:
         return datetime.fromisoformat(text.replace("Z", "+00:00")).date().isoformat()
@@ -176,10 +183,12 @@ def store_jobspy_results(conn: sqlite3.Connection, df, source_label: str) -> tup
         site_name = _clean_cell(row.get("site")) or source_label
         is_remote = row.get("is_remote", False)
 
-        # Structured discovery fields (spec Layer 1): pay/date/seniority
-        # become columns, not just display text. Guarded per field (B10's
-        # keep-the-row pattern) — one bad cell keeps the job with NULLs.
-        structured = parse_salary_display(salary) if salary else None
+        # Structured discovery fields (spec Layer 1): pay comes straight
+        # from the raw JobSpy row (M2) — parsing the rendered display
+        # string instead would truncate fractional hourly amounts and
+        # drop max-only rows to NULL. parse_salary_row is total (B10's
+        # keep-the-row pattern — no usable amounts → None, never raises).
+        structured = parse_salary_row(min_amt, max_amt, currency or None, interval or None)
         date_posted = _iso_date(row.get("date_posted"))
         seniority = classify_seniority(title, description)
 
