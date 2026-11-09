@@ -39,7 +39,7 @@ def test_preview_and_version_routes_require_token(portal_env):
 # ---------------------------------------------------------------------------
 
 
-def write_resume(text: str = "Vontarius Falls\nSenior Pwidget Engineer\n") -> object:
+def write_resume(text: str = "Alex Applicant\nSenior Pwidget Engineer\n") -> object:
     path = portal_resume()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
