@@ -1012,24 +1012,6 @@ def _host_tailor(url: str, data_raw: str, reveal: bool) -> dict:
 
     profile = _load_profile_or_fail()
 
-    try:
-        data = extract_json(data_raw)
-    except ValueError:
-        _fail("invalid_resume_data",
-              "--data is not the tailored-resume JSON object — return to "
-              "the data_template shape and retry",
-              {"errors": ["No valid JSON found in --data"], "retryable": True})
-    if not isinstance(data, dict):
-        # F6: 'null'/scalars/arrays parse fine but are not the resume-data
-        # object — a typed refusal here replaces the internal_error a
-        # TypeError deeper in validation ("NoneType is not iterable",
-        # "sequence item 0: expected str instance") would raise.
-        _fail("invalid_resume_data",
-              f"--data must be the tailored-resume JSON object, got "
-              f"{type(data).__name__} — return to the data_template shape and retry",
-              {"errors": [f"Expected a JSON object, got {type(data).__name__}"],
-               "retryable": True})
-
     conn = get_connection()
     job = _load_job(conn, url)
     if job is None:
@@ -1055,6 +1037,27 @@ def _host_tailor(url: str, data_raw: str, reveal: bool) -> dict:
               {"url": url, "stage": "tailor",
                "attempts": job["tailor_attempts"],
                "cap": _STAGE_ATTEMPT_CAP})
+
+    # F14/V1: the job checks above come first — the same order as cover.
+    # Parsing --data before them let an unknown-URL + malformed-data
+    # mistake answer invalid_resume_data where cover answered unknown_job.
+    try:
+        data = extract_json(data_raw)
+    except ValueError:
+        _fail("invalid_resume_data",
+              "--data is not the tailored-resume JSON object — return to "
+              "the data_template shape and retry",
+              {"errors": ["No valid JSON found in --data"], "retryable": True})
+    if not isinstance(data, dict):
+        # F6: 'null'/scalars/arrays parse fine but are not the resume-data
+        # object — a typed refusal here replaces the internal_error a
+        # TypeError deeper in validation ("NoneType is not iterable",
+        # "sequence item 0: expected str instance") would raise.
+        _fail("invalid_resume_data",
+              f"--data must be the tailored-resume JSON object, got "
+              f"{type(data).__name__} — return to the data_template shape and retry",
+              {"errors": [f"Expected a JSON object, got {type(data).__name__}"],
+               "retryable": True})
 
     validation = validate_json_fields(data, profile, mode="lenient")
     if not validation["passed"]:
