@@ -264,7 +264,12 @@ def load_base_urls() -> dict[str, str | None]:
 DEFAULTS = {
     "min_score": 7,
     "max_apply_attempts": 3,
+    # The tailor/cover stage-attempts cap (V3): the one number every
+    # consumer reads — the queue predicates in database.STAGE_CONDITIONS,
+    # the exhausted-bucket counts, and the host verbs' stage_exhausted
+    # refusals. Never hardcode a literal at a call site.
     "max_tailor_attempts": 5,
+    "max_cover_attempts": 5,
     "poll_interval": 60,
     "apply_timeout": 300,
     # B4: an in_progress lock older than this is treated as stale (crashed

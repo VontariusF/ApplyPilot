@@ -6,9 +6,12 @@ from applypilot.database import STAGE_CONDITIONS, get_connection
 
 # Stage filter keys for the Jobs page — mirrors get_jobs_by_stage's
 # condition registry, plus a row-count subquery for the outcome feed.
+# S4: manual_marked/expired surface the terminal apply statuses so the
+# board accounts for every row.
 STAGES = (
     "discovered", "pending_detail", "enriched", "pending_score", "scored",
     "score_failed", "pending_tailor", "tailored", "pending_apply", "applied",
+    "manual_marked", "expired",
 )
 
 _JOB_LIST_COLUMNS = (
