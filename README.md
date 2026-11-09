@@ -54,7 +54,7 @@ Each stage is independent: run all six, or pick the ones you want.
 | Node.js 18+ + Chrome/Chromium | *Optional* — built-in fallback engine | Only for the built-in Playwright apply engine and built-in page scraping: install `pip install 'kestrel-agent[browser]'`, then `playwright install chromium`. Your agent's own browser covers page fetching on the primary route |
 | Claude Code CLI | *Optional* — alternative apply engine | Install from [claude.ai/code](https://claude.ai/code); Factory Droid CLI works as an alternative |
 
-Optional: a CapSolver key for CAPTCHAs and a Composio key for the web3.career discovery source.
+Optional: a CapSolver key for CAPTCHAs, a Composio key for the web3.career discovery source, and a Tavily (or SerpAPI) key for hiring-lead discovery — see [Hiring-lead discovery](#hiring-lead-discovery-optional-bring-a-tavily-key).
 
 ## Get started
 
@@ -112,6 +112,29 @@ playwright install chromium
 ```
 
 Without the extra, those features exit with a message naming both routes: install the extra, or let your agent's browser fetch the page. The built-in apply engines are unchanged.
+
+### Hiring-lead discovery (optional): bring a Tavily key
+
+Once jobs are scored, Kestrel can find the people who do the hiring at your high-scoring companies and hand you their profile cards. The connection itself is always yours: Kestrel never sends messages or connection invites, never touches your LinkedIn account, and never fetches profile pages — discovery reads search-result metadata (titles, URLs, snippets) only.
+
+The default search provider is [Tavily](https://www.tavily.com). To set one up:
+
+1. Create a free account at [app.tavily.com](https://app.tavily.com). The documented free tier covers 1,000 credits a month, and one discovery query per company costs a single credit — a full discovery run over your high-match companies typically costs well under ten.
+2. Copy your API key (it starts with `tvly-`).
+3. Add it to your Kestrel env file (kept owner-only under your data directory):
+
+   ```bash
+   echo 'TAVILY_API_KEY=tvly-your-key-here' >> ~/.kestrel/.env
+   ```
+
+Then, from your agent chat:
+
+```bash
+kestrel agent leads-discover        # one search per high-match company
+kestrel agent leads-list --reveal   # the profile cards — open them yourself
+```
+
+Results that don't name your company in their title or snippet are dropped and counted in the run's `dropped_no_affiliation` field. Prefer SerpAPI instead? Set `SERP_API_KEY` in the same file and `provider: serp` in `~/.kestrel/leads.yaml`. What each provider receives — and what never leaves your machine — is tabulated in [PRIVACY.md](PRIVACY.md).
 
 ### From source
 

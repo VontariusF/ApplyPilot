@@ -82,9 +82,10 @@ class _FakeSource:
     name = "serp"
     source_label = LEAD_SOURCE_SERP
 
-    def __init__(self, leads, calls):
+    def __init__(self, leads, calls, dropped_no_affiliation=0):
         self._leads = leads
         self._calls = calls
+        self.dropped_no_affiliation = dropped_no_affiliation
 
     def discover_for_company(self, company):
         self._calls.append(company["company_key"])
@@ -132,7 +133,9 @@ def no_network(monkeypatch):
 def test_leads_discover_prints_one_pure_json_document(conn, monkeypatch,
                                                       no_network):
     calls = []
-    _patch_build_source(monkeypatch, _FakeSource([dict(_LEAD)], calls))
+    _patch_build_source(monkeypatch,
+                        _FakeSource([dict(_LEAD)], calls,
+                                    dropped_no_affiliation=2))
 
     result = run("leads-discover")
     assert result.exit_code == 0
@@ -140,6 +143,9 @@ def test_leads_discover_prints_one_pure_json_document(conn, monkeypatch,
     assert payload["discovered"] == 1
     assert payload["skipped_existing"] == 0
     assert payload["companies_scanned"] == 1
+    # The affiliation gate's drop counter rides the verb document —
+    # the person sees how much noise was filtered, not just what kept.
+    assert payload["dropped_no_affiliation"] == 2
     assert len(payload["leads"]) == 1
     assert payload["leads"][0]["company_key"] == "acme-robotics.com"
     assert calls == ["acme-robotics.com"]  # one X-ray query per company
