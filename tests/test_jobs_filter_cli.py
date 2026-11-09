@@ -352,3 +352,92 @@ def test_cli_min_salary_without_profile_matches_any_currency(app_dir, seeded):
     # No profile → no currency default: any currency reaching 150k
     # matches (j1 200k USD, j2 190k USD; j3 tops out at 120k).
     assert payload["count"] == 2
+
+
+# ---------------------------------------------------------------------------
+# CLI flag → SQL translation (audit M2/L1) and LIKE wildcard escaping (L2)
+# ---------------------------------------------------------------------------
+
+def test_cli_on_site_flag_selects_non_remote_rows(seeded):
+    result = runner.invoke(app, ["jobs", "filter", "--on-site", "--urls"])
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines() == ["https://jobs.example/j3"]
+
+
+def test_cli_remote_flag_selects_remote_rows(seeded):
+    result = runner.invoke(app, ["jobs", "filter", "--remote", "--urls"])
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines() == [
+        "https://jobs.example/j1", "https://jobs.example/j2",
+        "https://jobs.example/j4", "https://jobs.example/j5",
+    ]
+
+
+def test_cli_without_remote_flags_returns_both(seeded):
+    result = runner.invoke(app, ["jobs", "filter", "--urls"])
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines() == [
+        "https://jobs.example/j1", "https://jobs.example/j2",
+        "https://jobs.example/j3", "https://jobs.example/j4",
+        "https://jobs.example/j5",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected_urls"),
+    [
+        pytest.param(["--location", "mexico"], ["j1", "j4"], id="location"),
+        pytest.param(["--site", "linkedin"], ["j1", "j3"], id="site"),
+        pytest.param(["--max-score", "7"], ["j3", "j4"], id="max-score"),
+        pytest.param(["--sort", "score", "--asc", "--limit", "2"],
+                     ["j4", "j3"], id="asc"),
+        pytest.param(["--exclude-keyword", "clearance"],
+                     ["j1", "j3", "j4", "j5"], id="exclude-keyword"),
+    ],
+)
+def test_cli_flag_translates_to_expected_rows(seeded, flags, expected_urls):
+    result = runner.invoke(app, ["jobs", "filter", *flags, "--urls"])
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines() == [
+        f"https://jobs.example/{url}" for url in expected_urls
+    ]
+
+
+def _seed_wildcard_rows(conn):
+    """Rows carrying literal % and _ where a LIKE wildcard would lie."""
+    _seed(conn, "https://jobs.example/w1", title="Growth 50% engineer",
+          is_remote=1, full_description="Equity above 50%.")
+    _seed(conn, "https://jobs.example/w2", title="Growth 500 engineer",
+          is_remote=1)
+    _seed(conn, "https://jobs.example/w3", title="ml_ops specialist",
+          is_remote=1)
+    _seed(conn, "https://jobs.example/w4", title="mlaops specialist",
+          is_remote=1)
+    conn.commit()
+
+
+def test_like_wildcards_in_input_match_literally(seeded):
+    _seed_wildcard_rows(database.get_connection())
+
+    # A trailing % is a literal percent sign, not a wildcard.
+    assert _urls(filter_jobs(_db_predicates(keywords=["50%"]))) == [
+        "https://jobs.example/w1"]
+    # An underscore is a literal underscore, not a single-char wildcard.
+    assert _urls(filter_jobs(_db_predicates(keywords=["ml_ops"]))) == [
+        "https://jobs.example/w3"]
+    # Exclusions follow the same rule.
+    kept = _urls(filter_jobs(_db_predicates(exclude_keywords=["50%"])))
+    assert "https://jobs.example/w1" not in kept
+    assert {"https://jobs.example/w2", "https://jobs.example/w3",
+            "https://jobs.example/w4"} <= set(kept)
+    kept = _urls(filter_jobs(_db_predicates(exclude_keywords=["ml_ops"])))
+    assert "https://jobs.example/w3" not in kept
+    assert {"https://jobs.example/w1", "https://jobs.example/w2",
+            "https://jobs.example/w4"} <= set(kept)
+
+
+def test_cli_keyword_wildcards_match_literally(seeded):
+    _seed_wildcard_rows(database.get_connection())
+    result = runner.invoke(app, ["jobs", "filter", "--keyword", "50%", "--urls"])
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines() == ["https://jobs.example/w1"]
