@@ -7,6 +7,25 @@
 # scale your pipeline uses (the spec's 75 presumes a 0-100 scale).
 min_company_fit: 75
 
-# Keys that arrive with the discovery-adapter PRs (spec §4) are listed
-# here only once they have a consumer: daily_discovery_cap, role_taxonomy,
-# serp, firecrawl.
+# Discovery runs allowed per UTC day (spec §4). Caps provider spend,
+# not sends — Kestrel never sends anything.
+daily_discovery_cap: 10
+
+# Role titles the SERP X-ray queries search for at high-match companies.
+role_taxonomy:
+  - "Head of Talent"
+  - "Head of Talent Acquisition"
+  - "VP Talent Acquisition"
+  - "Director of Recruiting"
+  - "Recruiting Manager"
+  - "Talent Partner"
+  - "Founder" # small companies: the founder does the hiring
+  - "COO"
+
+serp:
+  provider: serpapi # SerpAPI-compatible wire format; key: SERP_API_KEY
+  results_per_query: 10
+
+firecrawl:
+  enabled: false # opt-in; public careers/team pages only, never
+  # linkedin.com. Also requires FIRECRAWL_API_KEY.
