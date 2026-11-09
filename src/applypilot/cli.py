@@ -891,6 +891,8 @@ _JSON_JOB_FIELDS = (
     "url", "title", "location", "site", "discovered_at", "date_posted",
     "salary_min", "salary_max", "salary_currency", "salary_interval",
     "seniority", "fit_score", "stale",
+    # Spec Layer 3: rerank state and the newest rescore movement.
+    "rerank_marked_at", "prev_score", "score_delta", "rescored_at",
 )
 
 
@@ -921,6 +923,79 @@ def _parse_posted_within(raw: str) -> int:
     if days <= 0:
         raise typer.BadParameter("--posted-within must be a positive number of days.")
     return days
+
+
+def _parse_rescored_since(raw: str) -> str:
+    """Parse --rescored-since into an ISO cutoff: '30m', '1h', '2d', or a
+    plain number of minutes. Anything else is a typed CLI usage error.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    text = raw.strip().lower()
+    unit_seconds = {"m": 60, "h": 3600, "d": 86400}
+    if text and text[-1] in unit_seconds:
+        value, seconds = text[:-1], unit_seconds[text[-1]]
+    else:
+        value, seconds = text, 60
+    try:
+        amount = int(value)
+    except ValueError:
+        raise typer.BadParameter(
+            f"--rescored-since must be a duration like '30m', '1h', or '2d' "
+            f"(or a plain number of minutes), got {raw!r}."
+        ) from None
+    if amount <= 0:
+        raise typer.BadParameter("--rescored-since must be a positive duration.")
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=amount * seconds)
+    return cutoff.isoformat()
+
+
+def _predicates_from_flags(
+    *, posted_within: Optional[str], location: Optional[str],
+    remote: Optional[bool], seniority: Optional[str], min_salary: Optional[float],
+    currency: Optional[str], min_score: Optional[int], max_score: Optional[int],
+    site: Optional[str], keyword: Optional[str], exclude_keyword: Optional[str],
+    stale_only: bool,
+):
+    """Translate the shared filter flags into a FilterPredicates set.
+
+    Both `jobs filter` and `jobs rerank` target the same query builder,
+    so both translate flags through this one helper — the two surfaces
+    cannot drift on token validation or currency resolution.
+    """
+    from applypilot.database import VALID_SENIORITY_TIERS, FilterPredicates
+
+    seniority_list = _parse_csv_list(seniority)
+    if seniority_list:
+        unknown = sorted(
+            t.lower() for t in seniority_list
+            if t.lower() not in VALID_SENIORITY_TIERS
+        )
+        if unknown:
+            raise typer.BadParameter(
+                f"Unknown seniority tier(s) {', '.join(unknown)} — valid tiers: "
+                f"{', '.join(VALID_SENIORITY_TIERS)}."
+            )
+    if min_salary is None and currency is not None:
+        raise typer.BadParameter("--currency only matters together with --min-salary.")
+
+    currency_value = currency or (
+        _profile_currency() if min_salary is not None else None)
+
+    return FilterPredicates(
+        posted_within_days=_parse_posted_within(posted_within) if posted_within else None,
+        location=location.strip() if location else None,
+        remote=remote,
+        seniority=seniority_list,
+        min_salary=min_salary,
+        currency=currency_value,
+        min_score=min_score,
+        max_score=max_score,
+        sites=_parse_csv_list(site),
+        keywords=_parse_csv_list(keyword),
+        exclude_keywords=_parse_csv_list(exclude_keyword),
+        stale_only=stale_only,
+    )
 
 
 def _profile_currency() -> str | None:
@@ -1004,6 +1079,12 @@ def jobs_filter(
         False, "--stale-only",
         help="Only jobs whose score is stale: scored before the current resume.txt (or never bound).",
     ),
+    rescored_since: Optional[str] = typer.Option(
+        None, "--rescored-since",
+        help="Only jobs re-scored within a window — '30m', '1h', '2d', or a plain "
+             "number of minutes. JSON output reports each job's prev_score and "
+             "score_delta (spec Layer 3).",
+    ),
     sort: str = typer.Option(
         "discovered", "--sort",
         help="Sort key: score|date|salary|discovered (descending by default).",
@@ -1024,52 +1105,26 @@ def jobs_filter(
     """
     _bootstrap()
 
-    from applypilot.database import (
-        VALID_SENIORITY_TIERS,
-        FilterPredicates,
-        filter_jobs,
-    )
+    from applypilot.database import filter_jobs
 
-    seniority_list = _parse_csv_list(seniority)
-    if seniority_list:
-        unknown = sorted(
-            t.lower() for t in seniority_list
-            if t.lower() not in VALID_SENIORITY_TIERS
-        )
-        if unknown:
-            raise typer.BadParameter(
-                f"Unknown seniority tier(s) {', '.join(unknown)} — valid tiers: "
-                f"{', '.join(VALID_SENIORITY_TIERS)}."
-            )
     if sort not in _FILTER_SORT_KEYS:
         raise typer.BadParameter(
             f"Unknown sort key {sort!r} — valid keys: {', '.join(_FILTER_SORT_KEYS)}."
         )
     if limit is not None and limit <= 0:
         raise typer.BadParameter("--limit must be a positive integer.")
-    if min_salary is None and currency is not None:
-        raise typer.BadParameter("--currency only matters together with --min-salary.")
 
-    currency_value = currency or (
-        _profile_currency() if min_salary is not None else None)
-
-    predicates = FilterPredicates(
-        posted_within_days=_parse_posted_within(posted_within) if posted_within else None,
-        location=location.strip() if location else None,
-        remote=remote,
-        seniority=seniority_list,
-        min_salary=min_salary,
-        currency=currency_value,
-        min_score=min_score,
-        max_score=max_score,
-        sites=_parse_csv_list(site),
-        keywords=_parse_csv_list(keyword),
-        exclude_keywords=_parse_csv_list(exclude_keyword),
-        stale_only=stale_only,
-        sort=sort,
-        ascending=ascending,
-        limit=limit,
+    predicates = _predicates_from_flags(
+        posted_within=posted_within, location=location, remote=remote,
+        seniority=seniority, min_salary=min_salary, currency=currency,
+        min_score=min_score, max_score=max_score, site=site, keyword=keyword,
+        exclude_keyword=exclude_keyword, stale_only=stale_only,
     )
+    predicates.rescored_since = (
+        _parse_rescored_since(rescored_since) if rescored_since else None)
+    predicates.sort = sort
+    predicates.ascending = ascending
+    predicates.limit = limit
     jobs = filter_jobs(predicates, current_resume_hash=_current_resume_hash())
 
     if json_output:
@@ -1086,10 +1141,15 @@ def jobs_filter(
 
     table = Table(title=f"{len(jobs)} matching jobs")
     for column in ("URL", "Title", "Location", "Remote", "Seniority",
-                   "Salary", "Score", "Posted", "Stale"):
+                   "Salary", "Score", "Posted", "Stale", "Rescored"):
         table.add_column(column)
     for job in jobs:
         remote_label = {1: "remote", 0: "on-site"}.get(job["is_remote"], "—")
+        rescored = (
+            f"{job['prev_score']}→{job['fit_score']}"
+            if job["rescored_at"] and job["prev_score"] is not None
+            and job["fit_score"] is not None else ""
+        )
         table.add_row(
             job["url"] or "—",
             job["title"] or "—",
@@ -1100,9 +1160,128 @@ def jobs_filter(
             "—" if job["fit_score"] is None else str(job["fit_score"]),
             (job["date_posted"] or "")[:10] or "—",
             "yes" if job["stale"] else "",
+            rescored,
         )
     console.print(table)
 
+
+
+
+@jobs_app.command("rerank")
+def jobs_rerank(
+    posted_within: Optional[str] = typer.Option(
+        None, "--posted-within",
+        help="date_posted within N days — '7d'/'30d'/'90d' or a plain int.",
+    ),
+    location: Optional[str] = typer.Option(
+        None, "--location", help="Location substring, case-insensitive."),
+    remote: Optional[bool] = typer.Option(
+        None, "--remote/--on-site",
+        help="Restrict to remote (is_remote=1) or on-site (is_remote=0) rows.",
+    ),
+    seniority: Optional[str] = typer.Option(
+        None, "--seniority",
+        help="Comma-separated any-of tiers: intern,junior,mid,senior,staff,principal,lead,manager.",
+    ),
+    min_salary: Optional[float] = typer.Option(
+        None, "--min-salary",
+        help="Minimum annualized pay — a range reaching this counts."),
+    currency: Optional[str] = typer.Option(
+        None, "--currency",
+        help="Currency for --min-salary matching (default: the profile's compensation.salary_currency).",
+    ),
+    min_score: Optional[int] = typer.Option(
+        None, "--min-score", help="Minimum fit_score."),
+    max_score: Optional[int] = typer.Option(
+        None, "--max-score", help="Maximum fit_score."),
+    site: Optional[str] = typer.Option(
+        None, "--site", help="Comma-separated any-of source boards, case-insensitive."),
+    keyword: Optional[str] = typer.Option(
+        None, "--keyword",
+        help="Comma-separated any-of substrings over title + full_description.",
+    ),
+    exclude_keyword: Optional[str] = typer.Option(
+        None, "--exclude-keyword",
+        help="Comma-separated substrings that must not appear in title + full_description.",
+    ),
+    stale_only: bool = typer.Option(
+        False, "--stale-only",
+        help="Target only jobs whose score is stale: scored before the current resume.txt (or never bound).",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Print the target set and count; commit nothing."),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit one pure-JSON document (takes precedence over --urls)."),
+    urls: bool = typer.Option(
+        False, "--urls", help="Print one URL per line (the target set), for piping."),
+) -> None:
+    """Mark a filtered set for re-judgment by the host score loop.
+
+    The flags match `jobs filter` (they share one query builder). With
+    --dry-run this is read-only: the target set and count print, nothing
+    commits. Without it, each target's rerank_marked_at is stamped —
+    `agent job-next --stage score` then serves exactly these before the
+    pending queue, and each re-scored job leaves the set — and nothing
+    else changes: plan eligibility and staged plan tokens are untouched
+    (staleness is advisory, spec art_we4AUxEy Layer 3). Zero predicates
+    targets every scoreable job in the store.
+    """
+    _bootstrap()
+
+    from applypilot.database import filter_jobs, get_connection, mark_rerank
+
+    predicates = _predicates_from_flags(
+        posted_within=posted_within, location=location, remote=remote,
+        seniority=seniority, min_salary=min_salary, currency=currency,
+        min_score=min_score, max_score=max_score, site=site, keyword=keyword,
+        exclude_keyword=exclude_keyword, stale_only=stale_only,
+    )
+    jobs = filter_jobs(predicates, current_resume_hash=_current_resume_hash())
+    # Only described rows can be re-judged — an undescribed job needs
+    # enrich first, and the skip is reported, not silent.
+    targets = [job for job in jobs if job["full_description"]]
+    skipped = len(jobs) - len(targets)
+
+    marked = 0
+    if not dry_run:
+        from datetime import datetime, timezone
+
+        marked = mark_rerank(
+            get_connection(), [job["url"] for job in targets],
+            datetime.now(timezone.utc).isoformat())
+
+    if json_output:
+        _emit_json({
+            "dry_run": dry_run,
+            "count": len(targets),
+            "marked": marked,
+            "skipped": skipped,
+            "jobs": [{field: job[field] for field in _JSON_JOB_FIELDS}
+                     for job in targets],
+        })
+        return
+    if urls:
+        for job in targets:
+            typer.echo(job["url"])
+        return
+
+    verb = "would be marked" if dry_run else "marked"
+    table = Table(title=(f"{len(targets)} job(s) {verb} for re-scoring "
+                         f"({skipped} skipped: no captured description)"))
+    for column in ("URL", "Title", "Score", "Stale"):
+        table.add_column(column)
+    for job in targets:
+        table.add_row(
+            job["url"] or "—",
+            job["title"] or "—",
+            "—" if job["fit_score"] is None else str(job["fit_score"]),
+            "yes" if job["stale"] else "",
+        )
+    console.print(table)
+    if not dry_run and marked:
+        console.print(
+            "[dim]`agent job-next --stage score` now serves these first — "
+            "re-score with --rescore; each re-judged job leaves the set.[/dim]")
 
 if __name__ == "__main__":
     app()

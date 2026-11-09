@@ -177,9 +177,20 @@ def resume_sha256(resume_text: str) -> str:
     return hashlib.sha256(resume_text.encode("utf-8")).hexdigest()
 
 
+class PrevScoreMismatch(ValueError):
+    """A `--prev-score` pass-through that disagrees with the stored score.
+
+    The host declares which score it judged against; when that no longer
+    matches the row (a stale payload, a double-persist race) the write is
+    refused before anything persists. The protocol verb turns this into
+    the typed `prev_score_mismatch` envelope.
+    """
+
+
 def persist_score(conn, url: str, score: int, keywords: str, reasoning: str,
                   scored_by: str, when: str,
-                  resume_hash: str | None = None) -> None:
+                  resume_hash: str | None = None,
+                  prev_score: int | None = None) -> None:
     """Write one job's score — the single UPDATE shared by the LLM path
     and the host protocol (spec art_IMViYTMU: no parallel write path).
 
@@ -187,12 +198,45 @@ def persist_score(conn, url: str, score: int, keywords: str, reasoning: str,
     for protocol writes, the provider name for LLM ones). The stored
     blob is `keywords\\nreasoning` — split_score_reasoning depends on
     that shape. `resume_hash` binds the score to the resume text it was
-    judged against (None = unbound, treated as stale). Callers commit.
+    judged against (None = unbound, treated as stale). `prev_score` is
+    the rerank flow's pass-through (spec art_we4AUxEy Layer 3): when
+    given and the row's current fit_score disagrees, PrevScoreMismatch
+    raises and nothing persists. Callers commit.
+
+    Rescoring (overwriting an existing fit_score) appends an entry to
+    the score_history JSON sidecar — {prev_score, prev_score_hash,
+    prev_scored_at, rescored_at}, capped at the last 5 — and clears any
+    `jobs rerank` mark: a re-judged row has left the rerank set.
     """
+    from applypilot.database import SCORE_HISTORY_CAP, parse_score_history
+
+    prior = conn.execute(
+        "SELECT fit_score, scored_resume_hash, scored_at, score_history "
+        "FROM jobs WHERE url = ?", (url,)
+    ).fetchone()
+
+    history: list[dict] = []
+    if prior is not None:
+        if prev_score is not None and prev_score != prior[0]:
+            raise PrevScoreMismatch(
+                f"--prev-score {prev_score} does not match the job's current "
+                f"score {prior[0]} — re-read job-next; nothing was persisted")
+        if prior[0] is not None:
+            history = parse_score_history(prior[3])
+            history.append({
+                "prev_score": prior[0],
+                "prev_score_hash": prior[1],
+                "prev_scored_at": prior[2],
+                "rescored_at": when,
+            })
+            history = history[-SCORE_HISTORY_CAP:]
+
     conn.execute(
         "UPDATE jobs SET fit_score = ?, score_reasoning = ?, scored_at = ?, "
-        "score_error = NULL, scored_by = ?, scored_resume_hash = ? WHERE url = ?",
-        (score, f"{keywords}\n{reasoning}", when, scored_by, resume_hash, url),
+        "score_error = NULL, scored_by = ?, scored_resume_hash = ?, "
+        "rerank_marked_at = NULL, score_history = ? WHERE url = ?",
+        (score, f"{keywords}\n{reasoning}", when, scored_by, resume_hash,
+         json.dumps(history) if history else None, url),
     )
 
 

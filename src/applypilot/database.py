@@ -5,6 +5,7 @@ pipeline stage are created up front so any stage can run independently
 without migration ordering issues.
 """
 
+import json
 import logging
 import sqlite3
 import threading
@@ -206,6 +207,22 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             -- (scored before this column existed) — treated as stale.
             scored_resume_hash    TEXT,
 
+
+            -- jobs rerank (spec art_we4AUxEy Layer 3): the timestamp
+            -- `jobs rerank` stamps when a row enters the re-judgment
+            -- set. job-next --stage score serves marked rows before
+            -- the pending_score queue; persisting a score clears it.
+            -- A presentation-of-intent flag only: STAGE_CONDITIONS and
+            -- plan eligibility never read it.
+            rerank_marked_at      TEXT,
+
+            -- score_history (spec Layer 3): JSON sidecar, append-only,
+            -- capped at the last 5 entries. persist_score appends
+            -- {prev_score, prev_score_hash, prev_scored_at, rescored_at}
+            -- whenever it overwrites an existing score, so
+            -- --rescored-since can report movement without a table.
+            score_history         TEXT,
+
             -- Tailoring stage (resume tailor)
             tailored_resume_path  TEXT,
             tailored_at           TEXT,
@@ -402,6 +419,12 @@ _ALL_COLUMNS: dict[str, str] = {
     # Resume binding for the score (spec Layer 1): sha256 of resume.txt at
     # persist time; NULL = pre-binding, treated as stale.
     "scored_resume_hash": "TEXT",
+    # jobs rerank (spec Layer 3): the re-judgment intent flag stamped by
+    # `jobs rerank`, cleared when a score is persisted. Advisory only.
+    "rerank_marked_at": "TEXT",
+    # score_history (spec Layer 3): JSON sidecar of the last 5 rescore
+    # entries — {prev_score, prev_score_hash, prev_scored_at, rescored_at}.
+    "score_history": "TEXT",
     "scored_at": "TEXT",
     # Last scoring failure, cleared on the next successful score (E).
     "score_error": "TEXT",
@@ -928,6 +951,11 @@ class FilterPredicates:
     keywords: list[str] | None = None   # any-of, title+full_description substring
     exclude_keywords: list[str] | None = None
     stale_only: bool = False
+    # Spec Layer 3: ISO cutoff — keep only rows whose latest score_history
+    # entry's rescored_at is at or after this moment. A Python post-filter
+    # (the JSON sidecar is not a column SQL can index); derived prev_score/
+    # score_delta/rescored_at keys ride every result regardless.
+    rescored_since: str | None = None
     sort: str = "discovered"
     ascending: bool = False
     limit: int | None = None
@@ -1054,8 +1082,96 @@ def filter_jobs(predicates: FilterPredicates,
     for row in rows:
         job = dict(zip(row.keys(), row))
         job["stale"] = job["scored_resume_hash"] != (current_resume_hash or "")
+        # Spec Layer 3 delta reporting: the newest score_history entry is
+        # the score this row just replaced. Malformed sidecar JSON degrades
+        # to 'no history' — never crashes the query.
+        history = parse_score_history(job.get("score_history"))
+        latest = history[-1] if history else None
+        job["prev_score"] = latest.get("prev_score") if latest else None
+        job["rescored_at"] = latest.get("rescored_at") if latest else None
+        job["score_delta"] = (
+            job["fit_score"] - job["prev_score"]
+            if latest is not None and job["fit_score"] is not None
+            and job["prev_score"] is not None else None)
+        if predicates.rescored_since is not None:
+            # The --rescored-since gate: ISO timestamps compare
+            # lexicographically. Rows never rescored cannot be "since".
+            if latest is None or not (latest.get("rescored_at") or ""):
+                continue
+            if latest["rescored_at"] < predicates.rescored_since:
+                continue
         results.append(job)
     return results
+
+
+# ---
+# jobs rerank + score-delta plumbing (spec art_we4AUxEy Layer 3)
+# ---
+
+# The score_history sidecar keeps the last N rescore entries (locked spec
+# decision: JSON sidecar, not a table; a new table only if verification
+# shows a query need).
+SCORE_HISTORY_CAP = 5
+
+
+def parse_score_history(raw: str | None) -> list[dict]:
+    """Parse the score_history JSON sidecar into its entry list.
+
+    Tolerant by design: a missing, empty, or malformed sidecar is 'no
+    history' ([]) — a hand-edited store must not crash a read-only
+    filter. A non-list payload or non-dict entries are dropped the same
+    way.
+    """
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [entry for entry in parsed if isinstance(entry, dict)]
+
+
+def mark_rerank(conn: sqlite3.Connection, urls: list[str], when: str) -> int:
+    """Stamp `when` onto each URL's rerank_marked_at — the re-judgment set.
+
+    Only described rows are markable (an undescribed job cannot be
+    re-judged; it needs enrich first); callers get back how many rows
+    actually entered the set. Advisory only: no STAGE_CONDITIONS, plan
+    eligibility, or staged plan token reads this column — spec locked
+    decision, staleness never disturbs plan semantics.
+
+    Callers commit.
+    """
+    if not urls:
+        return 0
+    marks = ", ".join("?" for _ in urls)
+    cursor = conn.execute(
+        f"UPDATE jobs SET rerank_marked_at = ? "
+        f"WHERE url IN ({marks}) AND full_description IS NOT NULL",
+        (when, *urls),
+    )
+    return cursor.rowcount
+
+
+def get_rerank_jobs(conn: sqlite3.Connection | None = None,
+                    limit: int = 1) -> list[dict]:
+    """The current rerank set: marked, described rows, newest mark first.
+
+    What `agent job-next --stage score` serves before the pending_score
+    queue — "exactly these first". Rows leave the set when their new
+    score persists (persist_score clears the mark).
+    """
+    if conn is None:
+        conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM jobs WHERE rerank_marked_at IS NOT NULL "
+        "AND full_description IS NOT NULL "
+        "ORDER BY rerank_marked_at DESC, url ASC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(zip(row.keys(), row)) for row in rows]
 
 
 # ---------------------------------------------------------------------------
