@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Read queries powering the portal pages (thin SQL over the shared store)."""
 
 import re

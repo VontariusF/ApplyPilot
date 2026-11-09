@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Engine sign-in gate: not_installed / signed_out / signed_in.
 
 The old gate checked only that an engine binary exists (``shutil.which``) —

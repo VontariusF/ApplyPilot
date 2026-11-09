@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Run registry: pipeline/apply runs as tracked subprocesses.
 
 Runs are spawned as the package's own console entry points

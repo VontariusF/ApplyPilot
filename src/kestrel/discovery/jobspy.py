@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """JobSpy-based job discovery: searches Indeed, LinkedIn, Glassdoor, ZipRecruiter.
 
 Uses python-jobspy to scrape multiple job boards, deduplicates results,

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Shared location filtering for discovery sources (B11).
 
 Single canonical implementation of the location accept/reject filter used by

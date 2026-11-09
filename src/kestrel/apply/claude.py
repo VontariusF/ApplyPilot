@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Claude Code engine adapter — the reference implementation.
 
 Extracted verbatim from the original launcher.run_job command-build and

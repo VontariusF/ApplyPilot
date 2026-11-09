@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """The Kestrel portal: FastAPI app factory, routes, SSE streams.
 
 Single-user, localhost-only. The portal reads and writes the same SQLite

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Cover letter generation: LLM-powered, profile-driven, with validation.
 
 Generates concise, engineering-voice cover letters tailored to specific job

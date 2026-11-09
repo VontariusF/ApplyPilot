@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Structured salary parsing: JobSpy pay strings → filterable numbers (spec Layer 1).
 
 JobSpy delivers `min_amount`/`max_amount`/`currency`/`interval`, but the

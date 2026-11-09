@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Factory Droid engine adapter.
 
 Shells out to `droid exec` per job, reading the prompt from a file.

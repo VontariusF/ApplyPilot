@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Apply orchestration: acquire jobs, spawn engine sessions, track results.
 
 This is the main entry point for the apply pipeline. It pulls jobs from

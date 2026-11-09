@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Onboarding interview agent: builds the profile through conversation.
 
 One chat surface carries sign-in, the interview, and profile review

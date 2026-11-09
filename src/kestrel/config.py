@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Kestrel configuration: paths, platform detection, user data."""
 
 import logging

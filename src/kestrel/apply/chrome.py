@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Chrome lifecycle management for apply workers.
 
 Handles launching an isolated Chrome instance with remote debugging,

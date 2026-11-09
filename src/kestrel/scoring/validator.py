@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Resume and cover letter validation: banned words, fabrication detection, structural checks.
 
 All validation is profile-driven -- no hardcoded personal data. The validator receives

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Job fit scoring: LLM-powered evaluation of candidate-job match quality.
 
 Scores jobs on a 1-10 scale by comparing the user's resume against each

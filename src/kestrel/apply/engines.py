@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Engine-adapter interface for the auto-apply stage.
 
 Both engines (Claude Code, Factory Droid) drive the same per-worker Chrome

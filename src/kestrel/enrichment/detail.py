@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 """Detail page enrichment: scrapes full descriptions and apply URLs.
 
 For each job URL in the database, navigates to the detail page and extracts:
