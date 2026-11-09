@@ -67,7 +67,8 @@ def _seed_companies(conn, *companies):
 
 
 def _seed_lead(conn, profile_url, full_name="Jane Doe",
-               title="Head of Talent", company_key="acme-robotics.com",
+               title="Jane Doe - Head of Talent - Acme Robotics",
+               company_key="acme-robotics.com",
                last_status="discovered"):
     assert upsert_hiring_lead(conn, profile_url=profile_url,
                               full_name=full_name, title=title,
@@ -102,7 +103,11 @@ def _patch_build_source(monkeypatch, source):
 _LEADS_REDACTED = "--reveal-gated--"
 
 _LEAD = {"profile_url": "https://www.linkedin.com/in/jane-doe",
-         "full_name": "Jane Doe", "title": "Head of Talent",
+         "full_name": "Jane Doe",
+         # Headline shape the adapters actually store: the person's
+         # name embedded in the title — the masked payload must redact
+         # it from here too, not just from full_name.
+         "title": "Jane Doe - Head of Talent - Acme Robotics",
          "source": LEAD_SOURCE_SERP, "evidence_url": None}
 
 

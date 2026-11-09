@@ -383,6 +383,14 @@ def leads_min_company_fit() -> float:
 # titles the SERP X-ray queries search for at high-match companies.
 # Overridable per deployment via leads.yaml role_taxonomy; "Founder"
 # covers small companies where the founder does the hiring.
+#
+# The last three terms are deliberate subsumers discovered by live
+# stress-testing Tavily (2026-11-09): real hiring headlines read
+# "Talent @ Acme", "Talent Operations Partner - Acme", "Sr Recruiter -
+# Sales and GTM" — none contain the specific senior phrases. The
+# attribution gate pairs the term with a company-in-title requirement,
+# so a bare "Talent" match is still only accepted on a profile whose
+# own headline names the company.
 DEFAULT_ROLE_TAXONOMY = (
     "Head of Talent",
     "Head of Talent Acquisition",
@@ -392,6 +400,11 @@ DEFAULT_ROLE_TAXONOMY = (
     "Talent Partner",
     "Founder",
     "COO",
+    "CEO",
+    # Subsuming broad terms — see comment above.
+    "Talent",
+    "Recruiter",
+    "Recruiting",
 )
 
 
@@ -479,6 +492,24 @@ def leads_tavily_max_results() -> int:
         raise ValueError(
             f"leads.yaml tavily.max_results must be in 1..20, got {raw!r}")
     return num
+
+
+def leads_tavily_search_depth() -> str:
+    """Tavily search_depth for X-ray queries (default "advanced").
+
+    Live stress-test 2026-11-09: at basic depth the operator-style
+    X-ray query returned zero company-named profiles; advanced returned
+    6/10. Same credit cost, so advanced is the default.
+    """
+    raw = (load_leads_config().get("tavily") or {}).get("search_depth")
+    if raw is None:
+        return "advanced"
+    depth = str(raw).strip().lower()
+    if depth not in ("basic", "advanced"):
+        raise ValueError(
+            "leads.yaml tavily.search_depth must be 'basic' or 'advanced', "
+            f"got {raw!r}")
+    return depth
 
 
 def firecrawl_enabled() -> bool:
