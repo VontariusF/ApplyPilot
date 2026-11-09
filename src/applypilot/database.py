@@ -421,8 +421,8 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
     Returns:
         Dictionary with keys:
             total, by_site, pending_detail, with_description, undescribed,
-            scored, scored_fresh, score_failed, unscored, tailored,
-            untailored_eligible, with_cover_letter, applied,
+            scored, scored_fresh, score_failed, unscored, pending_score,
+            tailored, untailored_eligible, with_cover_letter, applied,
             score_distribution
 
     Accounting (S2): `unscored`, `scored_fresh` and `score_failed` are
@@ -434,6 +434,11 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
     carries a live `score_error`, so the row counts in both. Terminal
     apply statuses (`captcha`, `manual_marked`, `expired`) are reported
     as separate buckets so every apply_status reconciles to total.
+
+    `pending_score` (F2) is NOT part of that partition — it is the
+    retried queue (described, no live score, errored rows included),
+    identical to STAGE_CONDITIONS["pending_score"]; unscored + the
+    described `score_failed` rows reconcile to it.
     """
     if conn is None:
         conn = get_connection()
@@ -495,6 +500,16 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
 
     stats["undescribed"] = conn.execute(
         "SELECT COUNT(*) FROM jobs WHERE full_description IS NULL"
+    ).fetchone()[0]
+
+    # F2: the actual pending-score queue the scorer drains — described
+    # rows without a live score, INCLUDING previously-errored ones
+    # (run_scoring's default path retries them via STAGE_CONDITIONS
+    # ["pending_score"]). Read from the same shared condition so the
+    # stat cannot drift from the queue; `unscored` above stays the
+    # narrower partition bucket (never-errored) for the S2 identity.
+    stats["pending_score"] = conn.execute(
+        f"SELECT COUNT(*) FROM jobs WHERE {STAGE_CONDITIONS['pending_score']}"
     ).fetchone()[0]
 
     # Score distribution

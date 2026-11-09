@@ -39,7 +39,7 @@ from applypilot.apply import launcher, planning
 from applypilot.cli import app
 from applypilot.portal import queries
 from applypilot.scoring.docs import _safe_component, output_prefix
-from applypilot.scoring.scorer import persist_score
+from applypilot.scoring.scorer import persist_score, run_scoring
 
 runner = CliRunner()
 
@@ -198,6 +198,57 @@ def test_score_buckets_reconcile_to_the_store_total(app_dir, isolated_db):
     assert stats["scored"] > stats["scored_fresh"]
     # Full reconciliation to the store total.
     assert stats["undescribed"] + stats["with_description"] == stats["total"]
+
+
+def test_rescoring_an_undescribed_row_keeps_the_identity_intact(
+        app_dir, isolated_db):
+    """F1 regression — the audit's exact probe state. A targeted rescore
+    of a description-less row used to stamp score_error on it, putting a
+    score_failed count on a row outside every described bucket and
+    breaking the documented identity. The suite never saw it because the
+    identity test's errored rows all carried descriptions."""
+    conn = database.init_db()
+    _seed_job(conn, "https://jobs/pending-detail", full_description=None)
+
+    result = run_scoring(url="https://jobs/pending-detail")
+    assert result["errors"] == 1  # still fails visibly (CLI exit code)
+    assert result["scored"] == 0
+
+    row = conn.execute(
+        "SELECT score_error FROM jobs WHERE url = 'https://jobs/pending-detail'"
+    ).fetchone()
+    # Persisted nothing: the row stays pending detail, not score-failed.
+    assert row["score_error"] is None
+
+    stats = database.get_stats(conn)
+    assert stats["undescribed"] == 1
+    assert stats["score_failed"] == 0
+    assert stats["with_description"] == 0
+    assert (stats["unscored"] + stats["scored_fresh"]
+            + stats["score_failed"]) == stats["with_description"]
+    assert stats["undescribed"] + stats["with_description"] == stats["total"]
+
+
+def test_pending_score_stat_matches_the_retried_queue(app_dir, isolated_db):
+    """F2: the 'Pending scoring' figure reports the queue run_scoring
+    actually drains — described rows without a live score, INCLUDING
+    previously-errored ones the queue retries. `unscored` stays the
+    narrower never-errored partition bucket."""
+    conn = database.init_db()
+    _seed_job(conn, "https://jobs/fresh-unscored")
+    _seed_job(conn, "https://jobs/errored", fit_score=None, score_error="boom")
+    _seed_job(conn, "https://jobs/scored", fit_score=8)
+    _seed_job(conn, "https://jobs/undescribed", full_description=None)
+
+    stats = database.get_stats(conn)
+    assert stats["pending_score"] == 2       # fresh + errored
+    assert stats["pending_score"] == len(database.get_jobs_by_stage(
+        conn=conn, stage="pending_score", limit=1000))
+    assert stats["unscored"] == 1            # never-errored only
+    # The queue reconciles to the partition buckets.
+    assert stats["pending_score"] == stats["unscored"] + (
+        stats["score_failed"] - (
+            stats["scored"] - stats["scored_fresh"]))
 
 
 # ---------------------------------------------------------------------------

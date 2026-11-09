@@ -218,7 +218,11 @@ def _select_jobs(stage: str, stages: str, site: str, location: str,
     # stages that hold fit scores. Applying it elsewhere (score_failed,
     # pending_*) would hide rows that legitimately have no score.
     if "?" in condition:
-        params.append(min_score if min_score is not None else 7)
+        # One min-score bind per "?" — a multi-stage OR concatenates one
+        # condition per selected stage, so e.g. pending_tailor,pending_cover
+        # carries two placeholders (F5) and one param left the old binding
+        # of the merged statement short.
+        params.extend([min_score if min_score is not None else 7] * condition.count("?"))
     elif min_score is not None and stage in ("scored", "tailored", "applied"):
         where.append("fit_score >= ?")
         params.append(min_score)
