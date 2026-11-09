@@ -964,8 +964,11 @@ def jobs_filter(
     ),
     location: Optional[str] = typer.Option(
         None, "--location", help="Location substring, case-insensitive."),
+    # Boolean PAIR syntax (--remote/--on-site) — the two names are
+    # aliases that set True/False respectively. Comma-separated names
+    # would make --on-site a second set-true alias of --remote (audit H1).
     remote: Optional[bool] = typer.Option(
-        None, "--remote", "--on-site",
+        None, "--remote/--on-site",
         help="Restrict to remote (is_remote=1) or on-site (is_remote=0) rows.",
     ),
     seniority: Optional[str] = typer.Option(
@@ -974,7 +977,10 @@ def jobs_filter(
     ),
     min_salary: Optional[float] = typer.Option(
         None, "--min-salary",
-        help="Minimum annualized pay — a range reaching this counts.",
+        help="Minimum annualized pay — a range reaching this counts. Without "
+             "a resolvable currency (no --currency and no profile "
+             "compensation.salary_currency), rows in ANY currency match — "
+             "currencies are not compared and results may mix currencies.",
     ),
     currency: Optional[str] = typer.Option(
         None, "--currency",

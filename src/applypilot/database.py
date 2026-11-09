@@ -933,6 +933,17 @@ class FilterPredicates:
     limit: int | None = None
 
 
+def _escape_like(text: str) -> str:
+    """Escape SQL LIKE wildcards so user input matches literally.
+
+    `%` and `_` in a location, keyword, or exclusion are data, not
+    patterns — the keyword `50%` must match a literal `50%`, not every
+    string containing `50`. Paired with `ESCAPE '\\'` on every LIKE
+    clause the builder emits (audit L2).
+    """
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def filter_jobs(predicates: FilterPredicates,
                 current_resume_hash: str | None = None,
                 conn: sqlite3.Connection | None = None) -> list[dict]:
@@ -976,8 +987,8 @@ def filter_jobs(predicates: FilterPredicates,
         params.append(cutoff)
 
     if predicates.location:
-        where.append("location LIKE ?")
-        params.append(f"%{predicates.location}%")
+        where.append("location LIKE ? ESCAPE '\\'")
+        params.append(f"%{_escape_like(predicates.location)}%")
 
     if predicates.remote is not None:
         where.append("is_remote = ?")
@@ -1011,13 +1022,13 @@ def filter_jobs(predicates: FilterPredicates,
 
     searchable = "lower(coalesce(title, '') || ' ' || coalesce(full_description, ''))"
     if predicates.keywords:
-        like = [f"{searchable} LIKE ?" for _ in predicates.keywords]
+        like = [f"{searchable} LIKE ? ESCAPE '\\'" for _ in predicates.keywords]
         where.append(f"({' OR '.join(like)})")
-        params.extend(f"%{k.lower()}%" for k in predicates.keywords)
+        params.extend(f"%{_escape_like(k.lower())}%" for k in predicates.keywords)
     if predicates.exclude_keywords:
         for keyword in predicates.exclude_keywords:
-            where.append(f"{searchable} NOT LIKE ?")
-            params.append(f"%{keyword.lower()}%")
+            where.append(f"{searchable} NOT LIKE ? ESCAPE '\\'")
+            params.append(f"%{_escape_like(keyword.lower())}%")
 
     if predicates.stale_only:
         # Spec: scored_resume_hash != current resume hash (or NULL). An
