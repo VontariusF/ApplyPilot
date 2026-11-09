@@ -53,12 +53,13 @@ import json
 import os
 import stat
 import sys
+import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-RUN_DIR = Path(os.environ.get("DOGFOOD_RUN_DIR", "/home/user/work/dogfood-run"))
+RUN_DIR = Path(os.environ.get("DOGFOOD_RUN_DIR") or Path(tempfile.gettempdir()) / "dogfood-run")
 
 # --- Environment BEFORE any applypilot import binds paths at import time. ---
 RUN_DIR.mkdir(parents=True, exist_ok=True)

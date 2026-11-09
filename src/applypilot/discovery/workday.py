@@ -1,6 +1,6 @@
 """Workday ATS direct API scraper: searches employer career portals.
 
-Scrapes Workday-powered career sites (TD, RBC, NVIDIA, Salesforce, etc.)
+Scrapes Workday-powered career sites (NVIDIA, Salesforce, Workday, etc.)
 via the undocumented CXS JSON API. Zero LLM, zero browser -- pure HTTP.
 
 Employer registry is loaded from config/employers.yaml instead of being
