@@ -35,6 +35,8 @@ import pytest
 from typer.testing import CliRunner
 
 from applypilot import config, database, engine_auth, onboarding
+from applypilot.apply import launcher
+from applypilot.apply.launcher import mark_result, new_claim_token
 from applypilot.cli import app
 from tests.test_agent_materials import (
     DESCRIPTION,
@@ -245,6 +247,70 @@ def test_claim_splits_two_loops_across_processes(app_dir):
     assert _row(conn, "https://jobs/1")["apply_status"] == "applied"
 
 
+def test_displaced_holders_report_cannot_overwrite_a_reclaim(store, monkeypatch):
+    """V2 (audit art_G3Mz5okZ): mark_result's F8 ownership check is
+    read-time only; the recording UPDATE is now claim-conditional. A
+    stale-lock reclaim that lands between the check and the write wins —
+    the displaced holder's report becomes a superseded no-op instead of
+    clobbering the reclaimer's row."""
+    conn = store
+    url = "https://jobs/1"
+    _seed_apply_job(conn, url)
+    conn.execute(
+        "UPDATE jobs SET apply_status = 'in_progress', agent_id = 'claude', "
+        "apply_task_id = ? WHERE url = ?",
+        (new_claim_token(), url))
+    conn.commit()
+    claim = _row(conn, url)["apply_task_id"]
+
+    reclaimer_token = new_claim_token()
+    state = {"reclaimed": False}
+
+    class _ReclaimBetweenCheckAndWrite:
+        """Fault injection (the audit's suggested shape): the reclaimer's
+        token lands the moment mark_result issues its recording UPDATE —
+        the exact window between the read-time check and the write."""
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, sql, params=()):
+            if (not state["reclaimed"]
+                    and sql.lstrip().upper().startswith("UPDATE")):
+                state["reclaimed"] = True
+                self._inner.execute(
+                    "UPDATE jobs SET apply_task_id = ? WHERE url = ?",
+                    (reclaimer_token, url))
+                # A real reclaim runs on its own connection; commit so the
+                # displaced holder's rollback cannot undo it either.
+                self._inner.commit()
+            return self._inner.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    monkeypatch.setattr(launcher, "get_connection",
+                        lambda: _ReclaimBetweenCheckAndWrite(conn))
+
+    for status in ("applied", "failed"):
+        state["reclaimed"] = False
+        # Reset the row between runs: the reclaim token stands.
+        conn.execute(
+            "UPDATE jobs SET apply_status = 'in_progress', "
+            "apply_task_id = ? WHERE url = ?", (claim, url))
+        conn.commit()
+
+        outcome = mark_result(url, status, error="boom", claim=claim,
+                              task_id="task-1")
+        assert outcome == "superseded", status
+
+        # The displaced report wrote nothing: the reclaimer's token stands.
+        row = _row(conn, url)
+        assert row["apply_task_id"] == reclaimer_token, status
+        assert row["apply_status"] == "in_progress", status
+        assert row["applied_at"] is None, status
+
+
 # ---------------------------------------------------------------------------
 # F12 — one job shape, cap-aware lookahead
 # ---------------------------------------------------------------------------
@@ -371,6 +437,22 @@ def test_same_bad_url_mistake_yields_the_same_code_on_both_verbs(store):
     for argv in (
         ["tailor", "--url", "https://x/none", "--data", GOOD_TAILOR_DATA],
         ["cover", "--url", "https://x/none", "--text", GOOD_COVER],
+    ):
+        result = run(*argv)
+        assert result.exit_code == 1, result.stdout
+        assert payload_of(result)["error"]["code"] == "unknown_job"
+
+
+def test_same_bad_url_plus_malformed_data_yields_the_same_code_on_both_verbs(store):
+    """V1 (audit art_G3Mz5okZ): the alignment holds even when the materials
+    are malformed too. Tailor used to parse --data before the job load and
+    answered invalid_resume_data for an unknown-URL + malformed-data
+    mistake where cover answered unknown_job — the job check now comes
+    first on both verbs, so the repair loop re-anchors on the URL."""
+    for argv in (
+        ["tailor", "--url", "https://x/none", "--data", "{not json"],
+        ["tailor", "--url", "https://x/none", "--data", "null"],
+        ["cover", "--url", "https://x/none", "--text", "{not json"],
     ):
         result = run(*argv)
         assert result.exit_code == 1, result.stdout
