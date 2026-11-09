@@ -46,6 +46,7 @@ from kestrel.company_identity import normalize_name_key
 from kestrel.database import (
     LEAD_SOURCE_PUBLIC_PAGE,
     LEAD_SOURCE_SERP,
+    LEAD_SOURCE_TAVILY,
     get_connection,
     high_match_companies,
     upsert_hiring_lead,
@@ -211,7 +212,8 @@ def clean_profile_title(raw_title: object) -> str | None:
 
 
 def map_search_result(*, link: str, title: object,
-                      company_key: str) -> dict:
+                      company_key: str,
+                      source: str = LEAD_SOURCE_SERP) -> dict:
     """Map one search-provider result to a hiring_leads row (pure).
 
     Shared by the SERP and Tavily X-ray sources: both return result
@@ -220,7 +222,9 @@ def map_search_result(*, link: str, title: object,
     when the result is not a usable LinkedIn-profile metadata hit —
     callers skip the row and keep the batch alive (B10). Non-profile
     links (company pages, posts) are filter, not error: they are simply
-    not people.
+    not people. ``source`` records the provider that served the
+    metadata (serp | tavily) — provenance, so a Tavily row reads as
+    Tavily-sourced (dogfood finding 2026-11-09).
     """
     link = str(link or "").strip()
     if not is_linkedin_profile_url(link):
@@ -237,11 +241,9 @@ def map_search_result(*, link: str, title: object,
         "full_name": full_name,
         "title": cleaned,
         "company_key": company_key,
-        # The source column classifies the discovery surface (X-ray
-        # search metadata vs public page vs manual); the provider that
-        # served the metadata (serp | tavily) is configuration, not
-        # provenance, so both X-ray providers store the same label.
-        "source": LEAD_SOURCE_SERP,
+        # The search surface (X-ray metadata) is the same for both
+        # providers; the source column records WHICH provider served it.
+        "source": source,
         # The search result is its own discovery surface; there is no
         # separate evidence page (and fetching one is out of bounds).
         "evidence_url": None,
@@ -251,13 +253,87 @@ def map_search_result(*, link: str, title: object,
 def map_serp_result(raw: dict, company_key: str) -> dict:
     """Map one SERP organic result to a hiring_leads row (pure)."""
     return map_search_result(link=raw.get("link"), title=raw.get("title"),
-                             company_key=company_key)
+                             company_key=company_key,
+                             source=LEAD_SOURCE_SERP)
 
 
 def map_tavily_result(raw: dict, company_key: str) -> dict:
     """Map one Tavily search result to a hiring_leads row (pure)."""
     return map_search_result(link=raw.get("url"), title=raw.get("title"),
-                             company_key=company_key)
+                             company_key=company_key,
+                             source=LEAD_SOURCE_TAVILY)
+
+
+def company_affiliation_field(*, title: object, snippet: object,
+                              display_name: str,
+                              domain: str | None = None) -> str | None:
+    """Which metadata field attributes this result to the company, if any.
+
+    Pure, case-insensitive whole-word match: the company display name —
+    or its domain — must appear in the result title or in the snippet
+    the provider already served. Returns ``"title"`` or ``"snippet"``,
+    or None when neither field names the company. A query keyword is
+    not evidence of affiliation (dogfood finding 2026-11-09: students
+    and founders at unrelated companies were attributed to the queried
+    employer because the query named it). No network calls — both
+    fields are metadata the adapter already holds.
+    """
+    needles = [str(display_name or "").lower()]
+    if domain:
+        needles.append(str(domain).lower())
+    needles = [n for n in needles if n]
+    for field, text in (("title", str(title or "")),
+                        ("snippet", str(snippet or ""))):
+        if not text:
+            continue
+        lowered = text.lower()
+        for needle in needles:
+            if re.search(rf"\b{re.escape(needle)}\b", lowered):
+                return field
+    return None
+
+
+def affiliated_xray_rows(raw_results: list[dict], company: dict, *,
+                         mapper: Callable[[dict, str], dict],
+                         ) -> tuple[list[dict], int]:
+    """Map raw X-ray results to lead rows, keeping affiliated ones (pure).
+
+    Two independent gates per result, both B10 — a bad result is
+    dropped, never fatal to the batch:
+
+    1. The LinkedIn host+path gate inside ``mapper`` (not a person, or
+       not a profile link — metadata noise).
+    2. The affiliation gate: the company name or domain must appear in
+       the result title or snippet (``company_affiliation_field``);
+       otherwise the result is dropped and counted, not stored.
+
+    Returns the mapped rows and the count dropped for no affiliation —
+    the run payload's ``dropped_no_affiliation`` counter.
+    """
+    rows: list[dict] = []
+    dropped = 0
+    for raw in raw_results:
+        try:
+            row = mapper(raw, company["company_key"])
+        except ValueError as exc:
+            # B10: one unusable result never aborts the batch. The
+            # message is generic — result titles carry personal data.
+            log.debug("Skipping unusable X-ray result: %s", exc)
+            continue
+        matched = company_affiliation_field(
+            title=raw.get("title"),
+            # SerpAPI serves ``snippet``, Tavily ``content`` — same
+            # role, either name accepted.
+            snippet=raw.get("snippet") or raw.get("content"),
+            display_name=company.get("display_name", ""),
+            domain=company.get("domain"))
+        if matched is None:
+            dropped += 1
+            log.debug("Dropping result: metadata names no company affiliation")
+            continue
+        log.debug("Result attributed via %s match", matched)
+        rows.append(row)
+    return rows, dropped
 
 
 def xray_query(display_name: str,
@@ -670,19 +746,15 @@ class SerpXRaySource:
                                    or config.leads_serp_results_per_query())
         self._taxonomy = (tuple(taxonomy) if taxonomy is not None
                           else config.leads_role_taxonomy())
+        self.dropped_no_affiliation = 0
 
     def discover_for_company(self, company: dict) -> list[dict]:
         query = xray_query(company["display_name"], self._taxonomy)
         raw_results = self._client.organic_results(
             query, num=self._results_per_query)
-        leads: list[dict] = []
-        for raw in raw_results:
-            try:
-                leads.append(map_serp_result(raw, company["company_key"]))
-            except ValueError as exc:
-                # B10: one unusable result never aborts the batch. The
-                # message is generic — result titles carry personal data.
-                log.debug("Skipping unusable SERP result: %s", exc)
+        leads, dropped = affiliated_xray_rows(
+            raw_results, company, mapper=map_serp_result)
+        self.dropped_no_affiliation += dropped
         return leads
 
 
@@ -698,9 +770,9 @@ class TavilyXRaySource:
     """
 
     name = "tavily"
-    # Same surface class as the SERP source: search-engine X-ray
-    # metadata. The provider is configuration, not provenance.
-    source_label = LEAD_SOURCE_SERP
+    # The provider that served the metadata IS the provenance: Tavily
+    # rows read as Tavily-sourced (dogfood finding 2026-11-09).
+    source_label = LEAD_SOURCE_TAVILY
 
     def __init__(self,
                  client: TavilyClient | None = None,
@@ -726,19 +798,16 @@ class TavilyXRaySource:
                              else config.leads_tavily_max_results())
         self._taxonomy = (tuple(taxonomy) if taxonomy is not None
                           else config.leads_role_taxonomy())
+        self.dropped_no_affiliation = 0
 
     def discover_for_company(self, company: dict) -> list[dict]:
         query = xray_query_plain(company["display_name"], self._taxonomy)
         raw_results = self._client.search_results(
             query, include_domains=[_LINKEDIN_HOST_SUFFIX],
             max_results=self._max_results)
-        leads: list[dict] = []
-        for raw in raw_results:
-            try:
-                leads.append(map_tavily_result(raw, company["company_key"]))
-            except ValueError as exc:
-                # B10, same as the SERP source: dropped, not trusted.
-                log.debug("Skipping unusable Tavily result: %s", exc)
+        leads, dropped = affiliated_xray_rows(
+            raw_results, company, mapper=map_tavily_result)
+        self.dropped_no_affiliation += dropped
         return leads
 
 
@@ -1092,6 +1161,10 @@ def discover_hiring_leads(conn: sqlite3.Connection | None = None,
         "companies_without_domain": without_domain,
         "discovered": discovered,
         "skipped_existing": skipped_existing,
+        # Results dropped because the metadata names no company
+        # affiliation (dogfood finding 2026-11-09) — visible, not silent.
+        "dropped_no_affiliation": sum(
+            int(getattr(s, "dropped_no_affiliation", 0)) for s in active),
         "scored_jobs_without_company": conn.execute(
             "SELECT COUNT(*) FROM jobs "
             "WHERE fit_score IS NOT NULL AND company IS NULL").fetchone()[0],

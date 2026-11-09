@@ -504,9 +504,10 @@ DEFAULTS = {
     # Hiring-leads spec art_u0YGUqpk §2: a company is high-match when
     # MAX(fit_score) across its member jobs reaches this floor. The
     # packaged leads.yaml ships the same number; the loader falls back
-    # here when that file is absent. Note: the job scorer's scale is
-    # 1-10, so deployments must size this threshold to their scale.
-    "min_company_fit": 75,
+    # here when that file is absent. The job scorer's scale is 1-10, so
+    # the default rides that scale (dogfood 2026-11-09: the original
+    # 0-100-scale default of 75 left the default config unreachable).
+    "min_company_fit": 8,
     # Hiring-leads spec §4: discovery runs per UTC day. Caps provider
     # spend, not sends — nothing is ever sent. The packaged leads.yaml
     # ships the same number; the loader falls back here when absent.

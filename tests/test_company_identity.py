@@ -271,18 +271,19 @@ def test_company_fit_is_max_not_mean(isolated_db, monkeypatch):
 def test_high_match_threshold_boundary_at_default(isolated_db, monkeypatch):
     monkeypatch.setattr("kestrel.discovery.workday.load_employers", lambda: REGISTRY)
     conn = init_db()
-    _seed_scored(conn, "https://x/at-75", "Acme Robotics", None, 75)
-    _seed_scored(conn, "https://x/below-75", "Beta Labs", None, 74)
+    _seed_scored(conn, "https://x/at-8", "Acme Robotics", None, 8)
+    _seed_scored(conn, "https://x/below-8", "Beta Labs", None, 7)
 
-    # Default threshold (75): exactly-at is high-match, one-under is not.
+    # Default threshold (8, on the scorer's 1-10 scale — dogfood
+    # 2026-11-09): exactly-at is high-match, one-under is not.
     keys = [a["company_key"] for a in high_match_companies(conn=conn)]
     assert keys == ["name:acme-robotics"]
 
     # An explicit stricter threshold excludes the boundary company.
-    assert high_match_companies(conn=conn, min_fit=76) == []
+    assert high_match_companies(conn=conn, min_fit=8.5) == []
     # ...and a looser one admits both, highest fit first.
-    looser = high_match_companies(conn=conn, min_fit=70)
-    assert [a["fit_score"] for a in looser] == [75, 74]
+    looser = high_match_companies(conn=conn, min_fit=7)
+    assert [a["fit_score"] for a in looser] == [8, 7]
 
 
 def test_high_match_requires_at_least_one_scored_job(isolated_db, monkeypatch):
@@ -348,8 +349,9 @@ def test_refresh_materializes_company_identity(isolated_db, monkeypatch):
 
 def test_threshold_reads_leads_yaml_override(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "APP_DIR", tmp_path)
-    # No user copy → packaged example: the spec default.
-    assert config.leads_min_company_fit() == 75
+    # No user copy → packaged example: the default on the scorer's
+    # 1-10 scale (dogfood 2026-11-09 — 75 presumed a 0-100 scale).
+    assert config.leads_min_company_fit() == 8
 
     (tmp_path / "leads.yaml").write_text("min_company_fit: 50\n", encoding="utf-8")
     assert config.leads_min_company_fit() == 50.0
