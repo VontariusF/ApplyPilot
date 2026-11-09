@@ -649,12 +649,14 @@ _STAGE_QUEUES = {
     "cover": "pending_cover",
 }
 
-# F13: the attempts-exhaustion cap the stage queues enforce
-# (STAGE_CONDITIONS' COALESCE(tailor_attempts, 0) < 5 / cover_attempts < 5 —
-# database.py). The write verbs must refuse a job the queue considers dead,
-# so the two cannot drift: the same number, named once here. (The literal
-# lives in STAGE_CONDITIONS; wave 2 owns database.py and will unify.)
-_STAGE_ATTEMPT_CAP = 5
+# F13/V3: the attempts-exhaustion caps the stage queues enforce
+# (STAGE_CONDITIONS' COALESCE(tailor_attempts, 0) < cap / cover_attempts
+# < cap — database.py). The write verbs must refuse a job the queue
+# considers dead, so the two cannot drift: the same number, sourced from
+# config.DEFAULTS — the single home for the cap (the literal 5 used to
+# live in three places; see the wave-1 verification audit, finding V3).
+_TAILOR_ATTEMPT_CAP = config.DEFAULTS["max_tailor_attempts"]
+_COVER_ATTEMPT_CAP = config.DEFAULTS["max_cover_attempts"]
 
 # The scorer's description window: the LLM sees the first 6000 chars of
 # full_description (scorer.score_job), so the host agent judges a job on
@@ -1029,14 +1031,14 @@ def _host_tailor(url: str, data_raw: str, reveal: bool) -> dict:
     # pending_tailor — the write verb must refuse it for the same reason
     # instead of silently writing (and incrementing attempts again on) a
     # job the LLM path's retry budget considers dead.
-    if (job["tailor_attempts"] or 0) >= _STAGE_ATTEMPT_CAP:
+    if (job["tailor_attempts"] or 0) >= _TAILOR_ATTEMPT_CAP:
         _fail("stage_exhausted",
               f"{url} exhausted its {job['tailor_attempts']} tailor "
               "attempts — the pending_tailor queue excludes it; reset the "
               "attempts (portal board) to retry",
               {"url": url, "stage": "tailor",
                "attempts": job["tailor_attempts"],
-               "cap": _STAGE_ATTEMPT_CAP})
+               "cap": _TAILOR_ATTEMPT_CAP})
 
     # F14/V1: the job checks above come first — the same order as cover.
     # Parsing --data before them let an unknown-URL + malformed-data
@@ -1145,14 +1147,14 @@ def _host_cover(url: str, text: str, reveal: bool) -> dict:
     # job is refused by the write verb for the same reason it is invisible
     # to job-next, instead of being written (and pushed further past the
     # cap) behind the caller's back.
-    if (job["cover_attempts"] or 0) >= _STAGE_ATTEMPT_CAP:
+    if (job["cover_attempts"] or 0) >= _COVER_ATTEMPT_CAP:
         _fail("stage_exhausted",
               f"{url} exhausted its {job['cover_attempts']} cover attempts "
               "— the pending_cover queue excludes it; reset the attempts "
               "(portal board) to retry",
               {"url": url, "stage": "cover",
                "attempts": job["cover_attempts"],
-               "cap": _STAGE_ATTEMPT_CAP})
+               "cap": _COVER_ATTEMPT_CAP})
 
     letter = sanitize_text(text)
     validation = validate_cover_letter(letter, mode="lenient")

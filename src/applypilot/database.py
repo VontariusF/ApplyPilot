@@ -420,9 +420,20 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
 
     Returns:
         Dictionary with keys:
-            total, by_site, pending_detail, with_description,
-            scored, unscored, tailored, untailored_eligible,
-            with_cover_letter, applied, score_distribution
+            total, by_site, pending_detail, with_description, undescribed,
+            scored, scored_fresh, score_failed, unscored, tailored,
+            untailored_eligible, with_cover_letter, applied,
+            score_distribution
+
+    Accounting (S2): `unscored`, `scored_fresh` and `score_failed` are
+    disjoint and partition the described rows —
+        unscored + scored_fresh + score_failed == with_description
+        undescribed + with_description == total
+    `scored` (fit_score IS NOT NULL) deliberately overlaps `score_failed`
+    when a rescore failed: the previous good score is kept by design and
+    carries a live `score_error`, so the row counts in both. Terminal
+    apply statuses (`captcha`, `manual_marked`, `expired`) are reported
+    as separate buckets so every apply_status reconciles to total.
     """
     if conn is None:
         conn = get_connection()
@@ -454,14 +465,36 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
         "SELECT COUNT(*) FROM jobs WHERE detail_error IS NOT NULL"
     ).fetchone()[0]
 
-    # Scoring stage
+    # Scoring stage. S2 accounting: a failed RESCORE leaves the previous
+    # fit_score/scored_by in place and sets score_error (stability by
+    # design — a good score is not destroyed because a rescore errored),
+    # so such a row appears in BOTH `scored` and `score_failed`. The
+    # disjoint buckets are `scored_fresh` (live score, no error) and
+    # `score_failed`; together with `unscored` they partition every
+    # described row exactly once:
+    #   unscored + scored_fresh + score_failed == with_description
+    # and undescribed + with_description == total.
     stats["scored"] = conn.execute(
         "SELECT COUNT(*) FROM jobs WHERE fit_score IS NOT NULL"
     ).fetchone()[0]
 
+    stats["scored_fresh"] = conn.execute(
+        "SELECT COUNT(*) FROM jobs "
+        "WHERE fit_score IS NOT NULL AND score_error IS NULL"
+    ).fetchone()[0]
+
+    stats["score_failed"] = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE score_error IS NOT NULL"
+    ).fetchone()[0]
+
     stats["unscored"] = conn.execute(
         "SELECT COUNT(*) FROM jobs "
-        "WHERE full_description IS NOT NULL AND fit_score IS NULL"
+        "WHERE full_description IS NOT NULL AND fit_score IS NULL "
+        "AND score_error IS NULL"
+    ).fetchone()[0]
+
+    stats["undescribed"] = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE full_description IS NULL"
     ).fetchone()[0]
 
     # Score distribution
@@ -473,15 +506,21 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
     stats["score_distribution"] = [(row[0], row[1]) for row in dist_rows]
 
     # Score provenance (spec art_IMViYTMU): host-written vs LLM-written
-    # vs pre-column rows. 'provider' buckets every non-host attribution
-    # (openai, gemini, local, ...); NULL scored_by is 'unattributed' —
-    # historical rows are never backfilled.
+    # vs pre-column rows. S1 symmetry: both arms require a LIVE score
+    # (fit_score IS NOT NULL) — a row whose rescore failed keeps its
+    # stale attribution but must not be counted as freshly attributed;
+    # a scored_by row without a score counts in none of the three.
+    # 'provider' buckets every non-host attribution (openai, gemini,
+    # local, ...); NULL scored_by is 'unattributed' — historical rows
+    # are never backfilled.
     stats["score_provenance"] = {
         "host": conn.execute(
-            "SELECT COUNT(*) FROM jobs WHERE scored_by = 'host'"
+            "SELECT COUNT(*) FROM jobs "
+            "WHERE scored_by = 'host' AND fit_score IS NOT NULL"
         ).fetchone()[0],
         "provider": conn.execute(
-            "SELECT COUNT(*) FROM jobs WHERE scored_by IS NOT NULL AND scored_by != 'host'"
+            "SELECT COUNT(*) FROM jobs WHERE scored_by IS NOT NULL "
+            "AND scored_by != 'host' AND fit_score IS NOT NULL"
         ).fetchone()[0],
         "unattributed": conn.execute(
             "SELECT COUNT(*) FROM jobs WHERE fit_score IS NOT NULL AND scored_by IS NULL"
@@ -505,8 +544,9 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
 
     stats["tailor_exhausted"] = conn.execute(
         "SELECT COUNT(*) FROM jobs "
-        "WHERE COALESCE(tailor_attempts, 0) >= 5 "
-        "AND tailored_resume_path IS NULL"
+        "WHERE COALESCE(tailor_attempts, 0) >= ? "
+        "AND tailored_resume_path IS NULL",
+        (config.DEFAULTS["max_tailor_attempts"],),
     ).fetchone()[0]
 
     # Cover letter stage
@@ -516,8 +556,9 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
 
     stats["cover_exhausted"] = conn.execute(
         "SELECT COUNT(*) FROM jobs "
-        "WHERE COALESCE(cover_attempts, 0) >= 5 "
-        "AND (cover_letter_path IS NULL OR cover_letter_path = '')"
+        "WHERE COALESCE(cover_attempts, 0) >= ? "
+        "AND (cover_letter_path IS NULL OR cover_letter_path = '')",
+        (config.DEFAULTS["max_cover_attempts"],),
     ).fetchone()[0]
 
     # Application stage
@@ -530,6 +571,17 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
     # the application never happened).
     stats["captcha"] = conn.execute(
         "SELECT COUNT(*) FROM jobs WHERE apply_status = 'captcha'"
+    ).fetchone()[0]
+
+    # S4: the other terminal apply statuses — manual-ATS marks (the
+    # destination of every acquire-time manual skip) and expired
+    # postings — surfaced so every apply_status reconciles to total.
+    stats["manual_marked"] = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE apply_status = 'manual'"
+    ).fetchone()[0]
+
+    stats["expired"] = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE apply_status = 'expired'"
     ).fetchone()[0]
 
     stats["apply_errors"] = conn.execute(
@@ -624,7 +676,10 @@ STAGE_CONDITIONS: dict[str, str] = {
     "score_failed": "score_error IS NOT NULL",
     "pending_tailor": (
         "fit_score >= ? AND full_description IS NOT NULL "
-        "AND tailored_resume_path IS NULL AND COALESCE(tailor_attempts, 0) < 5"
+        # V3: the attempts cap is config.DEFAULTS' — the same number the
+        # host verbs' stage_exhausted refusal reads.
+        f"AND tailored_resume_path IS NULL "
+        f"AND COALESCE(tailor_attempts, 0) < {config.DEFAULTS['max_tailor_attempts']}"
     ),
     "tailored": "tailored_resume_path IS NOT NULL",
     # Same shape as run_cover_letters' inline queue query (score >= min,
@@ -634,7 +689,7 @@ STAGE_CONDITIONS: dict[str, str] = {
         "fit_score >= ? AND full_description IS NOT NULL "
         "AND tailored_resume_path IS NOT NULL "
         "AND (cover_letter_path IS NULL OR cover_letter_path = '') "
-        "AND COALESCE(cover_attempts, 0) < 5"
+        f"AND COALESCE(cover_attempts, 0) < {config.DEFAULTS['max_cover_attempts']}"
     ),
     "pending_apply": (
         "tailored_resume_path IS NOT NULL AND applied_at IS NULL "
@@ -643,6 +698,10 @@ STAGE_CONDITIONS: dict[str, str] = {
         f"AND {APPLY_URL_VALID_SQL} AND fit_score >= ?"
     ),
     "applied": "applied_at IS NOT NULL",
+    # S4: terminal states the apply vocabulary retires — surfaced as board
+    # stages and stats buckets so every row reconciles to total.
+    "manual_marked": "apply_status = 'manual'",
+    "expired": "apply_status = 'expired'",
 }
 
 

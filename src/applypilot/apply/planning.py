@@ -198,6 +198,7 @@ def stage_batch_plan(min_score: int, limit: Optional[int],
     }
     staged = {**_plan_core(day, min_score, cap, urls),
               "plan_hash": digest,
+              "requested_limit": limit,
               "staged_at": datetime.now(timezone.utc).isoformat()}
     config.write_secret_text(plan_path(), json.dumps(staged, indent=2))
     return payload
@@ -235,6 +236,10 @@ def verify_confirm(given_hash: str, explicit_cap: Optional[int],
     — the natural confirm (no flags repeated) must not drift-refuse just
     because the CLI's default (7) rode along when the plan staged a
     different one. An explicitly given value must still agree.
+
+    S2: --limit is compared against the staged REQUEST (requested_limit
+    in the token), not the derived batch size — a faithful repeat of an
+    over-requesting --limit is not drift.
 
     The live-set comparison re-derives with the STAGED selection, never
     the confirm invocation's flags — the natural confirm (no flags
@@ -276,18 +281,27 @@ def verify_confirm(given_hash: str, explicit_cap: Optional[int],
     planned_min = stored.get("min_score")
     # The confirm contract is "same flags as the --plan run": a selection
     # flag that disagrees with the plan describes a different batch. B3:
-    # an omitted flag (None) inherits the staged value instead.
+    # an omitted flag (None) inherits the staged value instead. S2: the
+    # token carries the REQUEST as made — the confirm compares --limit
+    # against the staged requested_limit, not the derived batch size, so
+    # a faithful repeat of an over-requesting --limit (10 requested, 3
+    # eligible) no longer drift-refuses.
     if min_score is not None and min_score != planned_min:
         raise PlanDriftError(
             "--min-score differs from the staged plan's selection — plan "
             "again; a confirmed batch is the batch that runs.",
             details={"staged_min_score": planned_min,
                      "given_min_score": min_score})
-    if limit is not None and limit != len(planned_urls):
+    staged_limit = stored.get("requested_limit")
+    if staged_limit is None:
+        # Tokens staged before S2 carry no requested_limit — fall back to
+        # the old derived-batch comparison for them.
+        staged_limit = len(planned_urls)
+    if limit is not None and limit != staged_limit:
         raise PlanDriftError(
-            "--limit differs from the staged plan's batch size — plan "
+            "--limit differs from the staged plan's request — plan "
             "again; a confirmed batch is the batch that runs.",
-            details={"staged_batch_size": len(planned_urls),
+            details={"staged_limit": staged_limit,
                      "given_limit": limit})
     current_urls = [job["url"] for job in
                     derive_batch(min_score=planned_min,

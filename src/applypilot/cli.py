@@ -580,12 +580,18 @@ def status(
     summary.add_row("Enrichment errors", str(stats["detail_errors"]))
     summary.add_row(_scored_label(stats["score_provenance"]), str(stats["scored"]))
     summary.add_row("Pending scoring", str(stats["unscored"]))
+    # S2: visible accounting for errored scores (a failed rescore keeps
+    # its previous score, so it counts in `scored` too — by design).
+    summary.add_row("Score failures", str(stats["score_failed"]))
     summary.add_row("Tailored resumes", str(stats["tailored"]))
     summary.add_row("Pending tailoring (7+)", str(stats["untailored_eligible"]))
     summary.add_row("Cover letters", str(stats["with_cover_letter"]))
     summary.add_row("Ready to apply", str(stats["ready_to_apply"]))
     summary.add_row("Applied", str(stats["applied"]))
     summary.add_row("Captcha blocked", str(stats["captcha"]))
+    # S4: the other terminal apply statuses, so every row is accounted.
+    summary.add_row("Manual-marked (ATS)", str(stats["manual_marked"]))
+    summary.add_row("Expired postings", str(stats["expired"]))
     summary.add_row("Apply errors", str(stats["apply_errors"]))
 
     console.print(summary)

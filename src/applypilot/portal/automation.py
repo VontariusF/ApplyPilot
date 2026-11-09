@@ -202,6 +202,14 @@ def progress_for_run(run: dict) -> dict:
     Counts store rows stamped since the run started (discovered,
     scored, or applied, by kind). Store timestamps are UTC isoformat,
     so a 19-char prefix keeps string comparison consistent.
+
+    S6 — this is a WALL-CLOCK WINDOW, not a per-run attribution: every
+    row stamped since the run's start counts, whoever wrote it — a
+    concurrent second run, a host verb, or a manual mark on the portal
+    board all increment the same strip. The ``>=`` compare on the
+    19-char (second-resolution) prefix also admits rows stamped in the
+    same second as the run's start. Fine for plain-language progress;
+    do not read it as an exact per-run yield.
     """
     started = (run["started_at"] or "")[:19]
     column_unit = {"pipeline": ("discovered_at", "found"),
