@@ -137,7 +137,8 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
     so it won't destroy existing data.
 
     Schema columns by stage:
-      - Discovery:  url, title, salary, description, location, site, strategy, discovered_at
+      - Discovery:  url, title, company, company_domain, salary,
+                    description, location, site, strategy, discovered_at
       - Enrichment: full_description, application_url, detail_scraped_at, detail_error
       - Scoring:    fit_score, score_reasoning, scored_at
       - Tailoring:  tailored_resume_path, tailored_at, tailor_attempts
@@ -170,6 +171,15 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             site                  TEXT,
             strategy              TEXT,
             discovered_at         TEXT,
+
+            -- Company identity (hiring-leads spec art_u0YGUqpk §1):
+            -- resolved at ingestion (JobSpy's parsed name) or backfilled
+            -- (Workday registry, Composio header). company_domain is the
+            -- employer's own domain when the posting URL carries one
+            -- (direct-ATS host, Workday subdomain), else NULL — a
+            -- name-confidence identity.
+            company               TEXT,
+            company_domain        TEXT,
 
             -- Inferred remote-work flag (spec PR D): 0/1, set during
             -- enrichment and backfilled heuristically. NOT site data —
@@ -274,6 +284,23 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_document_versions_job
             ON document_versions (job_url, kind, version)
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS company_identity (
+            -- One row per resolved company (hiring-leads spec
+            -- art_u0YGUqpk §1) — the join target for anything that
+            -- groups jobs by employer. Keyed by the normalized domain
+            -- when the posting URLs carry one (direct-ATS host,
+            -- Workday subdomain), else the normalized display name
+            -- under the 'name:' prefix (name-confidence).
+            company_key   TEXT PRIMARY KEY,
+            display_name  TEXT NOT NULL,
+            domain        TEXT,
+            -- MAX(fit_score) across member jobs (spec §2). Derived
+            -- data, recomputed from jobs on every init_db.
+            fit_score     REAL,
+            updated_at    TEXT NOT NULL
+        )
+    """)
     conn.commit()
 
     # Run migrations for any columns added after initial schema
@@ -284,6 +311,11 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
     # and never overwrite non-NULL values.
     backfill_salary_data(conn)
     backfill_seniority(conn)
+    # Company identity (hiring-leads spec art_u0YGUqpk §1): resolve each
+    # row's employer from the fields the writers already hold, then
+    # materialize the per-company mirror (MAX fit across member jobs).
+    backfill_company_identity(conn)
+    refresh_company_identity(conn)
     # B1: idempotent repair of the pre-_clean_cell 'None'/'n/a' URL class
     # (no migration — see normalize_polluted_urls).
     normalize_polluted_urls(conn)
@@ -385,6 +417,130 @@ def backfill_seniority(conn: sqlite3.Connection) -> int:
     return updated
 
 
+def backfill_company_identity(conn: sqlite3.Connection) -> int:
+    """Resolve company/company_domain for rows that have neither.
+
+    Resolution order (hiring-leads spec art_u0YGUqpk §1): JobSpy's
+    parsed name (persisted at ingestion going forward), the Workday
+    subdomain mapped through config/employers.yaml, the Composio
+    writer's "Company: X" description header. Heuristics only — no LLM
+    entity resolution, no network.
+
+    Same NULL-only, idempotent contract as backfill_salary_data: only
+    rows with a NULL company are candidates, non-NULL values are never
+    overwritten, and a row that defeats the resolvers today (e.g. a
+    Workday slug missing from the registry) stays a candidate for a
+    later run. Returns the number of rows that gained an identity.
+    """
+    from kestrel.company_identity import resolve_company_identity
+    from kestrel.discovery.workday import load_employers
+
+    rows = conn.execute(
+        "SELECT url, company, description FROM jobs WHERE company IS NULL"
+    ).fetchall()
+    if not rows:
+        return 0
+
+    registry = load_employers()
+    updated = 0
+    for row in rows:
+        name, domain = resolve_company_identity(
+            row["url"], row["company"], row["description"], registry)
+        if name is None:
+            continue
+        conn.execute(
+            "UPDATE jobs SET company = ?, company_domain = ? WHERE url = ?",
+            (name, domain, row["url"]),
+        )
+        updated += 1
+    if updated:
+        conn.commit()
+    return updated
+
+
+def company_fit_aggregates(conn: sqlite3.Connection | None = None) -> list[dict]:
+    """Per-company fit aggregates over the store's scored rows (spec §2).
+
+    The one definition of "company fit": MAX(fit_score) across a
+    company's member jobs. Only scored rows participate, so every
+    aggregate has at least one scored member job by construction.
+    Grouping derives the same key the identity layer writes — the
+    company's domain when the posting URLs carry one, else the
+    normalized name under the 'name:' prefix — so CLI, agent verbs, and
+    the portal read one definition and cannot drift.
+
+    Returns {company_key, display_name, domain, fit_score, scored_jobs},
+    highest fit first. display_name is the spelling on the row that
+    produced the max (first-seen on ties).
+    """
+    from kestrel.company_identity import company_key_for
+
+    if conn is None:
+        conn = get_connection()
+    rows = conn.execute(
+        "SELECT company, company_domain, fit_score FROM jobs "
+        "WHERE company IS NOT NULL AND fit_score IS NOT NULL"
+    ).fetchall()
+
+    groups: dict[str, dict] = {}
+    for row in rows:
+        domain = row["company_domain"]
+        key = company_key_for(row["company"], domain)
+        agg = groups.get(key)
+        if agg is None:
+            agg = {"company_key": key, "display_name": row["company"],
+                   "domain": domain, "fit_score": row["fit_score"],
+                   "scored_jobs": 0}
+            groups[key] = agg
+        if row["fit_score"] > agg["fit_score"]:
+            agg["display_name"] = row["company"]
+            agg["fit_score"] = row["fit_score"]
+        agg["scored_jobs"] += 1
+    return sorted(groups.values(),
+                  key=lambda a: (-a["fit_score"], a["company_key"]))
+
+
+def refresh_company_identity(conn: sqlite3.Connection | None = None) -> int:
+    """Materialize company_identity from the live aggregates.
+
+    Runs at every init_db so the mirror cannot drift from jobs.
+    Everything it writes is derived data — recomputed from the identity
+    columns on each run; the NULL-only never-overwrite contract protects
+    the jobs rows, not this mirror. Returns the number of keys upserted.
+    """
+    if conn is None:
+        conn = get_connection()
+    now = _utc_now()
+    aggregates = company_fit_aggregates(conn=conn)
+    for agg in aggregates:
+        conn.execute(
+            "INSERT INTO company_identity (company_key, display_name, domain, "
+            "fit_score, updated_at) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(company_key) DO UPDATE SET "
+            "display_name=excluded.display_name, domain=excluded.domain, "
+            "fit_score=excluded.fit_score, updated_at=excluded.updated_at",
+            (agg["company_key"], agg["display_name"], agg["domain"],
+             agg["fit_score"], now),
+        )
+    conn.commit()
+    return len(aggregates)
+
+
+def high_match_companies(conn: sqlite3.Connection | None = None,
+                         min_fit: float | None = None) -> list[dict]:
+    """Companies whose best member job reaches the high-match threshold.
+
+    Threshold: config/leads.yaml min_company_fit, falling back to
+    config.DEFAULTS['min_company_fit'] (spec §2). At least one scored
+    member job is guaranteed by company_fit_aggregates. Same list shape,
+    filtered, ordered highest fit first.
+    """
+    if min_fit is None:
+        min_fit = config.leads_min_company_fit()
+    return [agg for agg in company_fit_aggregates(conn=conn)
+            if agg["fit_score"] >= min_fit]
+
+
 # Complete column registry: column_name -> SQL type with optional default.
 # This is the single source of truth. Adding a column here is all that's needed
 # for it to appear in both new databases and migrated ones.
@@ -392,6 +548,11 @@ _ALL_COLUMNS: dict[str, str] = {
     # Discovery
     "url": "TEXT PRIMARY KEY",
     "title": "TEXT",
+    # Company identity (hiring-leads spec art_u0YGUqpk §1): derived at
+    # ingestion (JobSpy) or backfilled (Workday registry, Composio
+    # header) — backfill_company_identity never overwrites once set.
+    "company": "TEXT",
+    "company_domain": "TEXT",
     "salary": "TEXT",
     "description": "TEXT",
     "location": "TEXT",
