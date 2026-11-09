@@ -18,7 +18,12 @@ min_company_fit: 8
 # not sends — Kestrel never sends anything.
 daily_discovery_cap: 10
 
-# Role titles the SERP X-ray queries search for at high-match companies.
+# Role titles the X-ray queries search for at high-match companies.
+# The last three are deliberate subsumers (live stress-test
+# 2026-11-09): real hiring headlines read "Talent @ Acme", "Talent
+# Operations Partner - Acme", "Sr Recruiter - Sales and GTM". The
+# attribution gate only accepts a match when the profile's own TITLE
+# also names the company, so the broad terms stay a guarantee.
 role_taxonomy:
   - "Head of Talent"
   - "Head of Talent Acquisition"
@@ -28,6 +33,10 @@ role_taxonomy:
   - "Talent Partner"
   - "Founder" # small companies: the founder does the hiring
   - "COO"
+  - "CEO" # startups: the chief executive does the hiring
+  - "Talent"
+  - "Recruiter"
+  - "Recruiting"
 
 serp:
   provider: serpapi # SerpAPI-compatible wire format; key: SERP_API_KEY
@@ -35,6 +44,11 @@ serp:
 
 tavily:
   max_results: 10 # results per X-ray query; key: TAVILY_API_KEY
+  # advanced depth is what makes the operator-style query surface
+  # actual profiles of the target company's hiring people (live
+  # stress-test 2026-11-09: basic returned 0 company-named profiles,
+  # advanced 6/10). Same 1-credit cost per query.
+  search_depth: advanced
 
 firecrawl:
   enabled: false # opt-in; public careers/team pages only, never

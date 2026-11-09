@@ -598,6 +598,9 @@ def test_tavily_request_body_carries_include_domains_and_no_site_prefix():
     assert urlparse(str(request.url)).hostname == "api.tavily.test"
     body = json.loads(request.content)
     assert body["include_domains"] == ["linkedin.com"]  # restrict mode
+    # advanced depth is load-bearing (live stress-test 2026-11-09:
+    # basic returned 0 company-named profiles, advanced 6/10).
+    assert body["search_depth"] == "advanced"
     assert body["max_results"] == 10
     assert body["api_key"] == SERP_KEY
     assert "site:" not in body["query"]
@@ -785,6 +788,18 @@ def test_default_min_company_fit_is_on_scorer_scale(app_dir):
     # could ever qualify for discovery without a manual override.
     assert config.DEFAULTS["min_company_fit"] == 8
     assert config.leads_min_company_fit() == 8
+
+
+def test_default_tavily_search_depth_is_advanced(app_dir):
+    # Live stress-test 2026-11-09: at basic depth the X-ray query
+    # returned zero company-named profiles; at advanced depth it
+    # returned 6/10. Same credit cost, so advanced is the default.
+    assert config.leads_tavily_search_depth() == "advanced"
+
+    (app_dir / "leads.yaml").write_text(
+        "tavily:\n  search_depth: turbo\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="search_depth"):
+        config.leads_tavily_search_depth()
 
 
 def test_packaged_leads_yaml_threshold_matches_default():

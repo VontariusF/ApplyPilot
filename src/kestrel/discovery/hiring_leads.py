@@ -536,12 +536,14 @@ class TavilyClient:
 
     def search_results(self, query: str, *,
                        include_domains: list[str],
-                       max_results: int) -> list[dict]:
+                       max_results: int,
+                       search_depth: str = "basic") -> list[dict]:
         """Search-result metadata for one query — never page fetches."""
         body = self._request("POST", "/search", {
             "query": query,
             "include_domains": list(include_domains),
             "max_results": max_results,
+            "search_depth": search_depth,
             "api_key": self._api_key,
         })
         results = body.get("results")
@@ -782,6 +784,7 @@ class TavilyXRaySource:
                  *,
                  max_results: int | None = None,
                  taxonomy: tuple[str, ...] | list[str] | None = None,
+                 search_depth: str | None = None,
                  sleep: Callable[[float], None] = time.sleep):
         if client is None:
             key = os.getenv("TAVILY_API_KEY", "").strip()
@@ -799,6 +802,12 @@ class TavilyXRaySource:
         self._max_results = (max_results
                              if max_results is not None
                              else config.leads_tavily_max_results())
+        # advanced depth is load-bearing for result quality: the live
+        # stress test (2026-11-09) measured 0 company-named profiles at
+        # basic depth vs 6/10 at advanced, same credit cost.
+        self._search_depth = (search_depth
+                              if search_depth is not None
+                              else config.leads_tavily_search_depth())
         self._taxonomy = (tuple(taxonomy) if taxonomy is not None
                           else config.leads_role_taxonomy())
         self.dropped_no_affiliation = 0
@@ -807,7 +816,8 @@ class TavilyXRaySource:
         query = xray_query_plain(company["display_name"], self._taxonomy)
         raw_results = self._client.search_results(
             query, include_domains=[_LINKEDIN_HOST_SUFFIX],
-            max_results=self._max_results)
+            max_results=self._max_results,
+            search_depth=self._search_depth)
         leads, dropped = affiliated_xray_rows(
             raw_results, company, mapper=map_tavily_result,
             taxonomy=self._taxonomy)

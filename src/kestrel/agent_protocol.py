@@ -1633,11 +1633,22 @@ def _leads_guardrails() -> dict:
 
 
 def _lead_block(row: dict, reveal: bool) -> dict:
-    """The wire shape of one lead — identity redacted unless --reveal."""
+    """The wire shape of one lead — identity redacted unless --reveal.
+
+    The stored title is the LinkedIn headline, which embeds the
+    person's name ("Jane Doe - Talent @ Acme") — redact the name from
+    the title too, not just from the full_name field, or the mask is
+    defeated by the field beside it (live run 2026-11-09).
+    """
+    title = str(row["title"] or "")
+    if not reveal:
+        name = str(row["full_name"] or "").strip()
+        if name and name in title:
+            title = title.replace(name, _LEADS_REDACTED)
     return {
         "profile_url": row["profile_url"] if reveal else _LEADS_REDACTED,
         "full_name": row["full_name"] if reveal else _LEADS_REDACTED,
-        "title": row["title"],
+        "title": title,
         "company_key": row["company_key"],
         "source": row["source"],
         "evidence_url": row["evidence_url"],
