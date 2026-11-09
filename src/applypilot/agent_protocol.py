@@ -25,6 +25,12 @@ Wire contract (the entire stdout surface):
   already surface as prefill chips and review fields) are replaced by a
   placeholder. --reveal opts back in per call on `next`, `review`, and
   every pipeline verb.
+- The redaction line, named (audit F11): resume_facts — the resume's
+  verbatim extractions — are withheld unless --reveal. REVIEW-phase
+  review_fields pass in the clear by design: by that phase they are
+  user-curated answers (edited in the portal or confirmed by the
+  driver), not raw resume text, so they are log-safe while the facts
+  they were extracted from stay gated.
 """
 
 from __future__ import annotations
@@ -378,9 +384,15 @@ def _next_payload(state: onboarding.InterviewState | None, reveal: bool = False)
 # Verbs
 # ---------------------------------------------------------------------------
 
-def _start(mode: str) -> dict:
+def _start(mode: str, backend_override: str | None = None) -> dict:
     ready = onboarding.readiness()
-    if ready["can_start_any"]:
+    if backend_override == "host":
+        # F15: the driver's explicit zero-LLM request — deterministic and
+        # cost-free even on a store with providers configured. start_intake
+        # is backend-free already; start_interview("host") skips the
+        # readiness gate and runs no kickoff turn.
+        backend = "host"
+    elif ready["can_start_any"]:
         backend = "claude" if ready["can_start_claude"] else "llm"
     else:
         # No interview backend: the driving host agent supplies the
@@ -398,7 +410,8 @@ def _start(mode: str) -> dict:
             state = onboarding.set_agent_led(True)
     else:
         # An interview in progress resumes as-is (the portal's two-tabs
-        # rule): start never wipes work, and --mode is not re-applied.
+        # rule): start never wipes work, and neither --mode nor --backend
+        # is re-applied.
         state = existing
     return _next_payload(state)
 
@@ -410,13 +423,29 @@ def start_cmd(
         help="Session mode for a NEWLY created interview: choices or agent. "
              "Ignored when an interview already exists (switch with agent-led).",
     ),
+    backend: Optional[str] = typer.Option(
+        None, "--backend",
+        help="Force the interview backend for a NEWLY started interview. "
+             "The only supported value is 'host' (alias of record for the "
+             "zero-LLM journey): the driving agent supplies the intelligence, "
+             "no kickoff turn, no provider calls — deterministic and cost-free "
+             "even on a store with providers configured. Omit for the ambient "
+             "choice (claude/llm when a provider is ready, host otherwise). "
+             "An interview in progress resumes as-is either way.",
+    ),
 ) -> None:
     """Open intake on a fresh store; run the kickoff once a resume is queued."""
     _prepare()
     if mode not in (onboarding.MODE_CHOICES, onboarding.MODE_AGENT):
         _fail("invalid_mode",
               f"--mode must be {onboarding.MODE_CHOICES!r} or {onboarding.MODE_AGENT!r}, got {mode!r}")
-    _verb(lambda: _start(mode))
+    if backend is not None and backend != "host":
+        _fail("invalid_backend",
+              f"--backend must be 'host' (the only forceable value — the "
+              f"zero-LLM journey), got {backend!r}; omit the flag for the "
+              "ambient backend choice",
+              {"backend": backend})
+    _verb(lambda: _start(mode, backend))
 
 
 @agent_app.command("next")
@@ -619,6 +648,13 @@ _STAGE_QUEUES = {
     "tailor": "pending_tailor",
     "cover": "pending_cover",
 }
+
+# F13: the attempts-exhaustion cap the stage queues enforce
+# (STAGE_CONDITIONS' COALESCE(tailor_attempts, 0) < 5 / cover_attempts < 5 —
+# database.py). The write verbs must refuse a job the queue considers dead,
+# so the two cannot drift: the same number, named once here. (The literal
+# lives in STAGE_CONDITIONS; wave 2 owns database.py and will unify.)
+_STAGE_ATTEMPT_CAP = 5
 
 # The scorer's description window: the LLM sees the first 6000 chars of
 # full_description (scorer.score_job), so the host agent judges a job on
@@ -1007,6 +1043,18 @@ def _host_tailor(url: str, data_raw: str, reveal: bool) -> dict:
         _fail("already_tailored",
               f"{url} already carries a tailored resume",
               {"url": url, "path": job["tailored_resume_path"]})
+    # F13: the queue predicate excludes an attempts-exhausted job from
+    # pending_tailor — the write verb must refuse it for the same reason
+    # instead of silently writing (and incrementing attempts again on) a
+    # job the LLM path's retry budget considers dead.
+    if (job["tailor_attempts"] or 0) >= _STAGE_ATTEMPT_CAP:
+        _fail("stage_exhausted",
+              f"{url} exhausted its {job['tailor_attempts']} tailor "
+              "attempts — the pending_tailor queue excludes it; reset the "
+              "attempts (portal board) to retry",
+              {"url": url, "stage": "tailor",
+               "attempts": job["tailor_attempts"],
+               "cap": _STAGE_ATTEMPT_CAP})
 
     validation = validate_json_fields(data, profile, mode="lenient")
     if not validation["passed"]:
@@ -1061,26 +1109,16 @@ def tailor_cmd(
 # ---------------------------------------------------------------------------
 
 def _host_cover(url: str, text: str, reveal: bool) -> dict:
-    """Sanitize, validate, and persist one host cover letter, then serve
-    the next cover payload. sanitize_text runs first — the same auto-fixes
-    (em dashes, smart quotes) the LLM path applies before validating."""
+    """Check the job, then sanitize, validate, and persist one host cover
+    letter, then serve the next cover payload.
+
+    The job checks come first (audit F14 — the same order as tailor: you
+    cannot fix the letter for a job you cannot write to), then sanitize_text
+    runs — the same auto-fixes (em dashes, smart quotes) the LLM path
+    applies before validating."""
     from applypilot.database import get_connection, get_jobs_by_stage
     from applypilot.scoring.cover_letter import persist_cover_letter
     from applypilot.scoring.validator import sanitize_text, validate_cover_letter
-
-    letter = sanitize_text(text)
-    validation = validate_cover_letter(letter, mode="lenient")
-    if not validation["passed"]:
-        _fail("invalid_cover_letter",
-              "the cover letter failed validation — fix the errors and "
-              "retry (nothing was persisted)",
-              {"errors": validation["errors"],
-               "warnings": validation["warnings"],
-               "avoid_notes": validation["errors"],
-               # Surfaced (audit F7) so a too-long refusal can show the
-               # driver exactly how far over the cap the letter is.
-               "word_count": validation["word_count"],
-               "retryable": True})
 
     conn = get_connection()
     job = _load_job(conn, url)
@@ -1100,6 +1138,32 @@ def _host_cover(url: str, text: str, reveal: bool) -> dict:
         _fail("already_covered",
               f"{url} already carries a cover letter",
               {"url": url, "path": job["cover_letter_path"]})
+    # F13: mirror the pending_cover queue predicate — an attempts-exhausted
+    # job is refused by the write verb for the same reason it is invisible
+    # to job-next, instead of being written (and pushed further past the
+    # cap) behind the caller's back.
+    if (job["cover_attempts"] or 0) >= _STAGE_ATTEMPT_CAP:
+        _fail("stage_exhausted",
+              f"{url} exhausted its {job['cover_attempts']} cover attempts "
+              "— the pending_cover queue excludes it; reset the attempts "
+              "(portal board) to retry",
+              {"url": url, "stage": "cover",
+               "attempts": job["cover_attempts"],
+               "cap": _STAGE_ATTEMPT_CAP})
+
+    letter = sanitize_text(text)
+    validation = validate_cover_letter(letter, mode="lenient")
+    if not validation["passed"]:
+        _fail("invalid_cover_letter",
+              "the cover letter failed validation — fix the errors and "
+              "retry (nothing was persisted)",
+              {"errors": validation["errors"],
+               "warnings": validation["warnings"],
+               "avoid_notes": validation["errors"],
+               # Surfaced (audit F7) so a too-long refusal can show the
+               # driver exactly how far over the cap the letter is.
+               "word_count": validation["word_count"],
+               "retryable": True})
 
     result, _final = persist_cover_letter(conn, job, letter,
                                           validation_mode="lenient")
@@ -1221,7 +1285,10 @@ def _host_apply_acquire(min_score_raw: str | None, reveal: bool) -> dict:
               {"apply": _apply_progress()})
 
     conn = get_connection()
-    job = acquire_job(min_score=min_score, worker_id=0, agent_label="host")
+    # F8: claim_token=True stamps a one-time ownership token into
+    # apply_task_id; apply-result must echo it back (--claim) to report.
+    job = acquire_job(min_score=min_score, worker_id=0, agent_label="host",
+                      claim_token=True)
     if job is None:
         locked = _locked_urls(conn)
         if locked:
@@ -1245,6 +1312,9 @@ def _host_apply_acquire(min_score_raw: str | None, reveal: bool) -> dict:
         "resume_path": job.get("tailored_resume_path"),
         "cover_letter_path": job.get("cover_letter_path"),
         "acquired_by": "host-worker-0",
+        # F8: the one-time ownership token — echo it as --claim on
+        # apply-result; without it the report is refused (not_claim_owner).
+        "claim": job.get("claim"),
         "apply": _apply_progress(),
         "progress": _pipeline_progress(conn),
         "resume": _scoring_resume_block(reveal),
@@ -1283,16 +1353,23 @@ def _validated_min_score(min_score_raw: str | None, default: int) -> int:
 
 
 def _host_apply_result(url: str, status: str, reason: str | None,
-                       min_score_raw: str | None) -> dict:
+                       min_score_raw: str | None, claim: str | None) -> dict:
     """Record one apply outcome through mark_result and release the lock.
 
     The URL must be under this loop's lock (apply-acquire took it):
     apply-result is the worker's own report path, not a mark override —
     human corrections go through the portal board or `apply
     --mark-applied/--mark-failed`, which carry the launcher's own
-    coordination rules. A refused outcome writes nothing.
+    coordination rules and stay deliberately tokenless. Since audit F8 the
+    lock carries a one-time claim token: --claim must echo the token
+    apply-acquire returned, and a wrong or missing token is refused with
+    not_claim_owner before any write. Locks without a token (old stores,
+    engine paths, stale reclaims by other paths) keep the pre-claim
+    behavior — reportable as before, no check enforced. A refused outcome
+    writes nothing.
     """
     from applypilot.apply.launcher import (
+        ClaimMismatch,
         derive_batch,
         mark_result,
         resolve_version_id,
@@ -1324,18 +1401,33 @@ def _host_apply_result(url: str, status: str, reason: str | None,
     # The apply-time snapshot (spec D3): the document versions the job's
     # materials point at — resolved at result time the way a manual mark
     # resolves them. NULL stays NULL for pre-history documents.
-    outcome = mark_result(
-        url, status,
-        error=(reason or status) if status in _TERMINAL_APPLY_STATUSES else reason,
-        permanent=status in _TERMINAL_APPLY_STATUSES,
-        resume_version_id=resolve_version_id(
-            conn, url, KIND_RESUME, job["tailored_resume_path"]),
-        cover_version_id=resolve_version_id(
-            conn, url, KIND_COVER_LETTER, job["cover_letter_path"]),
-    )
+    try:
+        outcome = mark_result(
+            url, status,
+            error=(reason or status) if status in _TERMINAL_APPLY_STATUSES else reason,
+            permanent=status in _TERMINAL_APPLY_STATUSES,
+            resume_version_id=resolve_version_id(
+                conn, url, KIND_RESUME, job["tailored_resume_path"]),
+            cover_version_id=resolve_version_id(
+                conn, url, KIND_COVER_LETTER, job["cover_letter_path"]),
+            claim=claim,
+        )
+    except ClaimMismatch as exc:
+        _fail("not_claim_owner",
+              f"{url} is not yours to report — apply-result must echo the "
+              "one-time claim token apply-acquire returned (--claim); the "
+              "lock holder's own claim records its outcome, every other "
+              "loop's report is refused (no state was changed)",
+              {"url": url, "hint": str(exc)})
 
-    next_rows = derive_batch(min_score=min_score, limit=1)
-    next_job = next_rows[0] if next_rows else None
+    # F12: the lookahead applies the same live daily-cap recheck the next
+    # apply-acquire runs in front of acquire_job — when the cap binds it
+    # never advertises a job the next call would refuse with cap_reached;
+    # cap_reached says which constraint the empty list reflects. The
+    # entries share _job_block with apply-acquire and the stage payloads:
+    # one job shape across the whole apply stage family.
+    cap_reached = _daily_cap_reached_planning_cap()
+    next_rows = [] if cap_reached else derive_batch(min_score=min_score, limit=1)
     return {
         "stage": "apply",
         "recorded": {
@@ -1346,10 +1438,8 @@ def _host_apply_result(url: str, status: str, reason: str | None,
             "terminal": status in _TERMINAL_APPLY_STATUSES,
         },
         "apply": _apply_progress(),
-        "next_eligible": (
-            {"url": next_job["url"], "title": next_job.get("title"),
-             "fit_score": next_job.get("fit_score")}
-            if next_job else None),
+        "next_eligible": [_job_block(next_job) for next_job in next_rows],
+        "cap_reached": cap_reached,
         "progress": _pipeline_progress(conn),
         "guardrails": _apply_guardrails(),
     }
@@ -1378,6 +1468,13 @@ def apply_result_cmd(
         None, "--status",
         help="One of applied, failed, expired, captcha, login_issue (the "
              "PR #57 vocabulary; captcha is terminal)."),
+    claim: Optional[str] = typer.Option(
+        None, "--claim",
+        help="The one-time ownership token apply-acquire returned (audit "
+             "F8). Required for locks acquired with a claim token; a wrong "
+             "or missing token is refused (not_claim_owner) before any "
+             "write. Tokenless locks (old stores, engine paths) report as "
+             "before."),
     reason: Optional[str] = typer.Option(
         None, "--reason", help="Failure reason (stored as apply_error)."),
     min_score: Optional[str] = typer.Option(
@@ -1390,4 +1487,4 @@ def apply_result_cmd(
         _fail("invalid_usage", "--url is required")
     if not status:
         _fail("invalid_usage", "--status is required")
-    _verb(lambda: _host_apply_result(url, status, reason, min_score))
+    _verb(lambda: _host_apply_result(url, status, reason, min_score, claim))

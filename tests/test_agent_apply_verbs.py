@@ -136,14 +136,19 @@ def test_apply_bookkeeping_journey_is_pure_bookkeeping(seeded_apply_store,
             assert payload["error"]["details"]["apply"]["headroom"] == 0
             break
         url = payload["job"]["url"]
-        # The lock is on the row, visibly held by the host loop.
+        # The lock is on the row, visibly held by the host loop — under a
+        # one-time claim token (audit F8) the report must echo.
+        claim = payload["claim"]
+        assert claim.startswith("claim:")
         assert payload["acquired_by"] == "host-worker-0"
         assert _row(conn, url)["apply_status"] == "in_progress"
         assert _row(conn, url)["agent_id"] == "host-worker-0"
+        assert _row(conn, url)["apply_task_id"] == claim
         # Bookkeeping says the submission is the driver's own act.
         assert "no verb launches" in payload["guardrails"]["browser_work"]
 
-        result = run("apply-result", "--url", url, "--status", "applied")
+        result = run("apply-result", "--url", url, "--status", "applied",
+                     "--claim", claim)
         assert result.exit_code == 0, result.stdout
         payload = payload_of(result)
         assert payload["recorded"]["outcome"] == "recorded"
@@ -261,10 +266,12 @@ def test_min_score_filters_the_queue(seeded_apply_store):
     conn = seeded_apply_store
     result = run("apply-acquire", "--min-score", "9")
     assert result.exit_code == 0, result.stdout
+    claim = payload_of(result)["claim"]
     url = payload_of(result)["job"]["url"]
     assert _row(conn, url)["fit_score"] == 9
 
-    result = run("apply-result", "--url", url, "--status", "applied")
+    result = run("apply-result", "--url", url, "--status", "applied",
+                 "--claim", claim)
     assert result.exit_code == 0, result.stdout
 
     # Only fit-8 jobs remain; a min-score of 9 finds nothing to acquire.
@@ -273,14 +280,19 @@ def test_min_score_filters_the_queue(seeded_apply_store):
     assert payload_of(result)["error"]["code"] == "no_eligible_job"
 
     # Acquire one normally, then check the summary honors the filter: the
-    # next-eligible summary at 9+ is honest about there being nothing.
+    # next-eligible summary at 9+ is honest about there being nothing —
+    # an empty list (F12 shape: shared _job_block entries), cap not binding.
     result = run("apply-acquire")
     assert result.exit_code == 0, result.stdout
     next_url = payload_of(result)["job"]["url"]
+    claim = payload_of(result)["claim"]
     result = run("apply-result", "--url", next_url,
-                 "--status", "applied", "--min-score", "9")
+                 "--status", "applied", "--min-score", "9",
+                 "--claim", claim)
     assert result.exit_code == 0, result.stdout
-    assert payload_of(result)["next_eligible"] is None
+    payload = payload_of(result)
+    assert payload["next_eligible"] == []
+    assert payload["cap_reached"] is False
 
 
 @pytest.mark.parametrize("bad", ["banana", "-5", "--5"])
@@ -303,9 +315,10 @@ def test_status_vocabulary_persists(seeded_apply_store, status):
     conn = seeded_apply_store
     result = run("apply-acquire")
     assert result.exit_code == 0, result.stdout
+    claim = payload_of(result)["claim"]
     url = payload_of(result)["job"]["url"]
 
-    argv = ["apply-result", "--url", url, "--status", status]
+    argv = ["apply-result", "--url", url, "--status", status, "--claim", claim]
     result = run(*argv, "--reason", "driver observed it") \
         if status == "failed" else run(*argv)
     assert result.exit_code == 0, result.stdout
@@ -330,9 +343,10 @@ def test_captcha_is_terminal_and_never_requeued(app_dir, isolated_db):
     conn = database.init_db()
     _tailored(conn, "https://jobs/1")
     result = run("apply-acquire")
+    claim = payload_of(result)["claim"]
     url = payload_of(result)["job"]["url"]
     assert run("apply-result", "--url", url,
-               "--status", "captcha").exit_code == 0
+               "--status", "captcha", "--claim", claim).exit_code == 0
     assert _row(conn, url)["apply_status"] == "captcha"
 
     result = run("apply-acquire", "--min-score", "0")
