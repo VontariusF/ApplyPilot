@@ -751,6 +751,12 @@ def _stage_payload(stage: str, job: dict | None, reveal: bool) -> dict:
         from applypilot.scoring.scorer import SCORE_PROMPT
 
         payload["rubric"] = SCORE_PROMPT
+        # Spec Layer 3: a served job that already carries a score can only
+        # be re-judged with --rescore (the already_scored refusal guards
+        # the verb) — the payload says so instead of leaving the host to
+        # discover it on a refused write.
+        if job is not None and job.get("fit_score") is not None:
+            payload["rescore_required"] = True
     elif stage == "enrich":
         payload["instructions"] = _ENRICH_INSTRUCTIONS
     elif stage == "tailor":
@@ -779,11 +785,21 @@ def _stage_payload(stage: str, job: dict | None, reveal: bool) -> dict:
 
 
 def _job_next(stage: str, reveal: bool) -> dict:
-    from applypilot.database import get_connection, get_jobs_by_stage
+    from applypilot.database import get_connection, get_jobs_by_stage, get_rerank_jobs
 
     conn = get_connection()
-    jobs = get_jobs_by_stage(conn=conn, stage=_STAGE_QUEUES[stage], limit=1)
-    return _stage_payload(stage, jobs[0] if jobs else None, reveal)
+    job = None
+    if stage == "score":
+        # Spec Layer 3: `jobs rerank` marks a re-judgment set; job-next
+        # serves exactly those first (newest mark first) before falling
+        # back to the ordinary pending_score queue.
+        marked = get_rerank_jobs(conn=conn, limit=1)
+        if marked:
+            job = marked[0]
+    if job is None:
+        jobs = get_jobs_by_stage(conn=conn, stage=_STAGE_QUEUES[stage], limit=1)
+        job = jobs[0] if jobs else None
+    return _stage_payload(stage, job, reveal)
 
 
 @agent_app.command("job-next")
@@ -827,7 +843,8 @@ def _validated_host_score(score_raw: str, reasoning: str | None) -> int:
 
 
 def _host_score(url: str, score_raw: str, keywords: str | None,
-                reasoning: str | None, rescore: bool, reveal: bool) -> dict:
+                reasoning: str | None, rescore: bool, reveal: bool,
+                prev_score: int | None = None) -> dict:
     """Validate and persist one host score, then serve the next payload.
 
     The write goes through scorer.persist_score — the same UPDATE the
@@ -836,7 +853,11 @@ def _host_score(url: str, score_raw: str, keywords: str | None,
     envelopes only.
     """
     from applypilot.database import get_connection, get_jobs_by_stage
-    from applypilot.scoring.scorer import persist_score, resume_sha256
+    from applypilot.scoring.scorer import (
+        PrevScoreMismatch,
+        persist_score,
+        resume_sha256,
+    )
 
     score = _validated_host_score(score_raw, reasoning)
 
@@ -863,15 +884,21 @@ def _host_score(url: str, score_raw: str, keywords: str | None,
               f"{url} already carries a fit score — pass --rescore to overwrite it",
               {"url": url, "fit_score": row["fit_score"]})
 
-    persist_score(
-        conn, url, score,
-        keywords=(keywords or "").strip(),
-        reasoning=(reasoning or "").strip(),
-        scored_by="host",
-        when=datetime.now(timezone.utc).isoformat(),
-        resume_hash=resume_hash,
-    )
-    conn.commit()
+    try:
+        persist_score(
+            conn, url, score,
+            keywords=(keywords or "").strip(),
+            reasoning=(reasoning or "").strip(),
+            scored_by="host",
+            when=datetime.now(timezone.utc).isoformat(),
+            resume_hash=resume_hash,
+            prev_score=prev_score,
+        )
+        conn.commit()
+    except PrevScoreMismatch as exc:
+        # Spec Layer 3: the pass-through disagrees with the stored score —
+        # the host judged against a stale payload. Nothing persisted.
+        _fail("prev_score_mismatch", str(exc), {"url": url, "prev_score": prev_score})
 
     jobs = get_jobs_by_stage(conn=conn, stage=_STAGE_QUEUES["score"], limit=1)
     return _stage_payload("score", jobs[0] if jobs else None, reveal)
@@ -889,6 +916,12 @@ def score_cmd(
         None, "--reasoning", help="2-3 sentences justifying the score. Required."),
     rescore: bool = typer.Option(
         False, "--rescore", help="Overwrite an existing score (LLM-path parity)."),
+    prev_score: Optional[int] = typer.Option(
+        None, "--prev-score",
+        help="The fit_score this judgment saw in the job-next payload — "
+             "rerank movement reporting (spec Layer 3). Refused as a typed "
+             "prev_score_mismatch envelope when it no longer matches the "
+             "stored score; nothing persists."),
     reveal: bool = typer.Option(
         False, "--reveal",
         help="Include the resume text and resume_facts in the returned next payload."),
@@ -899,7 +932,8 @@ def score_cmd(
         _fail("invalid_usage", "--url is required")
     if score is None:
         _fail("invalid_usage", "--score is required")
-    _verb(lambda: _host_score(url, score, keywords, reasoning, rescore, reveal))
+    _verb(lambda: _host_score(url, score, keywords, reasoning, rescore, reveal,
+                              prev_score=prev_score))
 
 
 def _load_job(conn, url: str) -> dict | None:

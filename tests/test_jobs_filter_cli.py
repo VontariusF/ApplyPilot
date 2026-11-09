@@ -262,6 +262,9 @@ def test_cli_json_reports_filterable_dimensions(seeded):
         "url", "title", "location", "site", "discovered_at", "date_posted",
         "salary_min", "salary_max", "salary_currency", "salary_interval",
         "seniority", "fit_score", "stale",
+        # Spec Layer 3 extended the contract: rerank state plus the newest
+        # rescore movement (prev_score / score_delta / rescored_at).
+        "rerank_marked_at", "prev_score", "score_delta", "rescored_at",
     }
     for job in payload["jobs"]:
         assert set(job) == expected_keys
@@ -280,6 +283,11 @@ def test_cli_json_reports_filterable_dimensions(seeded):
         "seniority": "senior",
         "fit_score": 8,
         "stale": False,
+        # Layer 3: never rerank-marked, never rescored.
+        "rerank_marked_at": None,
+        "prev_score": None,
+        "score_delta": None,
+        "rescored_at": None,
     }
 
 
