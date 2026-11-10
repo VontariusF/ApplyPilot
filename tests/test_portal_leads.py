@@ -19,14 +19,20 @@ HX = {"HX-Request": "true"}
 
 def seed_company(key: str = "acme-robotics.com", display: str = "Acme Robotics",
                  fit: float | None = 9.0) -> None:
+    """Seed a company through the real path — a scored job, then the
+    mirror refresh. Inserting into company_identity directly no longer
+    survives: refresh drops mirror rows with no backing jobs (sweep
+    art_Izev3UNN finding 6), so a fake row would vanish at the next
+    init_db and the board join would lose its display name."""
     conn = init_db()
     conn.execute(
-        "INSERT OR REPLACE INTO company_identity "
-        "(company_key, display_name, domain, fit_score, updated_at) "
-        "VALUES (?, ?, NULL, ?, ?)",
-        (key, display, fit, "2026-01-01T00:00:00+00:00"),
+        "INSERT OR REPLACE INTO jobs (url, title, company, company_domain, "
+        "fit_score, discovered_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (f"https://jobs.{key}/posting/seed", f"Engineer at {display}",
+         display, key, fit, "2026-01-01T00:00:00+00:00"),
     )
     conn.commit()
+    database.refresh_company_identity(conn)
 
 
 def seed_lead(**overrides) -> str:
@@ -102,6 +108,21 @@ def test_leads_route_matched_role_absent_when_no_taxonomy_hit(
     assert "Jane Hirer" in r.text
     # No invented badge — honest absence (the pure helper returns None).
     assert queries.matched_role("Chief People Officer") is None
+
+
+def test_matched_role_whole_word_matches_the_attribution_gate():
+    """The badge must use the attribution gate's whole-word rule: a
+    fused token like 'Salesforce Engineer' is not a 'Sales' hit, while
+    a whole-word term still badges regardless of surrounding
+    punctuation (sweep art_Izev3UNN suggestion 6)."""
+    assert queries.matched_role(
+        "Salesforce Engineer", ("Sales",)) is None
+    assert queries.matched_role(
+        "Talented Intern", ("Talent",)) is None
+    assert queries.matched_role(
+        "Talent Partner - Acme", ("Talent Partner",)) == "Talent Partner"
+    assert queries.matched_role(
+        "Talent@Acme", ("Talent",)) == "Talent"
 
 
 def test_leads_table_route_renders_board_partial(portal_client, seeded_profile):

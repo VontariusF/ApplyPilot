@@ -394,17 +394,21 @@ def matched_role(title: str | None,
     """The role-taxonomy term a lead's title hits, first match wins.
 
     Pure so the board annotation is testable without a store. Case-
-    insensitive substring, matching the adapters' deliberately shallow
-    page-text rule (discovery/hiring_leads.py). A lead with no taxonomy
-    hit (source 'manual', or a title the taxonomy does not name) renders
-    no role badge — honest absence, not a guess.
+    insensitive whole-word — the same rule as the attribution gate
+    (discovery/hiring_leads.py ``title_affiliation_role``) — so a lead
+    the gate admitted always renders its badge and a fused token like
+    'Salesforce Engineer' does not badge as 'Sales' (sweep
+    art_Izev3UNN suggestion 6). A lead with no taxonomy hit (source
+    'manual', or a title the taxonomy does not name) renders no role
+    badge — honest absence, not a guess.
     """
     if taxonomy is None:
         taxonomy = config.leads_role_taxonomy()
     if not title:
         return None
-    lowered = title.lower()
+    lowered = str(title).lower()
     for term in taxonomy:
-        if term.lower() in lowered:
-            return term
+        needle = re.escape(str(term).lower())
+        if re.search(rf"\b{needle}\b", lowered):
+            return str(term)
     return None

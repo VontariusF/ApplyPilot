@@ -224,6 +224,14 @@ def resolve_wttj_urls(conn: sqlite3.Connection) -> int:
                     break
 
     conn.commit()
+    if updated:
+        # Deletion changed the company fit population — recompute the
+        # identity mirror now, mid-session, not just at the next init_db
+        # (sweep art_Izev3UNN finding 6: a ghost high-match company must
+        # not survive the deletion that emptied it).
+        from kestrel.database import refresh_company_identity
+
+        refresh_company_identity(conn)
     return updated
 
 

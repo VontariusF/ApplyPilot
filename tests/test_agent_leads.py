@@ -10,6 +10,7 @@ unless --reveal, and the guardrails block riding every payload.
 """
 
 import json
+import os
 from datetime import datetime, timezone
 
 import pytest
@@ -220,6 +221,19 @@ def test_leads_discover_honors_company_and_limit(conn, monkeypatch, no_network):
     assert len(calls) == 1  # highest fit first (Acme, 90)
 
 
+def test_leads_discover_refuses_limit_zero_without_recording_a_run(
+        conn, monkeypatch, no_network):
+    _patch_build_source(monkeypatch, _FakeSource([dict(_LEAD)], []))
+    result = run("leads-discover", "--limit=0")
+    assert result.exit_code == 1
+    payload = payload_of(result)
+    assert payload["error"]["code"] == "invalid_limit"
+    # A run that reaches no provider must not count against the daily
+    # cap — a zero company scan is a refusal, not a spend (sweep
+    # art_Izev3UNN suggestion 1).
+    assert hl.discovery_runs_used() == 0
+
+
 # ---------------------------------------------------------------------------
 # The guardrails block rides every payload (spec criterion A7)
 # ---------------------------------------------------------------------------
@@ -293,6 +307,90 @@ def test_company_unresolved_refusal(conn, monkeypatch, no_network):
     payload = payload_of(result)
     assert payload["error"]["code"] == "company_unresolved"
     assert payload["error"]["details"]["company_key"] == "nowhere.example"
+
+
+def test_bad_leads_yaml_is_the_config_invalid_refusal_not_internal_error(
+        app_dir, conn, monkeypatch, no_network):
+    """A malformed leads.yaml value used to raise a bare ValueError that
+    _verb turned into internal_error — breaking even the read-only
+    leads-list verb (sweep art_Izev3UNN suggestion 2). The documented
+    typed refusal instead."""
+    (app_dir / "leads.yaml").write_text("daily_discovery_cap: not-a-number\n")
+    monkeypatch.setenv("TAVILY_API_KEY", SERP_KEY)
+
+    listing = run("leads-list")
+    assert listing.exit_code == 1
+    payload = payload_of(listing)
+    assert payload["error"]["code"] == "config_invalid"
+    assert "leads.yaml" in payload["error"]["message"]
+
+    discover = run("leads-discover")
+    assert discover.exit_code == 1
+    assert payload_of(discover)["error"]["code"] == "config_invalid"
+
+
+def test_bad_leads_yaml_depth_refuses_at_source_build(app_dir, conn,
+                                                      monkeypatch,
+                                                      no_network):
+    (app_dir / "leads.yaml").write_text(
+        "tavily:\n  search_depth: deepest\n")
+    monkeypatch.setenv("TAVILY_API_KEY", SERP_KEY)
+
+    with pytest.raises(hl.LeadsRefusal) as refused:
+        hl.discover_hiring_leads(conn)
+    assert refused.value.code == "config_invalid"
+
+
+def test_record_discovery_run_survives_a_failed_write_intact(
+        app_dir, monkeypatch):
+    """The counter rewrite is atomic: a crash mid-write leaves the
+    previous count readable and no temp litter behind — a half-written
+    discovery-usage.json was read as a reset-to-zero cap hole (sweep
+    art_Izev3UNN suggestion 3)."""
+    hl._record_discovery_run(NOW)
+    hl._record_discovery_run(NOW)
+    assert hl.discovery_runs_used(NOW) == 2
+
+    def failing_replace(src, dst):
+        raise OSError("simulated crash mid-write")
+
+    # Patch os.replace by hand and restore it precisely: monkeypatch.undo()
+    # would also tear down the app_dir fixture's path redirections.
+    real_replace = os.replace
+    os.replace = failing_replace
+    try:
+        with pytest.raises(OSError, match="simulated crash"):
+            hl._record_discovery_run(NOW)
+    finally:
+        os.replace = real_replace
+    assert hl.discovery_runs_used(NOW) == 2  # previous value intact
+    assert not list(app_dir.glob("*.tmp"))  # no temp litter
+
+
+def test_concurrent_run_recording_loses_no_counts(app_dir):
+    """The CLI and the portal record as separate processes over one
+    APP_DIR; the lock serializes the read-modify-write so concurrent
+    runs each count (sweep art_Izev3UNN suggestion 3)."""
+    import threading
+
+    threads = [threading.Thread(target=hl._record_discovery_run, args=(NOW,))
+               for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert hl.discovery_runs_used(NOW) == 8
+
+
+def test_unknown_source_name_is_the_typed_refusal(conn, no_network):
+    """An explicitly requested unknown source must come back as the
+    documented typed refusal, not a bare ValueError that _verb turns
+    into internal_error (sweep art_Izev3UNN suggestion 8)."""
+    with pytest.raises(hl.LeadsRefusal) as refused:
+        hl.discover_hiring_leads(conn, sources=("nonsense",))
+    assert refused.value.code == "provider_unsupported"
+    assert "nonsense" in str(refused.value)
+    assert "tavily" in refused.value.details["known_providers"]
 
 
 def test_quota_exhausted_refusal_with_utc_cap(conn, monkeypatch, no_network,

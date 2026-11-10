@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlparse
 
 from kestrel import config
 from kestrel.config import DB_PATH, history_enabled
@@ -445,7 +446,7 @@ def backfill_seniority(conn: sqlite3.Connection) -> int:
 
 
 def backfill_company_identity(conn: sqlite3.Connection) -> int:
-    """Resolve company/company_domain for rows that have neither.
+    """Resolve company (and its domain) for rows that have no company.
 
     Resolution order (hiring-leads spec art_u0YGUqpk §1): JobSpy's
     parsed name (persisted at ingestion going forward), the Workday
@@ -458,6 +459,12 @@ def backfill_company_identity(conn: sqlite3.Connection) -> int:
     overwritten, and a row that defeats the resolvers today (e.g. a
     Workday slug missing from the registry) stays a candidate for a
     later run. Returns the number of rows that gained an identity.
+
+    There is deliberately no domain-only backfill: the resolver couples
+    the domain to a resolved name (domain_for_company runs only when a
+    name was found), so a row with a company but a NULL domain is not a
+    candidate — its domain was already derived-or-absent at write time.
+    Docstring and code aligned per sweep art_Izev3UNN suggestion 5.
     """
     from kestrel.company_identity import resolve_company_identity
     from kestrel.discovery.workday import load_employers
@@ -498,7 +505,9 @@ def company_fit_aggregates(conn: sqlite3.Connection | None = None) -> list[dict]
 
     Returns {company_key, display_name, domain, fit_score, scored_jobs},
     highest fit first. display_name is the spelling on the row that
-    produced the max (first-seen on ties).
+    produced the max — the lexicographically smallest spelling on ties,
+    so the portal board renders the same name no matter what row order
+    SQLite happened to return (sweep art_Izev3UNN suggestion 4).
     """
     from kestrel.company_identity import company_key_for
 
@@ -519,7 +528,9 @@ def company_fit_aggregates(conn: sqlite3.Connection | None = None) -> list[dict]
                    "domain": domain, "fit_score": row["fit_score"],
                    "scored_jobs": 0}
             groups[key] = agg
-        if row["fit_score"] > agg["fit_score"]:
+        if row["fit_score"] > agg["fit_score"] or (
+                row["fit_score"] == agg["fit_score"]
+                and (row["company"] or "") < (agg["display_name"] or "")):
             agg["display_name"] = row["company"]
             agg["fit_score"] = row["fit_score"]
         agg["scored_jobs"] += 1
@@ -533,12 +544,23 @@ def refresh_company_identity(conn: sqlite3.Connection | None = None) -> int:
     Runs at every init_db so the mirror cannot drift from jobs.
     Everything it writes is derived data — recomputed from the identity
     columns on each run; the NULL-only never-overwrite contract protects
-    the jobs rows, not this mirror. Returns the number of keys upserted.
+    the jobs rows, not this mirror. Companies whose fit rows are gone
+    (job deletion removes rows — sweep art_Izev3UNN finding 6) are
+    deleted from the mirror too: an upsert-only refresh left a ghost
+    high-match company that `--company` discovery kept scanning against
+    a stale MAX fit. Returns the number of keys upserted.
     """
     if conn is None:
         conn = get_connection()
     now = _utc_now()
     aggregates = company_fit_aggregates(conn=conn)
+    live_keys = {agg["company_key"] for agg in aggregates}
+    for row in conn.execute(
+        "SELECT company_key FROM company_identity").fetchall():
+        if row["company_key"] not in live_keys:
+            conn.execute(
+                "DELETE FROM company_identity WHERE company_key = ?",
+                (row["company_key"],))
     for agg in aggregates:
         conn.execute(
             "INSERT INTO company_identity (company_key, display_name, domain, "
@@ -592,6 +614,68 @@ LEAD_SOURCES = (LEAD_SOURCE_SERP, LEAD_SOURCE_TAVILY,
                 LEAD_SOURCE_PUBLIC_PAGE, LEAD_SOURCE_MANUAL)
 
 
+def normalize_profile_url(url: str) -> str:
+    """The canonical dedupe key for a lead's profile URL.
+
+    Lowercased host, leading 'www.' stripped, trailing slash stripped,
+    query dropped (tracker noise — the same shape map_search_result
+    already stores), fragment kept (the public-page person key lives
+    there). One person's profile reached the store as three rows under
+    www./host-case/trailing-slash spellings of one LinkedIn URL (sweep
+    art_Izev3UNN finding 7) because dedupe keyed on the raw string.
+    """
+    url = (url or "").strip()
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return url
+    if not parsed.hostname:
+        return url
+    host = parsed.hostname.lower()
+    if host.startswith("www."):
+        host = host[len("www."):]
+    path = parsed.path.rstrip("/")
+    fragment = f"#{parsed.fragment}" if parsed.fragment else ""
+    return f"https://{host}{path}{fragment}"
+
+
+def _collapse_lead_variants(conn: sqlite3.Connection,
+                            profile_urls: list[str]) -> None:
+    """Merge duplicate lead rows that are one person — deliberately.
+
+    The survivor is the oldest discovered_at row (ties: lexicographic
+    URL), so the queue a person works down keeps its head. The status
+    merge never silently drops a user decision: the most-decided status
+    across the variants (connected > dismissed > discovered) wins, with
+    the decided_at that recorded it. Everything else on the survivor is
+    already there — identity fields are only ever written at ingestion.
+    """
+    if len(profile_urls) < 2:
+        return
+    marks = ", ".join("?" for _ in profile_urls)
+    rows = [dict(r) for r in conn.execute(
+        f"SELECT * FROM hiring_leads WHERE profile_url IN ({marks})",
+        profile_urls)]
+    if len(rows) < 2:
+        return
+    _DECIDED_RANK = {LEAD_STATUS_DISCOVERED: 0, LEAD_STATUS_DISMISSED: 1,
+                     LEAD_STATUS_CONNECTED: 2}
+    survivor = min(rows, key=lambda r: (r["discovered_at"], r["profile_url"]))
+    decided = max(rows, key=lambda r: (_DECIDED_RANK[r["last_status"]],
+                                       r["decided_at"] or ""))
+    if decided["last_status"] != survivor["last_status"]:
+        conn.execute(
+            "UPDATE hiring_leads SET last_status = ?, decided_at = ? "
+            "WHERE profile_url = ?",
+            (decided["last_status"], decided["decided_at"],
+             survivor["profile_url"]))
+    for row in rows:
+        if row["profile_url"] != survivor["profile_url"]:
+            conn.execute("DELETE FROM hiring_leads WHERE profile_url = ?",
+                         (row["profile_url"],))
+    conn.commit()
+
+
 def upsert_hiring_lead(conn: sqlite3.Connection,
                        *,
                        profile_url: str,
@@ -602,12 +686,15 @@ def upsert_hiring_lead(conn: sqlite3.Connection,
                        evidence_url: str | None = None,
                        discovered_at: str | None = None,
                        last_status: str = LEAD_STATUS_DISCOVERED) -> bool:
-    """Insert one hiring lead; dedupe on profile_url. True when new.
+    """Insert one hiring lead; dedupe on the normalized profile URL.
 
     The one write path for hiring_leads — adapters now, the verbs and
     portal later — so the vocabulary checks cannot be bypassed. A status
     or source outside the LEAD_* vocabulary raises ValueError (a caller
     bug, never silently coerced); so does a missing identity field.
+    Dedupe keys on normalize_profile_url, not the raw spelling, and
+    upsert-time reconciliation collapses pre-existing variants of the
+    same person on the next write (sweep art_Izev3UNN finding 7).
     """
     if last_status not in LEAD_STATUSES:
         raise ValueError(
@@ -622,6 +709,15 @@ def upsert_hiring_lead(conn: sqlite3.Connection,
     if not profile_url or not full_name or not title or not company_key:
         raise ValueError(
             "lead requires profile_url, full_name, title and company_key")
+    # Variant reconciliation before insert: a write of one spelling of
+    # a person's URL is the trigger that collapses their duplicates.
+    existing = [row["profile_url"] for row in conn.execute(
+        "SELECT profile_url FROM hiring_leads").fetchall()
+        if normalize_profile_url(row["profile_url"])
+        == normalize_profile_url(profile_url)]
+    if existing:
+        _collapse_lead_variants(conn, existing)
+        return False
     cursor = conn.execute(
         "INSERT INTO hiring_leads (profile_url, full_name, title, company_key, "
         "source, evidence_url, last_status, discovered_at, decided_at) "

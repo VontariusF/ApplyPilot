@@ -23,8 +23,9 @@ Guardrails are structural, not conventional (spec locked decisions):
   the store's terminal-captcha policy.
 
 Typed refusals (LeadsRefusal) surface through the agent verbs as _fail
-envelopes: no_provider_key, provider_unsupported, quota_exhausted,
-no_high_match_companies, source_retired, company_unresolved.
+envelopes: no_provider_key, source_disabled, provider_unsupported,
+quota_exhausted, no_high_match_companies, source_retired,
+company_unresolved, config_invalid.
 """
 
 from __future__ import annotations
@@ -34,12 +35,21 @@ import logging
 import os
 import re
 import sqlite3
+import tempfile
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import TypeVar
 from urllib.parse import urlparse
 
 import httpx
+
+try:
+    import fcntl
+except ImportError:  # non-POSIX: the lock degrades, the atomic write remains
+    fcntl = None
 
 from kestrel import config
 from kestrel.company_identity import normalize_name_key
@@ -71,19 +81,23 @@ _TIMEOUT_SECONDS = 30.0
 # ---------------------------------------------------------------------------
 
 NO_PROVIDER_KEY = "no_provider_key"
+SOURCE_DISABLED = "source_disabled"
 PROVIDER_UNSUPPORTED = "provider_unsupported"
 QUOTA_EXHAUSTED = "quota_exhausted"
 NO_HIGH_MATCH_COMPANIES = "no_high_match_companies"
 SOURCE_RETIRED = "source_retired"
 COMPANY_UNRESOLVED = "company_unresolved"
+CONFIG_INVALID = "config_invalid"
 
 ALL_REFUSALS = (
     NO_PROVIDER_KEY,
+    SOURCE_DISABLED,
     PROVIDER_UNSUPPORTED,
     QUOTA_EXHAUSTED,
     NO_HIGH_MATCH_COMPANIES,
     SOURCE_RETIRED,
     COMPANY_UNRESOLVED,
+    CONFIG_INVALID,
 )
 
 
@@ -978,8 +992,13 @@ class FirecrawlPageSource:
         if enabled is None:
             enabled = config.firecrawl_enabled()
         if not enabled:
+            # A distinct reason: "no provider key" is a different fix
+            # (export the key) than "the source is switched off" (opt in
+            # via leads.yaml) — conflating them sent hosts hunting for a
+            # key that was not the problem (sweep art_Izev3UNN
+            # suggestion 7).
             raise LeadsRefusal(
-                NO_PROVIDER_KEY,
+                SOURCE_DISABLED,
                 "Firecrawl is disabled — set firecrawl.enabled: true in "
                 "leads.yaml and export FIRECRAWL_API_KEY to opt in",
                 {"required_env": ["FIRECRAWL_API_KEY"],
@@ -1026,9 +1045,15 @@ def build_source(name: str, *, client=None,
     try:
         builder = SOURCE_BUILDERS[name]
     except KeyError:
-        raise ValueError(
-            f"unknown lead source {name!r}; known: {sorted(SOURCE_BUILDERS)}"
-        ) from None
+        # The documented typed refusal, not a bare ValueError — an
+        # explicitly requested unknown source must degrade to the
+        # refusal envelope, not internal_error (sweep art_Izev3UNN
+        # suggestion 8).
+        raise LeadsRefusal(
+            PROVIDER_UNSUPPORTED,
+            f"unknown lead source {name!r}; known: {sorted(SOURCE_BUILDERS)}",
+            {"provider": name,
+             "known_providers": sorted(SOURCE_BUILDERS)}) from None
     return builder(client, sleep=sleep)
 
 
@@ -1093,6 +1118,49 @@ def _usage_path():
     return config.APP_DIR / "discovery-usage.json"
 
 
+@contextmanager
+def _usage_lock():
+    """Cross-process exclusive lock around the usage counter's RMW.
+
+    The CLI and the portal run as separate processes against one
+    APP_DIR; two concurrent discovery runs read the same count and both
+    wrote it back, losing a run (sweep art_Izev3UNN suggestion 3).
+    fcntl.flock on a sibling lock file serializes them. Degenerates to
+    a no-op where fcntl is absent — the atomic rewrite still holds.
+    """
+    config.APP_DIR.mkdir(parents=True, exist_ok=True)
+    with open(config.APP_DIR / "discovery-usage.lock", "w") as lock:
+        if fcntl is not None:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    """Write JSON so a reader never observes a half-written file.
+
+    Temp file in the target directory + os.replace: a crash mid-write
+    leaves the previous counter intact instead of a corrupt file, and
+    the write lands all at once.
+    """
+    tmp = tempfile.NamedTemporaryFile(
+        "w", dir=path.parent, prefix=f"{path.name}.", suffix=".tmp",
+        delete=False, encoding="utf-8")
+    try:
+        with tmp:
+            json.dump(payload, tmp)
+        os.replace(tmp.name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+        raise
+
+
 def _retirement_path():
     return config.APP_DIR / "discovery-retired.json"
 
@@ -1121,11 +1189,14 @@ def discovery_runs_used(now: datetime | None = None) -> int:
 
 def _record_discovery_run(now: datetime | None = None) -> int:
     now = now or datetime.now(timezone.utc)
-    used = discovery_runs_used(now) + 1
-    config.APP_DIR.mkdir(parents=True, exist_ok=True)
-    _usage_path().write_text(
-        json.dumps({"utc_date": now.date().isoformat(), "runs": used}),
-        encoding="utf-8")
+    # The read-modify-write is guarded and the rewrite atomic: the CLI
+    # and the portal share one APP_DIR, and a lost or half-written
+    # counter is a daily-cap hole (sweep art_Izev3UNN suggestion 3).
+    with _usage_lock():
+        used = discovery_runs_used(now) + 1
+        _atomic_write_json(
+            _usage_path(),
+            {"utc_date": now.date().isoformat(), "runs": used})
     return used
 
 
@@ -1164,6 +1235,25 @@ def retire_source(name: str, reason: str,
 # ---------------------------------------------------------------------------
 
 
+_T = TypeVar("_T")
+
+
+def _leads_config(read: Callable[[], _T]) -> _T:
+    """Read one leads.yaml setting as the typed config_invalid refusal.
+
+    A malformed value (a typo'd cap, a bad depth) raises the config
+    layer's LeadsConfigError — a bare ValueError, which would die as an
+    internal_error and even break the read-only leads-list verb (sweep
+    art_Izev3UNN suggestion 2). Converted here so every discovery-path
+    read refuses with the documented envelope instead.
+    """
+    try:
+        return read()
+    except config.LeadsConfigError as exc:
+        raise LeadsRefusal(
+            CONFIG_INVALID, str(exc), {"config": "leads.yaml"}) from exc
+
+
 def discover_hiring_leads(conn: sqlite3.Connection | None = None,
                           *,
                           company_key: str | None = None,
@@ -1197,7 +1287,7 @@ def discover_hiring_leads(conn: sqlite3.Connection | None = None,
     if sources:
         requested = tuple(sources)
     else:
-        provider = config.leads_provider()
+        provider = _leads_config(config.leads_provider)
         if provider not in SOURCE_BUILDERS:
             raise LeadsRefusal(
                 PROVIDER_UNSUPPORTED,
@@ -1209,7 +1299,7 @@ def discover_hiring_leads(conn: sqlite3.Connection | None = None,
 
     # Everything checkable without the network is checked first: cap,
     # provider keys/config gates, retirements, company identity.
-    cap = config.leads_daily_discovery_cap()
+    cap = _leads_config(config.leads_daily_discovery_cap)
     used = discovery_runs_used(now)
     if used >= cap:
         raise LeadsRefusal(
@@ -1222,7 +1312,10 @@ def discover_hiring_leads(conn: sqlite3.Connection | None = None,
     unavailable: list[LeadsRefusal] = []
     for name in requested:
         try:
-            instances.append(build_source(name))
+            # Source constructors read leads.yaml (results-per-query,
+            # depth, the Firecrawl gate) — the same typed conversion.
+            instances.append(_leads_config(
+                lambda name=name: build_source(name)))
         except LeadsRefusal as exc:
             unavailable.append(exc)
     if not instances:
@@ -1261,10 +1354,10 @@ def discover_hiring_leads(conn: sqlite3.Connection | None = None,
                 {"company_key": company_key})
         companies = [dict(row)]
     else:
-        companies = high_match_companies(conn, min_fit)
+        effective_min_fit = (min_fit if min_fit is not None
+                             else _leads_config(config.leads_min_company_fit))
+        companies = high_match_companies(conn, effective_min_fit)
         if not companies:
-            effective_min_fit = (config.leads_min_company_fit()
-                                 if min_fit is None else min_fit)
             orphaned = conn.execute(
                 "SELECT COUNT(*) FROM jobs "
                 "WHERE fit_score IS NOT NULL AND company IS NULL"

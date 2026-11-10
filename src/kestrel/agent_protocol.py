@@ -1620,10 +1620,16 @@ def apply_result_cmd(
 def _leads_guardrails() -> dict:
     """The guardrails block: what Kestrel deliberately does not do, plus
     the daily discovery-cap usage the host needs to pace its runs."""
-    from kestrel.discovery.hiring_leads import discovery_runs_used
+    from kestrel.discovery.hiring_leads import CONFIG_INVALID, discovery_runs_used
 
-    cap = config.leads_daily_discovery_cap()
     used = discovery_runs_used()
+    try:
+        cap = config.leads_daily_discovery_cap()
+    except config.LeadsConfigError as exc:
+        # A malformed leads.yaml value must not turn the read-only
+        # leads-list verb into an internal_error (sweep art_Izev3UNN
+        # suggestion 2) — the documented typed refusal instead.
+        _fail(CONFIG_INVALID, str(exc), {"config": "leads.yaml"})
     return {
         "sends_nothing": True,
         "credentials_stored": "none",
@@ -1666,8 +1672,8 @@ def _lead_block(row: dict, reveal: bool) -> dict:
 def _validated_leads_limit(limit_raw: str | None) -> int | None:
     if limit_raw is None:
         return None
-    if not re.fullmatch(r"\d+", limit_raw.strip()):
-        _fail("invalid_limit", f"--limit must be a non-negative integer, "
+    if not re.fullmatch(r"[1-9]\d*", limit_raw.strip()):
+        _fail("invalid_limit", f"--limit must be a positive integer, "
               f"got {limit_raw!r}", {"limit": limit_raw})
     return int(limit_raw)
 

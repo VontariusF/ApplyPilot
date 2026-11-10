@@ -358,6 +358,15 @@ def load_leads_config() -> dict:
     return loaded or {}
 
 
+class LeadsConfigError(ValueError):
+    """A leads.yaml value is malformed (wrong type, out of range).
+
+    Subclasses ValueError so every existing caller keeps its contract;
+    the agent verbs translate it into the typed config_invalid refusal
+    instead of an internal_error (sweep art_Izev3UNN suggestion 2).
+    """
+
+
 def leads_min_company_fit() -> float:
     """High-match company threshold (hiring-leads spec art_u0YGUqpk §2).
 
@@ -374,7 +383,7 @@ def leads_min_company_fit() -> float:
     try:
         return float(raw)
     except (TypeError, ValueError):
-        raise ValueError(
+        raise LeadsConfigError(
             f"leads.yaml min_company_fit must be a number, got {raw!r}"
         )
 
@@ -421,11 +430,11 @@ def leads_daily_discovery_cap() -> int:
     try:
         cap = int(raw)
     except (TypeError, ValueError):
-        raise ValueError(
+        raise LeadsConfigError(
             f"leads.yaml daily_discovery_cap must be an integer, got {raw!r}"
         )
     if cap < 0:
-        raise ValueError(
+        raise LeadsConfigError(
             f"leads.yaml daily_discovery_cap must be >= 0, got {raw!r}")
     return cap
 
@@ -437,7 +446,7 @@ def leads_role_taxonomy() -> tuple[str, ...]:
         return DEFAULT_ROLE_TAXONOMY
     if (not isinstance(raw, list) or not raw
             or not all(isinstance(t, str) and t.strip() for t in raw)):
-        raise ValueError(
+        raise LeadsConfigError(
             "leads.yaml role_taxonomy must be a non-empty list of strings")
     return tuple(t.strip() for t in raw)
 
@@ -456,7 +465,7 @@ def leads_provider() -> str:
     if raw is None:
         return DEFAULTS["leads_provider"]
     if not isinstance(raw, str) or not raw.strip():
-        raise ValueError(f"leads.yaml provider must be a string, got {raw!r}")
+        raise LeadsConfigError(f"leads.yaml provider must be a string, got {raw!r}")
     return raw.strip().lower()
 
 
@@ -468,11 +477,11 @@ def leads_serp_results_per_query() -> int:
     try:
         num = int(raw)
     except (TypeError, ValueError):
-        raise ValueError(
+        raise LeadsConfigError(
             f"leads.yaml serp.results_per_query must be an integer, got {raw!r}"
         )
     if not 1 <= num <= 20:
-        raise ValueError(
+        raise LeadsConfigError(
             f"leads.yaml serp.results_per_query must be in 1..20, got {raw!r}")
     return num
 
@@ -485,11 +494,11 @@ def leads_tavily_max_results() -> int:
     try:
         num = int(raw)
     except (TypeError, ValueError):
-        raise ValueError(
+        raise LeadsConfigError(
             f"leads.yaml tavily.max_results must be an integer, got {raw!r}"
         )
     if not 1 <= num <= 20:
-        raise ValueError(
+        raise LeadsConfigError(
             f"leads.yaml tavily.max_results must be in 1..20, got {raw!r}")
     return num
 
@@ -506,7 +515,7 @@ def leads_tavily_search_depth() -> str:
         return "advanced"
     depth = str(raw).strip().lower()
     if depth not in ("basic", "advanced"):
-        raise ValueError(
+        raise LeadsConfigError(
             "leads.yaml tavily.search_depth must be 'basic' or 'advanced', "
             f"got {raw!r}")
     return depth
