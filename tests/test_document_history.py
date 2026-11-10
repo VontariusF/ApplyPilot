@@ -38,10 +38,10 @@ def doc_dirs(app_dir, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _pdf_stub(monkeypatch):
-    """No Chromium in tests: patch the PDF converter the writers import at call time."""
+    """No filesystem writes in tests: patch the HTML converter the writers import at call time."""
     monkeypatch.setattr(
         "kestrel.scoring.pdf.convert_to_pdf",
-        lambda p: Path(str(p)).with_suffix(".pdf"),
+        lambda p: Path(str(p)).with_suffix(".html"),
     )
 
 

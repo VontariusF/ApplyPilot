@@ -34,17 +34,17 @@ def _seed_tailored_job(url: str, txt_path: str) -> None:
 
 
 def _make_tailored_pair(tmp_path, name: str = "resume_acme"):
-    """Create a tailored .txt whose .pdf already exists (stale accounting)."""
+    """Create a tailored .txt whose styled HTML already exists (stale accounting)."""
     tailored = tmp_path / "tailored"
     tailored.mkdir(exist_ok=True)
     txt = tailored / f"{name}.txt"
     txt.write_text("Jane Doe\nTITLE\nEngineer\nSUMMARY\ntext", encoding="utf-8")
-    txt.with_suffix(".pdf").write_bytes(b"%PDF-1.4 already converted")
+    txt.with_suffix(".html").write_text("<!DOCTYPE html><html><body>stale</body></html>", encoding="utf-8")
     return txt
 
 
-def test_stale_txt_accounting_settles_when_pdf_exists(isolated_db, tmp_path, monkeypatch):
-    """A .txt row whose PDF already exists must leave the pending count.
+def test_stale_txt_accounting_settles_when_html_exists(isolated_db, tmp_path, monkeypatch):
+    """A .txt row whose styled HTML already exists must leave the pending count.
 
     This is the exact busy-loop condition: the DB says pending, but
     batch_convert has nothing to convert — before the fix the pending
@@ -59,7 +59,7 @@ def test_stale_txt_accounting_settles_when_pdf_exists(isolated_db, tmp_path, mon
 
     converted = pdf_mod.batch_convert()
 
-    assert converted == 0, "the PDF already exists — nothing to convert"
+    assert converted == 0, "the styled HTML already exists — nothing to convert"
     conn = database.get_connection()
     row = conn.execute(
         "SELECT pdf_generated_at FROM jobs WHERE url = ?",
@@ -79,7 +79,7 @@ def test_pdf_stage_terminates_with_stale_txt_accounting(
     """The streaming pdf stage must terminate (bounded loop), not spin forever.
 
     Runs the real stage thread against the real runner + DB with a
-    tailored resume whose PDF already exists. Pre-fix this never
+    tailored resume whose styled HTML already exists. Pre-fix this never
     returned; the join timeout is the bounded-loop assertion.
     """
     txt = _make_tailored_pair(tmp_path)
@@ -174,12 +174,12 @@ def test_pdf_columns_migrate_existing_databases(isolated_db):
 
 
 def test_reset_job_tailoring_clears_pdf_bookkeeping(isolated_db, tmp_path):
-    """Re-tailoring a job must re-enqueue it for PDF conversion.
+    """Re-tailoring a job must re-enqueue it for conversion.
 
     A regenerated resume is a different document: the stale
     pdf_generated_at/pdf_attempts of the previous one must not keep the
     new resume out of the pdf stage's pending count — pre-fix, a failed
-    render of the new resume was never retried.
+    conversion of the new resume was never retried.
     """
     txt = _make_tailored_pair(tmp_path)
     _seed_tailored_job("https://example.com/job-1", str(txt))
@@ -219,7 +219,7 @@ def test_reconciliation_respects_remaining_limit(isolated_db, tmp_path, monkeypa
 
     def _fake_convert(txt_path):
         txt = Path(txt_path)
-        txt.with_suffix(".pdf").write_bytes(b"%PDF-1.4 fake")
+        txt.with_suffix(".html").write_text("<!DOCTYPE html><html><body>fake</body></html>", encoding="utf-8")
         rendered.append(txt.name)
 
     for i in range(4):
@@ -242,22 +242,26 @@ def test_reconciliation_respects_remaining_limit(isolated_db, tmp_path, monkeypa
     assert pipeline._count_pending("pdf") == 0
 
 
-def test_reset_deletes_stale_pdf_when_history_off(isolated_db, tmp_path, monkeypatch):
-    """With history off, resetting must invalidate the same-stem stale PDF.
+def test_reset_deletes_stale_output_when_history_off(isolated_db, tmp_path, monkeypatch):
+    """With history off, resetting must invalidate the same-stem stale output.
 
-    History off overwrites the .txt in place, so the old .pdf at that
+    History off overwrites the .txt in place, so the old .html at that
     stem still renders the previous resume; leaving it lets reconciliation
-    mark the regenerated document as done from the stale file.
+    mark the regenerated document as done from the stale file. The legacy
+    .pdf sibling is invalidated with it.
     """
     monkeypatch.setenv("HISTORY_ENABLED", "off")
-    txt = _make_tailored_pair(tmp_path)  # .txt + stale .pdf both exist
+    txt = _make_tailored_pair(tmp_path)  # .txt + stale .html both exist
     _seed_tailored_job("https://example.com/job-1", str(txt))
     conn = database.get_connection()
 
     assert database.reset_job_tailoring(conn, "https://example.com/job-1")
 
+    assert not txt.with_suffix(".html").exists(), (
+        "the stale HTML must be invalidated so the regenerated text re-converts"
+    )
     assert not txt.with_suffix(".pdf").exists(), (
-        "the stale PDF must be invalidated so the regenerated text re-renders"
+        "the legacy PDF sibling must be invalidated with it"
     )
     row = conn.execute(
         "SELECT pdf_generated_at, pdf_attempts FROM jobs WHERE url = ?",
@@ -267,8 +271,8 @@ def test_reset_deletes_stale_pdf_when_history_off(isolated_db, tmp_path, monkeyp
     assert row["pdf_attempts"] == 0
 
 
-def test_reset_keeps_pdf_pair_when_history_on(isolated_db, tmp_path, monkeypatch):
-    """With history on, the old .txt/.pdf pair stays intact as history."""
+def test_reset_keeps_output_pair_when_history_on(isolated_db, tmp_path, monkeypatch):
+    """With history on, the old .txt/.html pair stays intact as history."""
     monkeypatch.setenv("HISTORY_ENABLED", "on")
     txt = _make_tailored_pair(tmp_path)
     _seed_tailored_job("https://example.com/job-1", str(txt))
@@ -276,7 +280,7 @@ def test_reset_keeps_pdf_pair_when_history_on(isolated_db, tmp_path, monkeypatch
 
     assert database.reset_job_tailoring(conn, "https://example.com/job-1")
 
-    assert txt.with_suffix(".pdf").exists(), (
+    assert txt.with_suffix(".html").exists(), (
         "history mode never deletes the old document pair"
     )
 
@@ -284,8 +288,8 @@ def test_reset_keeps_pdf_pair_when_history_on(isolated_db, tmp_path, monkeypatch
 def test_stale_render_result_does_not_settle_replacement(isolated_db, tmp_path, monkeypatch):
     """An obsolete render must not settle a row re-pointed mid-flight.
 
-    Simulates reset + re-tailor between the reconcile's render and its
-    DB write: the row is swapped to a new path while the old render
+    Simulates reset + re-tailor between the reconcile's conversion and its
+    DB write: the row is swapped to a new path while the old conversion
     completes. The url-only update pre-fix would mark the replacement
     resume generated — hiding it from the pdf pending query.
     """
@@ -298,9 +302,9 @@ def test_stale_render_result_does_not_settle_replacement(isolated_db, tmp_path, 
     new_txt = tailored / "resume_new.txt"
 
     def _swap_path_mid_render(txt_path):
-        # The render "succeeds" for the old path, but the row has been
+        # The conversion "succeeds" for the old path, but the row has been
         # reset and re-tailored to a brand-new path in the meantime.
-        Path(txt_path).with_suffix(".pdf").write_bytes(b"%PDF-1.4 old")
+        Path(txt_path).with_suffix(".html").write_text("<!DOCTYPE html><html><body>old</body></html>", encoding="utf-8")
         new_txt.write_text("Jane Doe\nTITLE\nEngineer\nSUMMARY\nnew", encoding="utf-8")
         conn = database.get_connection()
         conn.execute(
@@ -326,11 +330,11 @@ def test_stale_render_result_does_not_settle_replacement(isolated_db, tmp_path, 
     assert pipeline._count_pending("pdf") == 1
 
 
-def test_exhausted_rows_not_rerendered(isolated_db, tmp_path, monkeypatch):
-    """Reconciliation must not re-render rows the pending cap excludes.
+def test_exhausted_rows_not_reconverted(isolated_db, tmp_path, monkeypatch):
+    """Reconciliation must not re-convert rows the pending cap excludes.
 
     A DB-backed source that already burned its five attempts is not
-    pending; re-invoking Chromium for it on every later batch_convert
+    pending; re-converting it on every later batch_convert
     call would defeat the bounded-retry semantics.
     """
     tailored = tmp_path / "tailored"
@@ -349,7 +353,8 @@ def test_exhausted_rows_not_rerendered(isolated_db, tmp_path, monkeypatch):
 
     def _must_not_render(txt_path):
         rendered.append(Path(txt_path))
-        Path(txt_path).with_suffix(".pdf").write_bytes(b"%PDF-1.4 fake")
+        Path(txt_path).with_suffix(".html").write_text(
+            "<!DOCTYPE html><html><body>fake</body></html>", encoding="utf-8")
 
     monkeypatch.setattr(pdf_mod, "TAILORED_DIR", tailored)
     monkeypatch.setattr(pdf_mod, "convert_to_pdf", _must_not_render)
@@ -359,12 +364,12 @@ def test_exhausted_rows_not_rerendered(isolated_db, tmp_path, monkeypatch):
     assert pipeline._count_pending("pdf") == 0
 
 
-def test_failed_renders_charge_the_conversion_budget(isolated_db, tmp_path, monkeypatch):
-    """batch_convert(limit=N) must not invoke Chromium more than N times.
+def test_failed_conversions_charge_the_conversion_budget(isolated_db, tmp_path, monkeypatch):
+    """batch_convert(limit=N) must not convert more than N times.
 
-    A failed render still spends the budget: pre-fix, the failed main-loop
-    render left the reconciliation's full quota intact and it re-rendered
-    the same poison file — two Chromium calls and two burned attempts per
+    A failed conversion still spends the budget: pre-fix, the failed main-loop
+    conversion left the reconciliation's full quota intact and it re-converted
+    the same poison file — two conversions and two burned attempts per
     pass for one file.
     """
     tailored = tmp_path / "tailored"
@@ -378,12 +383,12 @@ def test_failed_renders_charge_the_conversion_budget(isolated_db, tmp_path, monk
 
     def _always_fails(txt_path):
         calls["n"] += 1
-        raise RuntimeError("chromium boom")
+        raise RuntimeError("conversion boom")
 
     monkeypatch.setattr(pdf_mod, "convert_to_pdf", _always_fails)
 
     assert pdf_mod.batch_convert(limit=1) == 0
-    assert calls["n"] == 1, "one failed render must consume the whole budget"
+    assert calls["n"] == 1, "one failed conversion must consume the whole budget"
     conn = database.get_connection()
     row = conn.execute(
         "SELECT pdf_attempts FROM jobs WHERE url = ?",

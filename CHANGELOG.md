@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Tailored resumes and cover letters are now written as print-ready styled
+  HTML instead of PDF. Kestrel never launches a browser to render documents;
+  when a PDF is wanted, the host agent prints the styled HTML with its own
+  browser (the pdf stage's `convert_to_pdf` raises the typed
+  `PdfRenderSteer` for any path still requesting a PDF). Agent verbs and
+  the tailor/cover results now report `html_path` where they reported
+  `pdf_path`.
+
 - `kestrel jobs filter` now defaults to `--sort score` (fit score descending),
   so the triage view is ordered by the score a human sorts by; pass
   `--sort discovered` to restore the previous discovery-order default. The

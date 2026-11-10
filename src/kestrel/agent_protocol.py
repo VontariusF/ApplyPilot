@@ -1023,7 +1023,7 @@ def _load_profile_or_fail() -> dict:
 def _written_block(result: dict) -> dict:
     return {
         "path": result["path"],
-        "pdf_path": result["pdf_path"],
+        "html_path": result["html_path"],
         "version_id": result["version_id"],
     }
 
