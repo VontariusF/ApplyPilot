@@ -314,7 +314,7 @@ def test_scrape_site_batch_creates_own_connection(isolated_db, monkeypatch):
 
 def test_proxy_config_threads_through_httpx_client(isolated_db, monkeypatch):
     # The shared proxy config must reach the httpx client the same way it
-    # used to reach the Playwright launch opts.
+    # used to reach the old browser transport's launch opts.
     captured: dict = {}
 
     class FakeClient:

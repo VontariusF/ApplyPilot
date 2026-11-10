@@ -24,7 +24,7 @@
 
 Kestrel is an **agent-native job-application pipeline**. Your coding agent — the one already open in your editor — drives the whole flow over a JSON protocol: it conducts onboarding, scores jobs against your resume, tailors your documents, drafts cover letters, and reports application outcomes. Kestrel holds the state, validation, and guardrails; your agent supplies the intelligence. On that route there is **no LLM API key, no Node.js, and no browser automation stack to install** — page fetching included, because your agent's own browser covers it.
 
-The older routes still work, on top of the same core: **provider-backed mode** (a configured API key does the scoring and tailoring — any OpenAI-compatible endpoint, including a local server) and the **built-in browser engine** (optional `[browser]` extra) as a fallback for scraping and PDF rendering.
+The older route still works, on top of the same core: **provider-backed mode** (a configured API key does the scoring and tailoring — any OpenAI-compatible endpoint, including a local server). Page acquisition needs no browser automation stack either — see the two-lane contract below.
 
 > **Fork of record.** Kestrel is a fork of [ApplyPilot](https://github.com/Pickle-Pixel/ApplyPilot) by Pickle-Pixel, first published February 17, 2026. Upstream copyright notices are retained per the AGPL-3.0; see [NOTICE](NOTICE). We are not affiliated with applypilot.app, useapplypilot.com, or any other product using the "ApplyPilot" name.
 
@@ -51,7 +51,7 @@ Each stage is independent: run all six, or pick the ones you want.
 |-----------|-------------|---------|
 | Python 3.11+ | Everything | The only core requirement |
 | An LLM API key | *Optional* — unattended provider mode | Only if you want Kestrel to call an LLM itself for scoring/tailoring/cover letters: Gemini, OpenAI, or any OpenAI-compatible endpoint, including local (Ollama, llama.cpp) |
-| Node.js 18+ + Chrome/Chromium | *Optional* — built-in fallback engine | Only for the built-in Playwright apply engine and built-in page scraping: install `pip install 'kestrel-agent[browser]'`, then `playwright install chromium`. Your agent's own browser covers page fetching on the primary route |
+| Node.js 18+ + Chrome/Chromium | *Optional* — built-in apply engine | Only for the built-in apply engines, which drive **your own** Chrome over CDP. Page acquisition needs neither: static pages ride plain HTTP, JS-heavy pages ride your agent's browser |
 | Claude Code CLI | *Optional* — alternative apply engine | Install from [claude.ai/code](https://claude.ai/code); Factory Droid CLI works as an alternative |
 
 Optional: a CapSolver key for CAPTCHAs, a Composio key for the web3.career discovery source, and a Tavily (or SerpAPI) key for hiring-lead discovery — see [Hiring-lead discovery](#hiring-lead-discovery-optional-bring-a-tavily-key).
@@ -64,7 +64,7 @@ Python 3.11+ is all you need:
 
 ```bash
 pip install kestrel-agent
-kestrel agent start --mode agent   # opens intake — no API key, no Playwright
+kestrel agent start --mode agent   # opens intake — no API key, no browser to install
 ```
 
 Then run the loop from your agent chat. Every verb prints exactly one JSON document on stdout:
@@ -102,16 +102,19 @@ kestrel apply         # browser-driven application (plan-then-confirm gated)
 kestrel portal        # optional: localhost web cockpit at http://127.0.0.1:8765
 ```
 
-### Built-in browser engine (optional fallback)
+### Page acquisition: the two lanes
 
-The `[browser]` extra adds Playwright for Kestrel's own page scraping (smart-extract, detail enrichment) and PDF rendering — useful when no agent browser is around:
+Kestrel never launches a browser of its own — headless or headed — under any code path. Pages arrive through one of two lanes:
 
-```bash
-pip install 'kestrel-agent[browser]'
-playwright install chromium
-```
+- **Lane 1 — pure HTTP (standalone fallback).** `httpx` + `BeautifulSoup` (base dependencies, installed with the package) fetch and parse static pages; the three enrichment extraction tiers run over the parsed HTML. A standalone install without an agent keeps full enrichment on static pages.
+- **Lane 2 — agent-native acquisition (primary).** When a page is a JS shell, enrichment stops with a typed `browser-needed` hand-off instead of crashing or relaunching anything. Your agent fetches the page in **its own browser** and posts the content back:
 
-Without the extra, those features exit with a message naming both routes: install the extra, or let your agent's browser fetch the page. The built-in apply engines are unchanged.
+  ```bash
+  kestrel agent enrich --url <url> --full-description "..." --application-url <url>
+  kestrel agent page-capture --url <url> --html page.html --json-ld intel.json --api-responses responses.json
+  ```
+
+Tailor and cover-letter outputs are styled HTML; when you want a PDF, print it with your agent's own browser. The built-in apply engines (optional) are unchanged — they drive **your** Chrome over CDP; nothing is submitted until a human confirms.
 
 ### Hiring-lead discovery (optional): bring a Tavily key
 
@@ -141,8 +144,7 @@ Results that don't name your company in their title or snippet are dropped and c
 ```bash
 git clone https://github.com/Vontarius-Ventures/kestrel.git
 cd kestrel
-pip install -e ".[dev]"   # dev includes the [browser] extra
-playwright install chromium
+pip install -e ".[dev]"   # pytest, ruff, and the portal stack
 ```
 
 > **Note:** `python-jobspy` pins an exact numpy version in its metadata that conflicts with pip's resolver, but works fine with any modern numpy at runtime. If `pip install kestrel-agent` fails to resolve, install it separately: `pip install --no-deps python-jobspy`, then reinstall its runtime deps (`pydantic tls-client requests markdownify regex`).

@@ -228,8 +228,8 @@ class TestNoBrowserInTheMaterialsPath:
 
     def test_pdf_module_imports_with_base_deps_only(self):
         # With the render path deleted, importing the module must not pull
-        # anything beyond the base dependency set — the [browser] extra is
-        # irrelevant to this area. Runs in a subprocess so a leftover
+        # anything beyond the base dependency set — no optional extra exists
+        # at all any more. Runs in a subprocess so a leftover
         # playwright module from another test cannot mask a real import.
         import subprocess
         import sys

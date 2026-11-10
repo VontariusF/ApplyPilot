@@ -332,7 +332,7 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS page_captures (
             -- One row per smart-extract site URL the host agent was asked to
-            -- capture (Playwright-removal spec art_VGFSMgRh). status
+            -- capture (browser-removal spec art_VGFSMgRh). status
             -- 'pending' = JS shell over HTTP, awaiting `kestrel agent
             -- page-capture`; 'captured' = host-submitted intelligence
             -- stored as JSON, consumed by the next smart-extract run.
@@ -1967,7 +1967,7 @@ def reset_job_tailoring(conn: sqlite3.Connection, url: str,
     output at that stem is deleted — it renders the OLD resume and PDF
     reconciliation would otherwise mark the regenerated document as done
     from the stale file. The .pdf sibling is deleted too: legacy output
-    from the pre-HTML Chromium renderer. With history on the replacement
+    from the pre-HTML renderer. With history on the replacement
     lands at a fresh _v{N} stem; the old pairs stay on disk — history is
     never deleted. Version rows also stay on disk in both modes.
     Returns True when the job exists.

@@ -18,15 +18,15 @@ ground rules for what never enters the repository.
 git clone https://github.com/Vontarius-Ventures/kestrel.git
 cd kestrel
 pip install -e ".[dev]"
-playwright install chromium
 ```
 
 This installs Kestrel in editable mode with the development dependencies
-(pytest, ruff, the optional `[browser]` extra, and the portal stack) and
-downloads the Chromium browser binary for Playwright. The `[browser]` extra
-is a dev/test dependency only: an agent-driven Kestrel doesn't need
-Playwright (the host agent's own browser covers page fetching), but the
-built-in fallback engine, built-in scraping, and the e2e suite use it.
+(pytest, ruff, and the portal stack). That's the whole setup: Kestrel ships
+no browser of its own. Page acquisition runs over two lanes — pure HTTP
+(httpx + BeautifulSoup, base dependencies) for static pages, and your own
+coding agent's browser for JS-heavy pages (see the two-lane contract in the
+README). The built-in apply engines, if you use them, drive your own
+Chrome/Chromium over CDP.
 
 ### Verify the installation
 
@@ -42,13 +42,8 @@ the merge:
 
 ```bash
 ruff check .                 # lint (src + tests)
-pytest tests -m "not e2e"    # unit suite (non-e2e)
+pytest                       # full unit suite
 ```
-
-For portal or onboarding changes, also run the browser e2e suite
-(`pytest tests/e2e`); Chromium must be installed once per machine
-(`playwright install chromium`) — without it the e2e tests silently SKIP,
-and a skipped gate is no gate.
 
 ## How to contribute
 
@@ -108,10 +103,9 @@ kestrel/
 │   ├── portal/           # Localhost web portal
 │   ├── wizard/           # Onboarding wizard
 │   ├── agent_protocol.py # The agent-native pipeline protocol (JSON verbs)
-│   ├── browser.py        # Guarded access to the optional Playwright [browser] extra
 │   ├── database.py       # SQLite store
 │   └── config/           # Bundled YAML configs (employers, sites, searches)
-├── tests/                # Test suite (unit + e2e)
+├── tests/                # Test suite
 └── pyproject.toml        # Package configuration
 ```
 

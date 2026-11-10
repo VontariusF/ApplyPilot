@@ -56,12 +56,12 @@ def test_parse_score_response_wrapped_keywords():
     """S3: continuation lines after KEYWORDS: join instead of vanishing."""
     response = (
         "SCORE: 9\n"
-        "KEYWORDS: python, llm, playwright,\n"
+        "KEYWORDS: python, llm, graphql,\n"
         "fastapi, sqlite\n"
         "REASONING: Excellent match."
     )
     parsed = scorer._parse_score_response(response)
-    assert parsed["keywords"] == "python, llm, playwright, fastapi, sqlite"
+    assert parsed["keywords"] == "python, llm, graphql, fastapi, sqlite"
     assert parsed["reasoning"] == "Excellent match."
 
 

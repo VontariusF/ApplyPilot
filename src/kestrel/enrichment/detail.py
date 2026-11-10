@@ -155,8 +155,8 @@ def resolve_all_urls(conn: sqlite3.Connection) -> dict:
 
 
 # WTTJ note (spec art_VGFSMgRh): the old Algolia URL repair captured the
-# network response off the wire inside a Playwright browser and is gone with
-# the browser itself. Relative WelcomeToTheJungle URLs have no in-process
+# network response off the wire inside the old browser transport and is gone
+# with it. Relative WelcomeToTheJungle URLs have no in-process
 # resolver — resolve_url() returns None for them, so they stay pending and
 # reach the host agent's enrich lane (`kestrel agent enrich`) instead.
 
@@ -657,8 +657,8 @@ def persist_description(conn: sqlite3.Connection, url: str,
 def _httpx_proxy_url(proxy_config: dict) -> str:
     """Render the shared proxy config in httpx form (http://user:pass@host:port).
 
-    Same components the Playwright proxy setting consumed, in the form the
-    pure-HTTP transport speaks."""
+    Same components the old browser transport's proxy setting consumed, in
+    the form the pure-HTTP transport speaks."""
     host, port = proxy_config["host"], proxy_config["port"]
     user, passwd = proxy_config.get("user"), proxy_config.get("pass")
     if user and passwd:
