@@ -117,7 +117,6 @@ class TestLazySitesRouteThroughGuard:
         # captures only, so the module never imports the guard.
         assert "sync_playwright" not in vars(smartextract)
 
-    def test_detail_enrichment(self):
-        from kestrel.enrichment import detail
-
-        assert detail.sync_playwright is browser.sync_playwright
+    # test_detail_enrichment removed (spec art_VGFSMgRh): enrichment fetches
+    # over pure httpx and no longer routes through the browser guard.
+    # test_pdf_rendering removed on main with the Chromium render path (PR #106).
