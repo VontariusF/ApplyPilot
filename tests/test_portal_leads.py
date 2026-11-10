@@ -280,10 +280,12 @@ def test_leads_mark_round_trips_each_decision(portal_client, seeded_profile,
 
 def test_leads_empty_state_hint_names_the_installed_cli(portal_client,
                                                         seeded_profile):
-    """Regression: the empty board's discovery hint must say
-    `kestrel leads-discover` — the installed command, not the pip
-    package name `kestrel-agent` (bug reported against main at 7b5295a)."""
+    """Regression: the empty board's discovery hint must name the full
+    mounted command path, `kestrel agent leads-discover` — the agent
+    verbs are a Typer sub-app, so a bare `kestrel leads-discover` is
+    not runnable (follow-up to 7b5295a)."""
     client, _ = portal_client
     r = client.get("/leads")
-    assert "<code>kestrel leads-discover</code>" in r.text
+    assert "<code>kestrel agent leads-discover</code>" in r.text
     assert "kestrel-agent" not in r.text
+    assert "<code>kestrel leads-</code>" not in r.text
