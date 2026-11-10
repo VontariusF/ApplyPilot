@@ -35,13 +35,21 @@ import logging
 import os
 import re
 import sqlite3
+import tempfile
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TypeVar
 from urllib.parse import urlparse
 
 import httpx
+
+try:
+    import fcntl
+except ImportError:  # non-POSIX: the lock degrades, the atomic write remains
+    fcntl = None
 
 from kestrel import config
 from kestrel.company_identity import normalize_name_key
@@ -1097,6 +1105,49 @@ def _usage_path():
     return config.APP_DIR / "discovery-usage.json"
 
 
+@contextmanager
+def _usage_lock():
+    """Cross-process exclusive lock around the usage counter's RMW.
+
+    The CLI and the portal run as separate processes against one
+    APP_DIR; two concurrent discovery runs read the same count and both
+    wrote it back, losing a run (sweep art_Izev3UNN suggestion 3).
+    fcntl.flock on a sibling lock file serializes them. Degenerates to
+    a no-op where fcntl is absent — the atomic rewrite still holds.
+    """
+    config.APP_DIR.mkdir(parents=True, exist_ok=True)
+    with open(config.APP_DIR / "discovery-usage.lock", "w") as lock:
+        if fcntl is not None:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    """Write JSON so a reader never observes a half-written file.
+
+    Temp file in the target directory + os.replace: a crash mid-write
+    leaves the previous counter intact instead of a corrupt file, and
+    the write lands all at once.
+    """
+    tmp = tempfile.NamedTemporaryFile(
+        "w", dir=path.parent, prefix=f"{path.name}.", suffix=".tmp",
+        delete=False, encoding="utf-8")
+    try:
+        with tmp:
+            json.dump(payload, tmp)
+        os.replace(tmp.name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+        raise
+
+
 def _retirement_path():
     return config.APP_DIR / "discovery-retired.json"
 
@@ -1125,11 +1176,14 @@ def discovery_runs_used(now: datetime | None = None) -> int:
 
 def _record_discovery_run(now: datetime | None = None) -> int:
     now = now or datetime.now(timezone.utc)
-    used = discovery_runs_used(now) + 1
-    config.APP_DIR.mkdir(parents=True, exist_ok=True)
-    _usage_path().write_text(
-        json.dumps({"utc_date": now.date().isoformat(), "runs": used}),
-        encoding="utf-8")
+    # The read-modify-write is guarded and the rewrite atomic: the CLI
+    # and the portal share one APP_DIR, and a lost or half-written
+    # counter is a daily-cap hole (sweep art_Izev3UNN suggestion 3).
+    with _usage_lock():
+        used = discovery_runs_used(now) + 1
+        _atomic_write_json(
+            _usage_path(),
+            {"utc_date": now.date().isoformat(), "runs": used})
     return used
 
 

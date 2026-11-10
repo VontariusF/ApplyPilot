@@ -10,6 +10,7 @@ unless --reveal, and the guardrails block riding every payload.
 """
 
 import json
+import os
 from datetime import datetime, timezone
 
 import pytest
@@ -338,6 +339,47 @@ def test_bad_leads_yaml_depth_refuses_at_source_build(app_dir, conn,
     with pytest.raises(hl.LeadsRefusal) as refused:
         hl.discover_hiring_leads(conn)
     assert refused.value.code == "config_invalid"
+
+
+def test_record_discovery_run_survives_a_failed_write_intact(
+        app_dir, monkeypatch):
+    """The counter rewrite is atomic: a crash mid-write leaves the
+    previous count readable and no temp litter behind — a half-written
+    discovery-usage.json was read as a reset-to-zero cap hole (sweep
+    art_Izev3UNN suggestion 3)."""
+    hl._record_discovery_run(NOW)
+    hl._record_discovery_run(NOW)
+    assert hl.discovery_runs_used(NOW) == 2
+
+    def failing_replace(src, dst):
+        raise OSError("simulated crash mid-write")
+
+    # Patch os.replace by hand and restore it precisely: monkeypatch.undo()
+    # would also tear down the app_dir fixture's path redirections.
+    real_replace = os.replace
+    os.replace = failing_replace
+    try:
+        with pytest.raises(OSError, match="simulated crash"):
+            hl._record_discovery_run(NOW)
+    finally:
+        os.replace = real_replace
+    assert hl.discovery_runs_used(NOW) == 2  # previous value intact
+    assert not list(app_dir.glob("*.tmp"))  # no temp litter
+
+
+def test_concurrent_run_recording_loses_no_counts(app_dir):
+    """The CLI and the portal record as separate processes over one
+    APP_DIR; the lock serializes the read-modify-write so concurrent
+    runs each count (sweep art_Izev3UNN suggestion 3)."""
+    import threading
+
+    threads = [threading.Thread(target=hl._record_discovery_run, args=(NOW,))
+               for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert hl.discovery_runs_used(NOW) == 8
 
 
 def test_quota_exhausted_refusal_with_utc_cap(conn, monkeypatch, no_network,
