@@ -87,7 +87,7 @@ def _store_jobs_filtered(
         url = job.get("url")
         if not url:
             continue
-        if not _location_ok(job.get("location"), accept_locs, reject_locs):
+        if not _location_ok(job.get("location"), accept_locs, reject_locs, url=url):
             filtered += 1
             continue
         try:

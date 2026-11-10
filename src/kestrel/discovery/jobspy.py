@@ -327,6 +327,7 @@ def _run_one_search(
     df = df[df.apply(lambda row: _location_ok(
         _clean_cell(row.get("location")),
         accept_locs, reject_locs,
+        url=_clean_cell(row.get("job_url")),
     ), axis=1)]
     filtered = before - len(df)
 
