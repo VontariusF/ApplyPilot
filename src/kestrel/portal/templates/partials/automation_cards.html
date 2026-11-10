@@ -44,7 +44,7 @@
     </div>
     <p>{{ p.description }}</p>
     {% if p.name == "apply_matches" %}
-    <p class="hint" data-testid="cap-usage">{{ status.used_today }} of {{ status.cap }} applications used today.</p>
+    <p class="hint" data-testid="cap-usage">{% if status.cap is none %}No daily cap — {{ status.used_today }} applications used today.{% else %}{{ status.used_today }} of {{ status.cap }} applications used today.{% endif %}</p>
     {% endif %}
     <div class="preset-actions">
       <form method="post" action="/automation/start" class="inline-form">
@@ -81,7 +81,7 @@
         <fieldset>
           <legend>Applications per day</legend>
           {% for c in daily_cap_choices %}
-          <label class="check"><input type="radio" name="daily_cap" value="{{ c }}" {{ 'checked' if p.params.daily_cap == c }}> {{ c }}</label>
+          <label class="check"><input type="radio" name="daily_cap" value="{{ '' if c is none else c }}" {{ 'checked' if p.params.daily_cap == c }}> {{ 'No cap' if c is none else c }}</label>
           {% endfor %}
         </fieldset>
         <label class="check">

@@ -111,7 +111,7 @@ def test_config_defaults_before_first_save(portal_env):
     assert cfg["schedule_enabled"] is False
     assert cfg["presets"]["find_jobs"] == {"results_level": "standard"}
     assert cfg["presets"]["apply_matches"] == {
-        "min_score": 7, "daily_cap": 10, "keep_going": False}
+        "min_score": 7, "daily_cap": None, "keep_going": False}
     assert cfg["presets"]["refresh_scores"] == {}
     assert cfg["labels"]["pipeline"] == "Finding jobs"
 
@@ -202,6 +202,7 @@ def test_start_preset_apply_carries_remaining_cap(portal_env, start_spy):
 
 def test_start_preset_apply_refuses_when_cap_spent(portal_env, start_spy):
     seed_applied(10)
+    automation.update({"presets": {"apply_matches": {"daily_cap": 10}}})
     with pytest.raises(runner.ParamError, match="Daily cap reached"):
         automation.start_preset("apply_matches")
     assert start_spy == []
@@ -550,15 +551,42 @@ def test_start_preset_apply_refuses_while_a_run_is_active(portal_env,
 
 
 def test_start_preset_apply_carries_the_daily_cap(portal_env, start_spy):
-    """The spawned run re-checks the live count before every job, so the
-    cap holds against applications recorded mid-run by any path."""
+    """A requested cap rides into the spawned run: the worker re-checks
+    the live count before every job, so the cap holds against
+    applications recorded mid-run by any path."""
     init_db()
+    automation.update({"presets": {"apply_matches": {"daily_cap": 10}}})
     automation.start_preset("apply_matches")
 
     kind, params = start_spy[0]
     assert kind == "apply"
-    assert params["daily_cap"] == "10"  # the configured default cap
+    assert params["daily_cap"] == "10"  # the cap the user picked
     assert int(params["limit"]) <= 10
+
+
+def test_start_preset_without_a_cap_passes_none(portal_env, start_spy):
+    """Spec art_NcNShMYR: an empty/absent preset cap means NO cap — the
+    spawned run carries no daily_cap (the launcher treats None as
+    uncapped) and is bounded by the eligible queue, not a number."""
+    init_db()
+    seed_eligible_job()
+    seed_eligible_job(url="https://jobs.example/posting-2")
+    automation.start_preset("apply_matches")
+
+    kind, params = start_spy[0]
+    assert kind == "apply"
+    assert "daily_cap" not in params
+    assert params["limit"] == "2"  # the eligible queue is the bound
+
+
+def test_start_preset_honors_a_preset_of_25(portal_env, start_spy):
+    init_db()
+    automation.update({"presets": {"apply_matches": {"daily_cap": 25}}})
+    automation.start_preset("apply_matches")
+
+    kind, params = start_spy[0]
+    assert params["daily_cap"] == "25"
+    assert int(params["limit"]) <= 25
 
 
 # ---------------------------------------------------------------------------

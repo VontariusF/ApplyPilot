@@ -334,18 +334,19 @@ def test_next_eligible_shares_one_job_shape(store):
 
 
 def test_next_eligible_is_cap_aware(store):
-    """The lookahead applies the same daily-cap headroom check the next
-    apply-acquire runs: when the cap binds, it advertises nothing and says
-    so (the termination signals can no longer contradict each other)."""
+    """The lookahead applies the same requested-cap headroom check the next
+    apply-acquire runs: when a REQUESTED cap binds, it advertises nothing
+    and says so (the termination signals can no longer contradict each
+    other); with no cap requested it never binds."""
     conn = store
-    from kestrel.apply.planning import AGENT_DEFAULT_DAILY_CAP
+    # A cap of 5, requested via the config seam (spec art_NcNShMYR).
+    config.write_secret_text(config.APP_DIR / "apply.yaml", "daily_cap: 5\n")
 
     now = datetime.now(timezone.utc).isoformat()
-    # AGENT_DEFAULT_DAILY_CAP - 1 applications recorded today, two jobs
-    # still in the queue: after recording one more applied outcome the cap
-    # binds while the queue is non-empty — exactly the case the old
-    # lookahead lied about.
-    for i in range(AGENT_DEFAULT_DAILY_CAP - 1):
+    # 4 applications recorded today, two jobs still in the queue: after
+    # recording one more applied outcome the cap binds while the queue is
+    # non-empty — exactly the case the old lookahead lied about.
+    for i in range(4):  # cap 5 - 1: one more applied outcome binds it
         _seed_apply_job(conn, f"https://jobs/seen/{i}", fit_score=8)
         conn.execute("UPDATE jobs SET applied_at = ? WHERE url = ?",
                      (now, f"https://jobs/seen/{i}"))

@@ -27,8 +27,8 @@ runner = CliRunner()
 RESUME_MARKER = "QUINTESSENTIAL_RESUME_MARKER_9F3A"
 FACTS_MARKER = "GHOST_PROJECT_MARKER_7C2B"
 
-# The external-driver daily cap (planning.AGENT_DEFAULT_DAILY_CAP) — the
-# guardrail the verbs may not lift.
+# The external-driver daily cap requested by the seeded_apply_store fixture
+# (apply.yaml daily_cap = 5) — the guardrail the verbs may not lift.
 CAP = 5
 
 
@@ -64,8 +64,10 @@ def _tailored(conn, url, fit_score=8, title="Engineer"):
 
 @pytest.fixture()
 def seeded_apply_store(app_dir, isolated_db):
-    """A store with a resume, a profile, and CAP + 1 tailored, scored jobs —
-    one more than the cap, so the journey hits cap_reached with a proof job."""
+    """A store with a resume, a profile, a REQUESTED cap (apply.yaml
+    daily_cap = 5), and CAP + 1 tailored, scored jobs — one more than
+    the cap, so the journey hits cap_reached with a proof job."""
+    config.write_secret_text(config.APP_DIR / "apply.yaml", "daily_cap: 5\n")
     (app_dir / "resume.txt").write_text(
         f"Test Person — data engineer résumé. {RESUME_MARKER}", encoding="utf-8")
     config.write_secret_text(config.PROFILE_PATH, json.dumps({
@@ -293,6 +295,52 @@ def test_min_score_filters_the_queue(seeded_apply_store):
     payload = payload_of(result)
     assert payload["next_eligible"] == []
     assert payload["cap_reached"] is False
+
+
+def test_no_requested_cap_never_refuses(app_dir, isolated_db):
+    """Spec art_NcNShMYR: with NO cap requested, apply-acquire keeps
+    locking — six applications recorded today does not stop the seventh,
+    and the progress block reports cap/headroom as None."""
+    conn = database.init_db()
+    for i in range(1, 8):
+        _tailored(conn, f"https://jobs/{i}", fit_score=8)
+    now = datetime.now(timezone.utc).isoformat()
+    for i in range(1, 7):  # six applications already on the clock
+        conn.execute(
+            "UPDATE jobs SET apply_status = 'applied', applied_at = ? "
+            "WHERE url = ?", (now, f"https://jobs/{i}"))
+    conn.commit()
+
+    result = run("apply-acquire")
+    assert result.exit_code == 0, result.stdout
+    payload = payload_of(result)
+    assert payload["job"]["url"] == "https://jobs/7"  # the lock WAS taken
+    assert payload["apply"]["cap"] is None
+    assert payload["apply"]["headroom"] is None
+
+
+def test_configured_cap_of_five_still_refuses_the_seventh(app_dir, isolated_db):
+    """The same six applications under a REQUESTED cap of 5 refuse with
+    cap_reached before any lock (the apply.yaml config request path)."""
+    config.write_secret_text(config.APP_DIR / "apply.yaml", "daily_cap: 5\n")
+    conn = database.init_db()
+    for i in range(1, 8):
+        _tailored(conn, f"https://jobs/{i}", fit_score=8)
+    now = datetime.now(timezone.utc).isoformat()
+    for i in range(1, 7):
+        conn.execute(
+            "UPDATE jobs SET apply_status = 'applied', applied_at = ? "
+            "WHERE url = ?", (now, f"https://jobs/{i}"))
+    conn.commit()
+
+    result = run("apply-acquire")
+    assert result.exit_code != 0
+    envelope = payload_of(result)
+    assert envelope["error"]["code"] == "cap_reached"
+    assert envelope["error"]["details"]["apply"]["cap"] == 5
+
+    row = _row(conn, "https://jobs/7")
+    assert row["apply_status"] is None  # no lock was taken
 
 
 @pytest.mark.parametrize("bad", ["banana", "-5", "--5"])

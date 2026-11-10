@@ -245,9 +245,10 @@ def test_protocol_journey_onboarding_through_confirmed_apply(
     plan_payload = json.loads(result.stdout)
     assert plan_payload["commits_nothing"] is True
     assert plan_payload["batch_size"] == 2
-    assert plan_payload["cap"] == planning.AGENT_DEFAULT_DAILY_CAP
-    assert plan_payload["cap_source"] == "default"
-    assert plan_payload["headroom"] == planning.AGENT_DEFAULT_DAILY_CAP
+    # No cap requested: the payload says so honestly (spec art_NcNShMYR).
+    assert plan_payload["cap"] is None
+    assert plan_payload["cap_source"] == "none"
+    assert plan_payload["headroom"] is None
     assert [job["url"] for job in plan_payload["jobs"]] == sorted(
         job["url"] for job in JOBS)
     assert len(plan_payload["plan_hash"]) == 64
@@ -267,7 +268,7 @@ def test_protocol_journey_onboarding_through_confirmed_apply(
     assert len(runs) == 1
     call = runs[0]
     assert call["limit"] == 2
-    assert call["daily_cap"] == planning.AGENT_DEFAULT_DAILY_CAP
+    assert call["daily_cap"] is None
     assert call["allowed_urls"] == {job["url"] for job in JOBS}
     assert call["continuous"] is False
     assert not (app_dir / planning.STAGED_PLAN_FILE).exists()

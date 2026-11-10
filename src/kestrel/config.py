@@ -439,6 +439,55 @@ def leads_daily_discovery_cap() -> int:
     return cap
 
 
+def load_apply_config() -> dict:
+    """Load apply settings from ~/.kestrel/apply.yaml.
+
+    Unlike leads.yaml there is no packaged fallback: every key is
+    optional and absent means "not requested" — the apply cap's None
+    default has no number to ship. Returns {} when the file is absent.
+    """
+    import yaml
+    path = APP_DIR / "apply.yaml"
+    if not path.exists():
+        return {}
+    loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    return loaded or {}
+
+
+class ApplyConfigError(ValueError):
+    """An apply.yaml value is malformed (wrong type, out of range).
+
+    Subclasses ValueError so callers keep a single typed contract, like
+    LeadsConfigError; the agent verbs translate it into the typed
+    config_invalid refusal instead of an internal_error.
+    """
+
+
+def apply_daily_cap() -> int | None:
+    """Max applications per UTC day the user requested, or None for no cap.
+
+    Spec art_NcNShMYR: there is no mandatory application cap — a cap
+    exists only when the individual requests one. apply.yaml's
+    daily_cap is one of the three request paths (flag, config, portal
+    preset). Validation mirrors leads_daily_discovery_cap(): an integer
+    >= 0, refused loudly when malformed; an absent key means None (the
+    launcher treats None as uncapped).
+    """
+    raw = load_apply_config().get("daily_cap")
+    if raw is None:
+        return None
+    try:
+        cap = int(raw)
+    except (TypeError, ValueError):
+        raise ApplyConfigError(
+            f"apply.yaml daily_cap must be an integer, got {raw!r}"
+        )
+    if cap < 0:
+        raise ApplyConfigError(
+            f"apply.yaml daily_cap must be >= 0, got {raw!r}")
+    return cap
+
+
 def leads_role_taxonomy() -> tuple[str, ...]:
     """Role titles the lead-discovery X-ray queries target (spec §4)."""
     raw = load_leads_config().get("role_taxonomy")

@@ -53,14 +53,17 @@ PRESETS: dict = {
 }
 
 MIN_SCORE_CHOICES = (5, 6, 7, 8, 9)
-DAILY_CAP_CHOICES = (5, 10, 25)
+# None = No cap (the first choice): a cap applies only when the user
+# picks one (spec art_NcNShMYR). Validation and the launcher treat
+# None as uncapped.
+DAILY_CAP_CHOICES = (None, 5, 10, 25)
 
 DEFAULTS: dict = {
     "auto_apply_enabled": False,
     "schedule_enabled": False,
     "presets": {
         "find_jobs": {"results_level": "standard"},
-        "apply_matches": {"min_score": 7, "daily_cap": 10, "keep_going": False},
+        "apply_matches": {"min_score": 7, "daily_cap": None, "keep_going": False},
         "refresh_scores": {},
     },
     # Plain-language run-kind labels for the UI (spec: no jargon).
@@ -143,7 +146,7 @@ def _validate(cfg: dict) -> None:
     if apply_preset.get("min_score") not in MIN_SCORE_CHOICES:
         raise runner.ParamError("min_score must be between 5 and 9")
     if apply_preset.get("daily_cap") not in DAILY_CAP_CHOICES:
-        raise runner.ParamError("daily_cap must be one of 5, 10, 25")
+        raise runner.ParamError("daily_cap must be one of No cap, 5, 10, 25")
     for key in ("keep_going", "auto_apply_enabled", "schedule_enabled"):
         if not isinstance(cfg[key] if key in cfg else apply_preset.get(key), bool):
             raise runner.ParamError(f"{key} must be a boolean")
@@ -249,28 +252,38 @@ def preset_params(cfg: dict | None = None, name: str = "") -> dict:
 def start_preset(name: str) -> dict:
     """Start a preset as a tracked run (the Automation-page button path).
 
-    Apply runs get limit = today's remaining cap, so a manual start cannot
-    blow past the cap the user set. Manual starts go through start_guarded
-    (P2-2): without it, a second click while an automation run was active
-    spawned a concurrent run whose limit was computed from the same cap
-    snapshot — together the two runs could apply up to twice the cap.
+    Apply runs with a requested cap get limit = today's remaining cap,
+    so a manual start cannot blow past the cap the user set; with no
+    cap requested (None, spec art_NcNShMYR) the run is bounded by the
+    eligible queue itself. Manual starts go through start_guarded
+    (P2-2): without it, a second click while an automation run was
+    active spawned a concurrent run whose limit was computed from the
+    same cap snapshot — together the two runs could apply up to twice
+    the cap.
 
     Raises:
-        runner.ParamError: for an unknown preset, an exhausted daily cap,
-            or when another run is already active.
+        runner.ParamError: for an unknown preset, an exhausted daily
+            cap, or when another run is already active.
     """
     if name not in PRESETS:
         raise runner.ParamError(f"unknown preset {name!r}")
     cfg = load()
     if name == "apply_matches":
-        status = cap_status(cfg)
-        if status["remaining"] <= 0:
-            raise runner.ParamError(cap_pause_reason(cfg, status))
         params = preset_params(cfg, name)
-        params["limit"] = str(status["remaining"])
-        # The worker re-checks the live count before every job, so the cap
-        # also holds against applications recorded mid-run by any path.
-        params["daily_cap"] = str(status["cap"])
+        status = cap_status(cfg)
+        cap = status["cap"]
+        if cap is None:
+            # No cap requested: the eligible queue is the only bound.
+            params["limit"] = str(database.count_apply_eligible(
+                min_score=int(params["min_score"])))
+        else:
+            if status["remaining"] <= 0:
+                raise runner.ParamError(cap_pause_reason(cfg, status))
+            params["limit"] = str(status["remaining"])
+            # The worker re-checks the live count before every job, so the
+            # cap also holds against applications recorded mid-run by any
+            # path.
+            params["daily_cap"] = str(cap)
         kind = "apply"
     else:
         kind = PRESETS[name]["kind"]
@@ -317,7 +330,8 @@ def cap_status(cfg: dict | None = None) -> dict:
     return {
         "cap": cap,
         "used_today": used,
-        "remaining": max(0, cap - used),
+        # None cap = unbounded: there is no remaining to compute.
+        "remaining": max(0, cap - used) if cap is not None else None,
         "paused": paused is not None,
         "pause_reason": paused["reason"] if paused else None,
     }
@@ -481,7 +495,7 @@ def run_tick(cfg: dict | None = None, now: datetime | None = None) -> dict:
 
     if cfg["auto_apply_enabled"] and not paused:
         status = cap_status(cfg)
-        if status["remaining"] <= 0:
+        if status["cap"] is not None and status["remaining"] <= 0:
             reason = cap_pause_reason(cfg, status)
             state["auto_apply_paused"] = {"on": today, "reason": reason}
             save(cfg)
@@ -505,20 +519,25 @@ def run_tick(cfg: dict | None = None, now: datetime | None = None) -> dict:
 
     if cfg["auto_apply_enabled"] and not state.get("auto_apply_paused"):
         status = cap_status(cfg)
-        if status["remaining"] <= 0:
-            outcome["skipped"].append("daily cap reached")
-            return outcome
         params = preset_params(cfg, "apply_matches")
         # Queue check first: launching an apply run with zero eligible
         # jobs would exit "Queue empty" immediately and flood Runs
         # history once per tick (~60s). The worker's own acquire logic
         # stays the source of truth; this mirrors its queue predicate.
-        if database.count_apply_eligible(
-                min_score=int(params["min_score"])) == 0:
+        eligible = database.count_apply_eligible(
+            min_score=int(params["min_score"]))
+        if eligible == 0:
             outcome["skipped"].append("nothing to apply to")
             log.debug("auto-apply skipped: no eligible jobs in the queue")
             return outcome
-        params["limit"] = str(status["remaining"])
+        if status["cap"] is None:
+            # No cap requested: the eligible queue is the only bound.
+            params["limit"] = str(eligible)
+        else:
+            if status["remaining"] <= 0:
+                outcome["skipped"].append("daily cap reached")
+                return outcome
+            params["limit"] = str(status["remaining"])
         row = start_guarded("apply", params)
         if row is None:
             outcome["skipped"].append("run start refused — a run became active")

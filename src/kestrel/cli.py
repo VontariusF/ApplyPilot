@@ -327,9 +327,8 @@ def apply(
         None, "--daily-cap",
         help=("Max applications per UTC day this run must respect. The count is "
               "re-checked live before every job, so applications from any path "
-              "count. Omit for no cap — unless --plan/--i-confirm drives the "
-              "run, where omitting means the 5/day externally-driven default "
-              "(the smallest automation preset)."),
+              "count. Omit for no cap — a cap applies only when you request "
+              "one (this flag, an apply.yaml daily_cap, or a portal preset)."),
     ),
     gen: bool = typer.Option(False, "--gen", help="Generate prompt file for manual debugging instead of running."),
     mark_applied: Optional[str] = typer.Option(None, "--mark-applied", help="Manually mark a job URL as applied."),

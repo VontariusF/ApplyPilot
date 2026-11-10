@@ -64,8 +64,10 @@ def status_text() -> str:
     """Plain-language status answer, composed from the store."""
     cfg = automation.load()
     cap = automation.cap_status(cfg)
+    cap_line = ("uncapped (no daily cap set)" if cap["cap"] is None
+                else f"capped at {cap['cap']}/day")
     line = (f"auto-apply is {'on' if cfg['auto_apply_enabled'] else 'off'}, "
-            f"capped at {cap['cap']}/day; {cap['used_today']} used today")
+            f"{cap_line}; {cap['used_today']} used today")
     if cap["paused"]:
         line += f" — paused: {cap['pause_reason']}"
     find = cfg["presets"]["find_jobs"]
