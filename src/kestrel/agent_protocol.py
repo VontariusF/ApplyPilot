@@ -1743,7 +1743,7 @@ def _leads_discover(company_key: str | None, min_fit: float | None,
         "leads": [_lead_block(row, reveal) for row in new_rows],
         "guardrails": {**result["guardrails"],
                        "discovery_remaining_today": max(0, cap - used)},
-        "next": "Show the person the Leads board, or `kestrel-agent "
+        "next": "Show the person the Leads board, or `kestrel "
                 "leads-list` — the connection itself is always the "
                 "person's own action; Kestrel never sends anything.",
     }
@@ -1764,7 +1764,7 @@ def _leads_list(company_key: str | None, status: str | None,
         "count": len(rows),
         "leads": [_lead_block(row, reveal) for row in rows],
         "guardrails": _leads_guardrails(),
-        "next": "Show the person the Leads board, or `kestrel-agent "
+        "next": "Show the person the Leads board, or `kestrel "
                 "leads-list --reveal` for the profile links to open "
                 "yourself in your own browser.",
     }

@@ -276,3 +276,14 @@ def test_leads_mark_round_trips_each_decision(portal_client, seeded_profile,
         "SELECT last_status FROM hiring_leads WHERE profile_url = ?",
         (profile_url,)).fetchone()
     assert row["last_status"] == status
+
+
+def test_leads_empty_state_hint_names_the_installed_cli(portal_client,
+                                                        seeded_profile):
+    """Regression: the empty board's discovery hint must say
+    `kestrel leads-discover` — the installed command, not the pip
+    package name `kestrel-agent` (bug reported against main at 7b5295a)."""
+    client, _ = portal_client
+    r = client.get("/leads")
+    assert "<code>kestrel leads-discover</code>" in r.text
+    assert "kestrel-agent" not in r.text
