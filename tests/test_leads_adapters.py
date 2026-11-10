@@ -910,48 +910,30 @@ def _seed_leaky_lead(conn, profile_url="https://www.linkedin.com/in/julia-casey"
                               discovered_at="2026-11-10T00:00:00+00:00")
 
 
-def test_backfill_lead_title_privacy_repairs_stored_rows(app_dir):
+def test_stored_titles_are_not_rewritten_at_startup(app_dir):
+    # Sweep art_Izev3UNN finding 4: the startup backfill used to
+    # rewrite stored titles to mask tokens while full_name stayed raw
+    # in the same row — the deliberately unmasked portal board
+    # rendered mask tokens beside clear names, and the store lost its
+    # data. The store keeps the raw title; scrub_lead_title masks at
+    # the read path only.
     conn = init_db()
     _seed_leaky_lead(conn)
-    from kestrel.database import backfill_lead_title_privacy
 
-    assert backfill_lead_title_privacy(conn) == 1
+    init_db()  # the startup hook no longer touches stored titles
     row = conn.execute(
         "SELECT title FROM hiring_leads WHERE profile_url = ?",
         ("https://www.linkedin.com/in/julia-casey",),
     ).fetchone()
-    assert row["title"] == ("--reveal-gated-- - Senior Business "
-                            "Recruiter @ Brex")
+    assert row["title"] == "Julia Casey - Senior Business Recruiter @ Brex"
+
+    # The read path is the mask: scrubbing the stored title masks the
+    # name variant, idempotently.
+    scrubbed = hl.scrub_lead_title(row["title"], "Julia Casey Az")
+    assert scrubbed == "--reveal-gated-- - Senior Business Recruiter @ Brex"
+    assert hl.scrub_lead_title(scrubbed, "Julia Casey Az") == scrubbed
 
 
-def test_backfill_lead_title_privacy_is_idempotent(app_dir):
-    conn = init_db()
-    _seed_leaky_lead(conn)
-    from kestrel.database import backfill_lead_title_privacy
-
-    assert backfill_lead_title_privacy(conn) == 1
-    # The second pass finds nothing to rewrite: a repaired title
-    # carries no name variant, so it compares equal and stays put.
-    assert backfill_lead_title_privacy(conn) == 0
-    row = conn.execute(
-        "SELECT title FROM hiring_leads WHERE profile_url = ?",
-        ("https://www.linkedin.com/in/julia-casey",),
-    ).fetchone()
-    assert row["title"] == ("--reveal-gated-- - Senior Business "
-                            "Recruiter @ Brex")
-
-
-def test_init_db_runs_the_title_repair_pass(app_dir):
-    # The pass is hooked beside backfill_company_identity in init_db:
-    # a store seeded with a leaky row is repaired on the next startup,
-    # no manual step.
-    conn = init_db()
-    _seed_leaky_lead(conn)
-    conn.close()
-    repaired = init_db()
-    row = repaired.execute(
-        "SELECT title FROM hiring_leads WHERE profile_url = ?",
-        ("https://www.linkedin.com/in/julia-casey",),
-    ).fetchone()
-    assert row["title"] == ("--reveal-gated-- - Senior Business "
-                            "Recruiter @ Brex")
+# (The old startup repair-pass test is gone: sweep finding 4 removed
+# the destructive backfill — test_stored_titles_are_not_rewritten_at_startup
+# holds the new contract.)

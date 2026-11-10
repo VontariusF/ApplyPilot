@@ -342,11 +342,6 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
     # row's employer from the fields the writers already hold, then
     # materialize the per-company mirror (MAX fit across member jobs).
     backfill_company_identity(conn)
-    # Privacy repair (2026-11-10 live-run finding): stored lead titles
-    # can carry name variants the read-path scrubber missed ('Julia
-    # Casey' for parsed 'Julia Casey Az'). Re-scrub them in place on
-    # every startup — idempotent, see backfill_lead_title_privacy.
-    backfill_lead_title_privacy(conn)
     refresh_company_identity(conn)
     # B1: idempotent repair of the pre-_clean_cell 'None'/'n/a' URL class
     # (no migration — see normalize_polluted_urls).
@@ -485,40 +480,6 @@ def backfill_company_identity(conn: sqlite3.Connection) -> int:
             (name, domain, row["url"]),
         )
         updated += 1
-    if updated:
-        conn.commit()
-    return updated
-
-
-def backfill_lead_title_privacy(conn: sqlite3.Connection) -> int:
-    """Re-scrub stored hiring-lead titles against the current contract.
-
-    Privacy repair (2026-11-10 live-run finding): a title can carry a
-    truncated variant of the parsed full name ('Julia Casey' when
-    full_name is 'Julia Casey Az') that the old exact-string scrubber
-    left in the clear, on disk and in masked output. Every startup,
-    each stored title is re-run through scrub_lead_title and rewritten
-    when its scrubbed form differs.
-
-    Idempotent: a repaired title contains no name variant, so the next
-    pass compares equal and never rewrites (a repaired title is also
-    stable across code changes for already-covered variants). Returns
-    the number of rows repaired.
-    """
-    from kestrel.discovery.hiring_leads import scrub_lead_title
-
-    rows = conn.execute(
-        "SELECT profile_url, full_name, title FROM hiring_leads"
-    ).fetchall()
-    updated = 0
-    for row in rows:
-        scrubbed = scrub_lead_title(row["title"], row["full_name"])
-        if scrubbed != row["title"]:
-            conn.execute(
-                "UPDATE hiring_leads SET title = ? WHERE profile_url = ?",
-                (scrubbed, row["profile_url"]),
-            )
-            updated += 1
     if updated:
         conn.commit()
     return updated

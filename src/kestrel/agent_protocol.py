@@ -1612,8 +1612,9 @@ def apply_result_cmd(
 # ---------------------------------------------------------------------------
 
 # The mask for --reveal-gated personal data (the spec §5 payload shape)
-# now lives in the discovery module (LEADS_REDACTED) so the masked verb
-# output and the store's title-repair backfill use the identical token.
+# now lives in the discovery module (LEADS_REDACTED) so every masked
+# surface replaces names with the identical token; the store keeps the
+# raw title and masking happens at output only.
 
 
 def _leads_guardrails() -> dict:
@@ -1643,7 +1644,8 @@ def _lead_block(row: dict, reveal: bool) -> dict:
     name is slug-derived, so the title often carries a truncated
     variant of it ('Julia Casey' for parsed 'Julia Casey Az', live run
     2026-11-10) — scrub_lead_title masks those variants too, whole-word
-    and conservative, with the same token the store's repair pass uses.
+    and conservative. The store keeps the raw title; this scrub is the
+    masking, not a repair pass over the store.
     """
     from kestrel.discovery.hiring_leads import LEADS_REDACTED, scrub_lead_title
 
@@ -1684,6 +1686,7 @@ def _leads_discover(company_key: str | None, min_fit: float | None,
     """Run discovery (spec §4 entrypoint) and report the new leads."""
     from kestrel.database import hiring_leads_rows
     from kestrel.discovery.hiring_leads import (
+        DiscoveryScanError,
         HiringLeadsError,
         LeadsRefusal,
         discover_hiring_leads,
@@ -1699,6 +1702,18 @@ def _leads_discover(company_key: str | None, min_fit: float | None,
         # details — plus the guardrails block, which rides every payload.
         _fail(exc.code, str(exc), {**exc.details,
                                    "guardrails": _leads_guardrails()})
+    except DiscoveryScanError as exc:
+        # A scan that died mid-run still stored the leads it found
+        # before the failure, and the run counted against the cap
+        # (recorded at the scan) — the envelope reports the partial
+        # counts instead of dropping them (sweep art_Izev3UNN
+        # finding 3).
+        _fail("source_error", str(exc), {
+            "discovered": exc.discovered,
+            "skipped_existing": exc.skipped_existing,
+            "sources_used": exc.sources_used,
+            "guardrails": _leads_guardrails(),
+        })
     except HiringLeadsError as exc:
         # A source-level failure that is not one of the five refusals —
         # still an envelope, never a stack trace.

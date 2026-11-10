@@ -33,6 +33,9 @@ SERP_KEY = "test-serp-key-not-a-real-credential"
 ACME = ("https://jobs.acme-robotics.com/posting/1", "Acme Robotics",
         "acme-robotics.com", 90)
 
+BOLT = ("https://jobs.boltlabs.com/posting/2", "Bolt Labs",
+        "boltlabs.com", 85)
+
 GUARDRAIL_KEYS = {"sends_nothing", "credentials_stored", "profile_pages_fetched",
                   "daily_discovery_cap", "discovery_used_today",
                   "discovery_remaining_today"}
@@ -394,12 +397,12 @@ def test_leads_list_masks_name_variant_in_title(conn):
     assert "Julia" not in masked and "Casey" not in masked
     assert "Julia" not in run("leads-list").stdout
 
-    # The repair pass runs at startup (init_db), so the stored title is
-    # already scrubbed by the time any later verb reads it — --reveal
-    # shows the repaired headline, not the leaky original.
+    # The store keeps the raw title (sweep finding 4 removed the
+    # destructive startup backfill), so --reveal shows the headline as
+    # the provider served it — masking lives in the read path alone.
     revealed = payload_of(run("leads-list", "--reveal"))
     assert revealed["leads"][0]["title"] == (
-        "--reveal-gated-- - Senior Business Recruiter @ Brex "
+        "Julia Casey - Senior Business Recruiter @ Brex "
         "| Strategic Talent")
 
 
@@ -476,6 +479,105 @@ def test_affiliation_gate_tolerates_trailing_punctuation_in_company_name():
         display_name="Acme, Inc.", domain=None,
         taxonomy=("Head of Talent", "Recruiter"))
     assert role is None
+
+
+# ---------------------------------------------------------------------------
+# Sweep art_Izev3UNN regressions: findings 3 (daily-cap accounting on
+# provider errors) and 4 (non-destructive title backfill)
+# ---------------------------------------------------------------------------
+
+
+class _ErrorSource:
+    """A source whose provider scan fails on the first company."""
+
+    name = "serp"
+    source_label = LEAD_SOURCE_SERP
+
+    def __init__(self, calls):
+        self._calls = calls
+
+    def discover_for_company(self, company):
+        self._calls.append(company["company_key"])
+        if len(self._calls) == 1:
+            return [dict(_LEAD, company_key=company["company_key"])]
+        raise hl.HiringLeadsError("provider 500 — upstream quota exhausted")
+
+
+def test_provider_error_still_records_the_daily_run(conn, monkeypatch,
+                                                    no_network, app_dir):
+    # Sweep finding 3 (Medium): a non-SourceRetired provider error
+    # aborted the scan before _record_discovery_run, so a persistently
+    # failing source burned provider spend the daily cap never counted
+    # and every retry rescanned all companies from the top. The failed
+    # run reached the provider-scan stage — it counts.
+    (app_dir / "leads.yaml").write_text("daily_discovery_cap: 1\n",
+                                        encoding="utf-8")
+    _seed_companies(conn, BOLT)  # two companies — the scan errors on the 2nd
+    calls = []
+    _patch_build_source(monkeypatch, _ErrorSource(calls))
+
+    first = run("leads-discover")
+    assert first.exit_code == 1
+    assert payload_of(first)["error"]["code"] == "source_error"
+    assert hl.discovery_runs_used() == 1
+
+    second = run("leads-discover")
+    assert second.exit_code == 1
+    payload = payload_of(second)
+    # Cap 1 is spent — the retry refuses instead of rescanning.
+    assert payload["error"]["code"] == "quota_exhausted"
+    assert payload["error"]["details"]["discovery_used_today"] == 1
+
+
+def test_source_error_envelope_carries_partial_counts(conn, monkeypatch,
+                                                      no_network):
+    # Sweep finding 3: leads upserted from the companies scanned before
+    # the error went unreported — the envelope carried no counts at
+    # all, so the host could not see what the partial run had stored.
+    _seed_companies(conn, BOLT)  # two companies — the scan errors on the 2nd
+    calls = []
+    _patch_build_source(monkeypatch, _ErrorSource(calls))
+
+    result = run("leads-discover")
+    assert result.exit_code == 1
+    error = payload_of(result)["error"]
+    assert error["code"] == "source_error"
+    # One company scanned (and its lead upserted) before the failure.
+    assert error["details"]["discovered"] == 1
+    assert error["details"]["skipped_existing"] == 0
+    assert error["details"]["sources_used"] == ["serp"]
+    stored = conn.execute("SELECT COUNT(*) FROM hiring_leads").fetchone()[0]
+    assert stored == 1
+
+
+def test_init_db_preserves_stored_titles_while_masked_output_scrubs(conn):
+    # Sweep finding 4 (Medium): the startup backfill rewrote stored
+    # titles to mask tokens while full_name stayed raw in the same row
+    # — the deliberately unmasked portal board rendered mask tokens
+    # beside clear names, and the store lost its headline. The store
+    # keeps the raw title; masking is the read path's job.
+    _seed_lead(conn, "https://www.linkedin.com/in/julia-casey-az",
+               full_name="Julia Casey Az",
+               title="Julia Casey - Senior Business Recruiter @ Brex")
+    conn.commit()
+
+    fresh = init_db()  # the startup hook must not rewrite stored titles
+    row = fresh.execute(
+        "SELECT title FROM hiring_leads WHERE profile_url = ?",
+        ("https://www.linkedin.com/in/julia-casey-az",),
+    ).fetchone()
+    assert row["title"] == \
+        "Julia Casey - Senior Business Recruiter @ Brex"
+
+    masked = payload_of(run("leads-list"))
+    lead = masked["leads"][0]
+    assert lead["title"].startswith(_LEADS_REDACTED)
+    assert "Julia" not in masked and "Casey" not in masked
+
+    # --reveal shows the raw stored headline, not a backfill token.
+    revealed = payload_of(run("leads-list", "--reveal"))
+    assert revealed["leads"][0]["title"] == \
+        "Julia Casey - Senior Business Recruiter @ Brex"
 
 
 # ---------------------------------------------------------------------------
