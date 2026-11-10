@@ -1,14 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Detail page enrichment: scrapes full descriptions and apply URLs.
+"""Detail page enrichment: fetches full descriptions and apply URLs.
 
-For each job URL in the database, navigates to the detail page and extracts:
+For each job URL in the database, fetches the detail page over pure HTTP
+(httpx — never a browser, spec art_VGFSMgRh) and extracts:
   - full_description: the complete job posting text
   - application_url: the "Apply" button/link URL
 
-Three-tier extraction cascade (cheapest first):
+Three-tier extraction cascade (cheapest first) — unchanged pure functions
+over the parsed soup:
   Tier 1: JSON-LD JobPosting structured data (0 tokens)
   Tier 2: Deterministic CSS pattern matching (0 tokens)
   Tier 3: LLM-assisted extraction (1 LLM call)
+
+A page whose DOM is a JS shell (minimal markup, no JSON-LD) stops with a
+typed ``browser-needed`` detail_error steering the host agent to enrich
+via ``kestrel agent enrich`` — never a relaunch, never a silent failure.
 """
 
 import json
@@ -18,12 +24,12 @@ import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
+import httpx
 from bs4 import BeautifulSoup
 
 from kestrel import config
-from kestrel.browser import sync_playwright
 from kestrel.config import DB_PATH
 from kestrel.database import (
     SKIP_DETAIL_CLAUSE,
@@ -148,107 +154,29 @@ def resolve_all_urls(conn: sqlite3.Connection) -> dict:
             "app_resolved": app_resolved, "collisions": collisions}
 
 
-def resolve_wttj_urls(conn: sqlite3.Connection) -> int:
-    """Re-fetch WTTJ Algolia API to get proper detail URLs and fix slug-as-title.
-    Returns count of URLs updated."""
-    wttj_jobs = conn.execute(
-        "SELECT url, title FROM jobs WHERE site = 'WelcomeToTheJungle'"
-    ).fetchall()
-
-    if not wttj_jobs:
-        return 0
-
-    algolia_data: dict = {}
-
-    def capture_algolia(response):
-        if "algolia.net" in response.url and "/queries" in response.url:
-            try:
-                algolia_data["response"] = json.loads(response.text())
-            except Exception:
-                pass
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page(user_agent=UA)
-        page.on("response", capture_algolia)
-        page.goto(
-            "https://www.welcometothejungle.com/en/jobs?query=developer&refinementList%5Bremote%5D%5B%5D=fulltime",
-            timeout=60000,
-        )
-        page.wait_for_load_state("networkidle")
-        browser.close()
-
-    if not algolia_data.get("response"):
-        log.warning("WTTJ: No Algolia response captured")
-        return 0
-
-    results = algolia_data["response"].get("results", [])
-    slug_map: dict = {}
-    for rs in results:
-        for hit in rs.get("hits", []):
-            slug = hit.get("slug", "")
-            org = hit.get("organization", {})
-            org_slug = org.get("slug", "") if isinstance(org, dict) else ""
-            name = hit.get("name", "")
-            if slug and org_slug:
-                detail_url = f"https://www.welcometothejungle.com/en/companies/{org_slug}/jobs/{slug}"
-                slug_map[slug] = {"url": detail_url, "name": name}
-
-    updated = 0
-    for row in wttj_jobs:
-        old_url, old_title = row[0], row[1]
-        slug = old_url.split("_DFNS_")[0] if "_DFNS_" in old_url else old_url
-        match = slug_map.get(slug) or slug_map.get(old_url)
-        if match:
-            try:
-                conn.execute(
-                    "UPDATE jobs SET url = ?, title = ? WHERE url = ?",
-                    (match["url"], match["name"] or old_title, old_url),
-                )
-                updated += 1
-            except sqlite3.IntegrityError:
-                conn.execute("DELETE FROM jobs WHERE url = ?", (old_url,))
-                updated += 1
-        else:
-            for s, data in slug_map.items():
-                if s in old_url or old_url in s:
-                    try:
-                        conn.execute(
-                            "UPDATE jobs SET url = ?, title = ? WHERE url = ?",
-                            (data["url"], data["name"] or old_title, old_url),
-                        )
-                        updated += 1
-                    except sqlite3.IntegrityError:
-                        conn.execute("DELETE FROM jobs WHERE url = ?", (old_url,))
-                        updated += 1
-                    break
-
-    conn.commit()
-    if updated:
-        # Deletion changed the company fit population — recompute the
-        # identity mirror now, mid-session, not just at the next init_db
-        # (sweep art_Izev3UNN finding 6: a ghost high-match company must
-        # not survive the deletion that emptied it).
-        from kestrel.database import refresh_company_identity
-
-        refresh_company_identity(conn)
-    return updated
-
+# WTTJ note (spec art_VGFSMgRh): the old Algolia URL repair captured the
+# network response off the wire inside a Playwright browser and is gone with
+# the browser itself. Relative WelcomeToTheJungle URLs have no in-process
+# resolver — resolve_url() returns None for them, so they stay pending and
+# reach the host agent's enrich lane (`kestrel agent enrich`) instead.
 
 # -- Detail page intelligence ------------------------------------------------
 
-def collect_detail_intelligence(page) -> dict:
-    """Collect signals from a detail page. Lighter than discovery -- no API interception."""
-    intel: dict = {"json_ld": [], "page_title": "", "final_url": ""}
+def collect_detail_intelligence(soup: BeautifulSoup, final_url: str) -> dict:
+    """Collect signals from parsed detail-page HTML. Lighter than discovery --
+    no API interception."""
+    intel: dict = {"json_ld": [], "page_title": "", "final_url": final_url}
 
-    intel["page_title"] = page.title()
-    intel["final_url"] = page.url
+    if soup.title:
+        intel["page_title"] = soup.title.get_text(strip=True)
 
-    for el in page.query_selector_all('script[type="application/ld+json"]'):
+    for el in soup.find_all("script", type="application/ld+json"):
         try:
-            data = json.loads(el.inner_text())
+            data = json.loads(el.string or el.get_text())
             intel["json_ld"].append(data)
-        except Exception:
+        except (json.JSONDecodeError, TypeError):
+            # Malformed embedded JSON is common on real pages: skip that
+            # block, keep the rest.
             pass
 
     return intel
@@ -352,49 +280,48 @@ DESCRIPTION_SELECTORS = [
 ]
 
 
-def extract_apply_url_deterministic(page) -> str | None:
+def extract_apply_url_deterministic(soup: BeautifulSoup, base_url: str) -> str | None:
     """Try known CSS patterns for apply buttons/links."""
     for sel in APPLY_SELECTORS:
         try:
-            el = page.query_selector(sel)
-            if el:
-                href = el.get_attribute("href")
-                if href and href != "#":
-                    return href
-                tag = el.evaluate("el => el.tagName.toLowerCase()")
-                if tag == "button":
-                    parent_href = el.evaluate("el => el.parentElement?.querySelector('a')?.href || null")
-                    if parent_href:
-                        return parent_href
-                    return page.url
-        except Exception:
+            el = soup.select_one(sel)
+        except Exception:  # noqa: BLE001 - an unsupported selector is a skip, not a crash
+            continue
+        if not el:
             continue
 
-    try:
-        links = page.query_selector_all("a")
-        for link in links:
-            text = link.inner_text().strip().lower()
-            if "apply" in text and len(text) < 50:
-                href = link.get_attribute("href")
-                if href and href != "#" and "javascript:" not in href:
-                    return href
-    except Exception:
-        pass
+        href = el.get("href")
+        if href and href != "#":
+            return href
+        if el.name == "button":
+            parent_anchor = el.parent.find("a") if el.parent else None
+            if parent_anchor and parent_anchor.get("href"):
+                return parent_anchor["href"]
+            # Old behavior: a bare apply button means the detail page itself
+            # is the application entry point.
+            return base_url
+
+    for link in soup.find_all("a"):
+        text = link.get_text(strip=True).lower()
+        if "apply" in text and len(text) < 50:
+            href = link.get("href")
+            if href and href != "#" and "javascript:" not in href:
+                return href
 
     return None
 
 
-def extract_description_deterministic(page) -> str | None:
+def extract_description_deterministic(soup: BeautifulSoup) -> str | None:
     """Try known CSS patterns for the job description block."""
     for sel in DESCRIPTION_SELECTORS:
         try:
-            el = page.query_selector(sel)
-            if el:
-                text = el.inner_text().strip()
-                if len(text) >= 100:
-                    return clean_description(text)
-        except Exception:
+            el = soup.select_one(sel)
+        except Exception:  # noqa: BLE001 - an unsupported selector is a skip, not a crash
             continue
+        if el:
+            text = el.get_text().strip()
+            if len(text) >= 100:
+                return clean_description(text)
 
     return None
 
@@ -424,31 +351,27 @@ HTML:
 {content}"""
 
 
-def extract_main_content(page) -> str:
+def extract_main_content(soup: BeautifulSoup) -> str:
     """Extract the main content area, stripped of navigation noise."""
     for sel in ["main", "article", '[role="main"]', "#content", ".content"]:
         try:
-            el = page.query_selector(sel)
-            if el:
-                text_len = len(el.inner_text().strip())
-                if text_len > 200:
-                    html = el.inner_html()
-                    if len(html) < 50000:
-                        return clean_content_html(html)
-        except Exception:
+            el = soup.select_one(sel)
+        except Exception:  # noqa: BLE001 - an unsupported selector is a skip, not a crash
             continue
+        if el:
+            text_len = len(el.get_text(strip=True))
+            if text_len > 200:
+                html = str(el)
+                if len(html) < 50000:
+                    return clean_content_html(html)
 
-    try:
-        html = page.evaluate("""
-            () => {
-                const clone = document.body.cloneNode(true);
-                clone.querySelectorAll('nav, header, footer, script, style, noscript, svg, iframe').forEach(el => el.remove());
-                return clone.innerHTML;
-            }
-        """)
-        return clean_content_html(html[:50000])
-    except Exception:
+    body = soup.body
+    if body is None:
         return ""
+    clone = BeautifulSoup(str(body), "html.parser")
+    for tag in clone.select("nav, header, footer, script, style, noscript, svg, iframe"):
+        tag.decompose()
+    return clean_content_html(str(clone)[:50000])
 
 
 def clean_content_html(html: str) -> str:
@@ -476,17 +399,13 @@ def clean_content_html(html: str) -> str:
     return str(soup)
 
 
-def extract_with_llm(page, url: str) -> dict:
+def extract_with_llm(soup: BeautifulSoup, url: str) -> dict:
     """Send focused HTML to LLM for extraction. Fallback tier."""
-    content = extract_main_content(page)
+    content = extract_main_content(soup)
     if not content:
         return {"full_description": None, "application_url": None}
 
-    title = ""
-    try:
-        title = page.title()
-    except Exception:
-        pass
+    title = soup.title.get_text(strip=True) if soup.title else ""
 
     prompt = DETAIL_EXTRACT_PROMPT.format(
         url=url,
@@ -556,12 +475,35 @@ SITE_DELAYS = {
     "BuiltIn Remote": 2.0,
 }
 
-RETRYABLE_STATUSES = {408, 429, 500, 502, 503, 504}
 PERMANENT_FAILURES = {404, 410, 451}
 
+# JS-shell detection: a fetched page this sparse carries no server-rendered
+# posting — the content needs a browser to render, which Kestrel does not
+# have (spec art_VGFSMgRh). The row stops with a typed browser-needed
+# hand-off to the host agent instead of an empty extract or a relaunch.
+JS_SHELL_MAX_TAGS = 60
+JS_SHELL_MAX_TEXT = 300
+BROWSER_NEEDED_ERROR = "browser-needed"
 
-def scrape_detail_page(page, url: str) -> dict:
-    """Full cascade for one detail page."""
+
+def _fetch_html(client: httpx.Client, url: str) -> httpx.Response:
+    """One HTTP GET of the detail page — the transport seam tests stub."""
+    return client.get(url)
+
+
+def _looks_like_js_shell(soup: BeautifulSoup, intel: dict) -> bool:
+    """True when the fetched DOM is too sparse to be a server-rendered posting."""
+    if intel.get("json_ld"):
+        return False
+    if extract_description_deterministic(soup):
+        return False
+    tag_count = len(soup.find_all())
+    text_len = len(soup.get_text(strip=True))
+    return tag_count < JS_SHELL_MAX_TAGS or text_len < JS_SHELL_MAX_TEXT
+
+
+def scrape_detail_page(client: httpx.Client, url: str) -> dict:
+    """Full cascade for one detail page, fetched over pure HTTP."""
     result: dict = {
         "full_description": None,
         "application_url": None,
@@ -572,26 +514,24 @@ def scrape_detail_page(page, url: str) -> dict:
     t0 = time.time()
 
     try:
-        resp = page.goto(url, timeout=45000)
-        if resp and resp.status in PERMANENT_FAILURES:
-            result["error"] = f"HTTP {resp.status}"
-            result["elapsed"] = time.time() - t0
-            return result
-        page.wait_for_load_state("domcontentloaded", timeout=15000)
-        try:
-            page.wait_for_load_state("networkidle", timeout=10000)
-        except Exception:
-            pass
-    except Exception as e:
-        err_str = str(e)
-        if "timeout" in err_str.lower():
-            result["error"] = "timeout"
-        else:
-            result["error"] = err_str[:200]
+        resp = _fetch_html(client, url)
+    except httpx.TimeoutException:
+        result["error"] = "timeout"
+        result["elapsed"] = time.time() - t0
+        return result
+    except httpx.HTTPError as e:
+        result["error"] = str(e)[:200]
         result["elapsed"] = time.time() - t0
         return result
 
-    intel = collect_detail_intelligence(page)
+    if resp.status_code in PERMANENT_FAILURES:
+        result["error"] = f"HTTP {resp.status_code}"
+        result["elapsed"] = time.time() - t0
+        return result
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    final_url = str(resp.url)
+    intel = collect_detail_intelligence(soup, final_url)
 
     # Tier 1: JSON-LD
     json_ld_result = extract_from_json_ld(intel)
@@ -599,7 +539,7 @@ def scrape_detail_page(page, url: str) -> dict:
         result.update(json_ld_result)
         result["tier_used"] = 1
         if not result.get("application_url"):
-            apply = extract_apply_url_deterministic(page)
+            apply = extract_apply_url_deterministic(soup, final_url)
             if apply:
                 result["application_url"] = apply
         result["status"] = "ok" if result.get("application_url") else "partial"
@@ -607,8 +547,8 @@ def scrape_detail_page(page, url: str) -> dict:
         return result
 
     # Tier 2: Deterministic CSS
-    desc = extract_description_deterministic(page)
-    apply = extract_apply_url_deterministic(page)
+    desc = extract_description_deterministic(soup)
+    apply = extract_apply_url_deterministic(soup, final_url)
 
     if desc:
         result["full_description"] = desc
@@ -620,8 +560,17 @@ def scrape_detail_page(page, url: str) -> dict:
 
     tier2_apply = apply
 
+    # JS shells stop here: no JSON-LD, no deterministic hit, minimal DOM.
+    # No relaunch — the host agent's browser is the only render path.
+    if _looks_like_js_shell(soup, intel):
+        result["error"] = (
+            f"{BROWSER_NEEDED_ERROR}: enrich via 'kestrel agent enrich --url {url}'"
+        )
+        result["elapsed"] = time.time() - t0
+        return result
+
     # Tier 3: LLM
-    llm_result = extract_with_llm(page, url)
+    llm_result = extract_with_llm(soup, url)
     result["full_description"] = llm_result.get("full_description")
     result["application_url"] = llm_result.get("application_url") or tier2_apply
     result["tier_used"] = 3
@@ -705,6 +654,18 @@ def persist_description(conn: sqlite3.Connection, url: str,
     conn.commit()
 
 
+def _httpx_proxy_url(proxy_config: dict) -> str:
+    """Render the shared proxy config in httpx form (http://user:pass@host:port).
+
+    Same components the Playwright proxy setting consumed, in the form the
+    pure-HTTP transport speaks."""
+    host, port = proxy_config["host"], proxy_config["port"]
+    user, passwd = proxy_config.get("user"), proxy_config.get("pass")
+    if user and passwd:
+        return f"http://{quote(str(user))}:{quote(str(passwd))}@{host}:{port}"
+    return f"http://{host}:{port}"
+
+
 def scrape_site_batch(
     conn: sqlite3.Connection | None,
     site: str,
@@ -712,7 +673,9 @@ def scrape_site_batch(
     delay: float = 2.0,
     max_jobs: int | None = None,
 ) -> dict:
-    """Process all jobs for one site using shared browser context.
+    """Process all jobs for one site over pure HTTP (no browser, spec
+    art_VGFSMgRh). One httpx client per site batch; JS-shell pages stop with
+    a browser-needed detail_error for the host agent.
 
     If conn is None, creates its own DB connection.
     """
@@ -730,17 +693,18 @@ def scrape_site_batch(
 
     now = datetime.now(timezone.utc).isoformat()
 
-    setup_ok = False
-    try:
-        with sync_playwright() as p:
-            launch_opts: dict = {"headless": True}
-            if _PROXY_CONFIG:
-                launch_opts["proxy"] = _PROXY_CONFIG["playwright"]
-            browser = p.chromium.launch(**launch_opts)
-            context = browser.new_context(user_agent=UA)
-            page = context.new_page()
-            setup_ok = True
+    client_kwargs: dict = {
+        "headers": {"User-Agent": UA},
+        "timeout": 45.0,
+        "follow_redirects": True,
+    }
+    if _PROXY_CONFIG:
+        client_kwargs["proxy"] = _httpx_proxy_url(_PROXY_CONFIG)
 
+    opened = False
+    try:
+        with httpx.Client(**client_kwargs) as client:
+            opened = True
             for i, (url, title) in enumerate(jobs):
                 # Dogfood 2026-11-09: one bad page (a crashed tab, a DB
                 # hiccup) aborted the whole batch — every later job in
@@ -748,7 +712,7 @@ def scrape_site_batch(
                 # cost one row, not the site.
                 try:
                     stats["processed"] += 1  # one attempt = one count, wherever it fails
-                    result = scrape_detail_page(page, url)
+                    result = scrape_detail_page(client, url)
 
                     tier = result.get("tier_used")
                     status = result["status"]
@@ -794,16 +758,13 @@ def scrape_site_batch(
 
                 if i < len(jobs) - 1:
                     time.sleep(delay)
-
-            browser.close()
-    except Exception as e:  # noqa: BLE001 - a setup crash must record, not vanish
-        if not setup_ok:
-            # Dogfood 2026-11-09: the setup (context-manager entry, browser
-            # launch, context or page creation) sat outside the per-job loop,
-            # so a setup crash left every job in the batch with NO detail_error
-            # at all. Stamp the whole batch and return — SystemExit from the
-            # missing-extra guard is not an Exception and keeps propagating
-            # (fatal-setup convention).
+    except Exception as e:  # noqa: BLE001 - a client-setup crash must record, not vanish
+        if not opened:
+            # Dogfood 2026-11-09: the setup (client construction, proxy
+            # wiring) sat outside the per-job loop, so a setup crash left
+            # every job in the batch with NO detail_error at all. Stamp the
+            # whole batch and return — per-request failures are contained
+            # per-job inside scrape_detail_page instead.
             reason = f"enrich-setup-failed: {str(e)[:180]}"
             log.error("%s: batch setup failed, %d job(s) recorded as failed: %s",
                       site, len(jobs), e)
@@ -833,8 +794,8 @@ def _run_detail_scraper(
     """Groups pending jobs by site and processes each batch.
 
     Sequential by default. When workers > 1, processes multiple site batches
-    in parallel using ThreadPoolExecutor (each thread gets its own browser
-    and DB connection).
+    in parallel using ThreadPoolExecutor (each thread gets its own HTTP
+    client and DB connection).
 
     Returns aggregate stats dict.
     """
@@ -1024,18 +985,6 @@ def run_enrichment(limit: int = 100, workers: int = 1) -> dict:
     url_stats = resolve_all_urls(conn)
     log.info("URL resolution: %d resolved, %d absolute, %d failed",
              url_stats["resolved"], url_stats["already_absolute"], url_stats["failed"])
-
-    # WTTJ special handling
-    wttj_count = conn.execute(
-        "SELECT COUNT(*) FROM jobs WHERE site = 'WelcomeToTheJungle'"
-    ).fetchone()[0]
-    if wttj_count > 0:
-        sample = conn.execute(
-            "SELECT url FROM jobs WHERE site = 'WelcomeToTheJungle' LIMIT 1"
-        ).fetchone()
-        if sample and not sample[0].startswith("http"):
-            updated = resolve_wttj_urls(conn)
-            log.info("WTTJ: %d URLs updated", updated)
 
     # Run the detail scraper
     stats = _run_detail_scraper(conn, max_per_site=limit, workers=workers)
