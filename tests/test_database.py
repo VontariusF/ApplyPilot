@@ -11,6 +11,7 @@ import pytest
 
 from kestrel.database import (
     LEAD_SOURCE_SERP,
+    company_fit_aggregates,
     init_db,
     refresh_company_identity,
     upsert_hiring_lead,
@@ -149,3 +150,22 @@ def test_upsert_still_inserts_a_distinct_person(conn):
     assert _upsert_jane(conn, "https://linkedin.com/in/john-smith",
                         full_name="John Smith",
                         title="John Smith - Recruiter") is True
+
+
+# ---------------------------------------------------------------------------
+# Suggestion 4: display-name ties resolve deterministically
+# ---------------------------------------------------------------------------
+
+
+def test_company_fit_aggregates_tiebreak_display_names_stably(conn):
+    """Two spellings of one company tied at the max must resolve to the
+    same display name regardless of the row order SQLite returns — the
+    first-seen rule depended on unspecified scan order (sweep
+    art_Izev3UNN suggestion 4)."""
+    _seed_scored_job(conn, "https://jobs.zeta-corp.com/posting/1",
+                     "Zeta Corp", "zeta-corp.com", 90)
+    _seed_scored_job(conn, "https://jobs.zeta-corp.com/posting/2",
+                     "Alpha Corp", "zeta-corp.com", 90)
+    aggs = company_fit_aggregates(conn=conn)
+    assert len(aggs) == 1
+    assert aggs[0]["display_name"] == "Alpha Corp"

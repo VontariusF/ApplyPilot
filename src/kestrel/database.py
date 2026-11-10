@@ -499,7 +499,9 @@ def company_fit_aggregates(conn: sqlite3.Connection | None = None) -> list[dict]
 
     Returns {company_key, display_name, domain, fit_score, scored_jobs},
     highest fit first. display_name is the spelling on the row that
-    produced the max (first-seen on ties).
+    produced the max — the lexicographically smallest spelling on ties,
+    so the portal board renders the same name no matter what row order
+    SQLite happened to return (sweep art_Izev3UNN suggestion 4).
     """
     from kestrel.company_identity import company_key_for
 
@@ -520,7 +522,9 @@ def company_fit_aggregates(conn: sqlite3.Connection | None = None) -> list[dict]
                    "domain": domain, "fit_score": row["fit_score"],
                    "scored_jobs": 0}
             groups[key] = agg
-        if row["fit_score"] > agg["fit_score"]:
+        if row["fit_score"] > agg["fit_score"] or (
+                row["fit_score"] == agg["fit_score"]
+                and (row["company"] or "") < (agg["display_name"] or "")):
             agg["display_name"] = row["company"]
             agg["fit_score"] = row["fit_score"]
         agg["scored_jobs"] += 1
