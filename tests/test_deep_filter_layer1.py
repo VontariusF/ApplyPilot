@@ -177,6 +177,46 @@ def test_ingestion_persists_all_structured_fields(app_dir, isolated_db):
     assert row["seniority"] == "staff"
 
 
+def test_ingestion_persists_jobspy_is_remote_as_site_data(app_dir, isolated_db):
+    # F6: JobSpy's own is_remote is persisted verbatim — it is site data,
+    # not a mention-based inference.
+    conn = database.init_db()
+    base = {"title": "Platform Engineer", "company": "Acme", "location": "Austin, TX",
+            "min_amount": None, "max_amount": None, "currency": None, "interval": None,
+            "description": None, "site": "linkedin", "job_url_direct": None, "date_posted": None}
+    df = _df([
+        {**base, "job_url": "https://jobs/r", "is_remote": True},
+        {**base, "job_url": "https://jobs/o", "is_remote": False},
+    ])
+    new, _ = store_jobspy_results(conn, df, "linkedin")
+    assert new == 2
+    assert _row(conn, "https://jobs/r")["is_remote"] == 1
+    assert _row(conn, "https://jobs/o")["is_remote"] == 0
+    # The (Remote) location tag still follows the persisted flag.
+    assert "(Remote)" in _row(conn, "https://jobs/r")["location"]
+    assert "(Remote)" not in (_row(conn, "https://jobs/o")["location"] or "")
+
+
+def test_ingestion_missing_is_remote_stays_null_for_backfill(app_dir, isolated_db):
+    # The mention-based inference stays the fallback: a row JobSpy gave no
+    # is_remote for keeps NULL until the startup backfill runs.
+    conn = database.init_db()
+    df = _df([
+        {"job_url": "https://jobs/nan", "title": "Engineer", "company": "Acme",
+         "location": "X", "min_amount": None, "max_amount": None, "currency": None,
+         "interval": None, "description": None, "site": "indeed",
+         "is_remote": float("nan"), "job_url_direct": None, "date_posted": None},
+        {"job_url": "https://jobs/absent", "title": "Engineer", "company": "Acme",
+         "location": "X", "min_amount": None, "max_amount": None, "currency": None,
+         "interval": None, "description": None, "site": "indeed",
+         "job_url_direct": None, "date_posted": None},
+    ])
+    new, _ = store_jobspy_results(conn, df, "indeed")
+    assert new == 2
+    assert _row(conn, "https://jobs/nan")["is_remote"] is None
+    assert _row(conn, "https://jobs/absent")["is_remote"] is None
+
+
 def test_ingestion_annualizes_monthly_pay(app_dir, isolated_db):
     conn = database.init_db()
     df = _df([{

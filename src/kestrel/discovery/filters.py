@@ -16,7 +16,8 @@ the JobSpy, Workday, and smart-extract paths. Semantics:
   locations" — previously an empty list rejected every non-remote job, which
   silently filtered out everything for wizard-generated configs (the wizard
   does not write a ``location_accept`` key).
-- A non-empty ``location_accept`` list behaves as a substring allowlist.
+- A non-empty ``location_accept`` list behaves as a lexical allowlist that
+  can never match inside a word (see ``_matches_pattern``).
 - ``location_reject_non_remote`` always rejects matching non-remote jobs.
 """
 
@@ -102,12 +103,28 @@ def accept_patterns_from_locations(search_cfg: dict) -> list[str]:
     return patterns
 
 
+def _matches_pattern(pattern: str, geo: str) -> bool:
+    """Lexically match one accept/reject pattern, never inside a word (F1).
+
+    Substring matching leaked inside words: the derived pattern "NY" matched
+    "Munich, Germany" because "germany" contains "ny". A pattern now must
+    start at a token boundary — an interior match never fires — while the
+    documented lexical looseness stays: a match at a word start may extend
+    ("NY" still matches "Remote — NYC", "US" still matches "US-based"), and
+    a standalone "NY" token still matches "Buffalo, NY".
+    """
+    needle = pattern.strip().lower()
+    if not needle:
+        return True  # an empty pattern matched everything under substring rules
+    return re.search(rf"(?<!\w){re.escape(needle)}", geo.lower()) is not None
+
+
 def _geo_remainder(location: str) -> str:
     """Return the geographic part of a location string, remote markers removed.
 
     "France, Remote" -> "france"; "Remote" -> ""; "Remote - Boston" ->
     "boston". Non-remote locations pass through lowercased and otherwise
-    untouched. Substring matching downstream means a leftover fragment still
+    untouched. Token matching downstream means a leftover fragment still
     matches accept/reject patterns ("US (Remote)" -> "us").
     """
     text = location.lower()
@@ -266,7 +283,7 @@ def _location_from_slug_tokens(tokens: list[str]) -> str | None:
 
     Recognized shapes, checked against the END of the token list (job-title
     words, when a slug mixes title and location, are tolerated as city
-    tokens — the filter only needs substring matching):
+    tokens — the filter only needs token matching):
 
     - any token "remote" (or the whole slug is a remote marker) -> "Remote";
     - a US state code or state name as the last or second-to-last token
@@ -428,7 +445,7 @@ def location_ok(
 
     # Reject non-remote matches (and the geo remainder of remote-tagged ones)
     for r in reject:
-        if r.lower() in geo:
+        if _matches_pattern(r, geo):
             return False
 
     # Empty accept list = no location restriction beyond reject rules
@@ -437,7 +454,7 @@ def location_ok(
 
     # Accept matches
     for a in accept:
-        if a.lower() in geo:
+        if _matches_pattern(a, geo):
             return True
 
     # No match -- reject unknown

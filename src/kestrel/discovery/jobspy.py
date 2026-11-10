@@ -9,6 +9,7 @@ search configuration YAML (searches.yaml) rather than being hardcoded.
 """
 
 import logging
+import math
 import re
 import sqlite3
 import time
@@ -111,6 +112,19 @@ def _clean_cell(value) -> str | None:
     return text
 
 
+def _persist_is_remote(value) -> int | None:
+    """Normalize JobSpy's is_remote cell to a 1/0 store value (F6).
+
+    Missing (None, NaN, empty) stays None so the mention-based backfill
+    remains the fallback; anything present persists as site data.
+    """
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return None
+    if isinstance(value, str) and value.strip().lower() in ("", "nan", "none"):
+        return None
+    return 1 if value else 0
+
+
 def _iso_date(value) -> str | None:
     """Normalize one JobSpy `date_posted` cell to an ISO date (YYYY-MM-DD).
 
@@ -182,7 +196,9 @@ def store_jobspy_results(conn: sqlite3.Connection, df, source_label: str) -> tup
 
         description = _clean_cell(row.get("description"))
         site_name = _clean_cell(row.get("site")) or source_label
-        is_remote = row.get("is_remote", False)
+        # F6: JobSpy's own is_remote is site data — persist it; the
+        # mention-based inference stays the fallback for rows without one.
+        is_remote = _persist_is_remote(row.get("is_remote"))
 
         # Structured discovery fields (spec Layer 1): pay comes straight
         # from the raw JobSpy row (M2) — parsing the rendered display
@@ -217,8 +233,8 @@ def store_jobspy_results(conn: sqlite3.Connection, df, source_label: str) -> tup
             conn.execute(
                 "INSERT INTO jobs (url, title, company, salary, description, location, site, strategy, discovered_at, "
                 "full_description, application_url, detail_scraped_at, "
-                "date_posted, salary_min, salary_max, salary_currency, salary_interval, seniority) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "date_posted, salary_min, salary_max, salary_currency, salary_interval, seniority, is_remote) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (url, title, company, salary, description, location_str, site_label, strategy, now,
                  full_description, apply_url, detail_scraped_at,
                  date_posted,
@@ -226,7 +242,7 @@ def store_jobspy_results(conn: sqlite3.Connection, df, source_label: str) -> tup
                  structured.max_annual if structured else None,
                  structured.currency if structured else None,
                  structured.interval if structured else None,
-                 seniority),
+                 seniority, is_remote),
             )
             new += 1
         except sqlite3.IntegrityError:

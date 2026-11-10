@@ -113,3 +113,39 @@ def test_init_db_backfills_on_startup(isolated_db):
     row = get_connection().execute(
         "SELECT is_remote FROM jobs WHERE url = 'https://x/1'").fetchone()
     assert row["is_remote"] == 1
+
+
+# ---------------------------------------------------------------------------
+# F6: hybrid / in-office signals beat a bare "remote" mention
+# ---------------------------------------------------------------------------
+
+def test_f6_hybrid_with_stray_remote_mention_is_not_remote():
+    # The Kaizen dogfood case: "hybrid, 4 days/week in office" plus an
+    # idle "remote" mention somewhere in the text.
+    assert infer_remote(
+        "Platform Engineer", "Austin, TX",
+        "Hybrid — 4 days/week in office. Our remote colleagues join by video.",
+    ) is False
+
+
+def test_f6_in_office_days_signal_beats_bare_mention_without_the_word_hybrid():
+    assert infer_remote(
+        None, None, "This role is 3 days/week in office; remote tooling provided.",
+    ) is False
+
+
+def test_f6_strong_signal_beats_hybrid():
+    assert infer_remote("Engineer", "Austin, TX", "Fully remote — not a hybrid role.") is True
+    assert infer_remote("Engineer", "Austin, TX", "100% remote, though some teams are hybrid") is True
+    # A Remote-first location format stays strong alongside a hybrid mention.
+    assert infer_remote("Engineer", "Remote (US)", "Hybrid-friendly culture") is True
+
+
+def test_f6_genuinely_remote_still_infers_remote():
+    assert infer_remote("Engineer", "Remote (US)") is True
+    assert infer_remote("Engineer", None, "This role is work from home anywhere in the US") is True
+
+
+def test_f6_bare_mention_without_hybrid_signal_unchanged():
+    # No hybrid / in-office signal: the documented looseness stays.
+    assert infer_remote("Engineer", "Austin, TX", "Great remote culture") is True
