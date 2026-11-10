@@ -84,6 +84,42 @@ def _fake_playwright(page):
     return lambda: contextlib.nullcontext(pw)
 
 
+class _ExplodingSetup:
+    """A sync_playwright stand-in whose context-manager entry fails."""
+
+    def __enter__(self):
+        raise RuntimeError("browser launch failed")
+
+    def __exit__(self, *args):
+        return False
+
+
+def test_setup_failure_records_error_on_every_job(isolated_db, monkeypatch):
+    """A batch-level setup crash (context-manager entry, browser launch,
+    context or page creation) must not leave the site's jobs silent: every
+    job in the batch gets a detail_error and the function returns instead
+    of raising. SystemExit from the guard stays untouched — it is not an
+    Exception, so it propagates by construction."""
+    conn = init_db()
+    urls = ("https://example.test/1", "https://example.test/2",
+            "https://example.test/3")
+    for url in urls:
+        _seed_pending(conn, url, "ExampleCorp")
+
+    monkeypatch.setattr(detail_mod, "sync_playwright", _ExplodingSetup)
+
+    jobs = [(url, "Engineer") for url in urls]
+    stats = detail_mod.scrape_site_batch(conn, "ExampleCorp", jobs, delay=0)
+
+    rows = conn.execute(
+        "SELECT url, detail_error, detail_scraped_at FROM jobs ORDER BY url"
+    ).fetchall()
+    assert [row[1] for row in rows] == ["enrich-setup-failed: browser launch failed"] * len(urls)
+    assert all(row[2] for row in rows)  # every row also gets a timestamp
+    assert stats["error"] == len(urls)
+    assert stats["processed"] == 0
+
+
 def test_scrape_site_batch_continues_after_one_job_crashes(isolated_db,
                                                            monkeypatch):
     conn = init_db()

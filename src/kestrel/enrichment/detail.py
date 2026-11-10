@@ -730,6 +730,7 @@ def scrape_site_batch(
 
     now = datetime.now(timezone.utc).isoformat()
 
+    setup_ok = False
     try:
         with sync_playwright() as p:
             launch_opts: dict = {"headless": True}
@@ -738,6 +739,7 @@ def scrape_site_batch(
             browser = p.chromium.launch(**launch_opts)
             context = browser.new_context(user_agent=UA)
             page = context.new_page()
+            setup_ok = True
 
             for i, (url, title) in enumerate(jobs):
                 # Dogfood 2026-11-09: one bad page (a crashed tab, a DB
@@ -794,6 +796,27 @@ def scrape_site_batch(
                     time.sleep(delay)
 
             browser.close()
+    except Exception as e:  # noqa: BLE001 - a setup crash must record, not vanish
+        if not setup_ok:
+            # Dogfood 2026-11-09: the setup (context-manager entry, browser
+            # launch, context or page creation) sat outside the per-job loop,
+            # so a setup crash left every job in the batch with NO detail_error
+            # at all. Stamp the whole batch and return — SystemExit from the
+            # missing-extra guard is not an Exception and keeps propagating
+            # (fatal-setup convention).
+            reason = f"enrich-setup-failed: {str(e)[:180]}"
+            log.error("%s: batch setup failed, %d job(s) recorded as failed: %s",
+                      site, len(jobs), e)
+            for url, _title in jobs:
+                conn.execute(
+                    "UPDATE jobs SET detail_error = ?, detail_scraped_at = ? "
+                    "WHERE url = ?",
+                    (reason, now, url),
+                )
+            conn.commit()
+            stats["error"] += len(jobs)
+        else:
+            raise  # past setup: the per-job guard already contained the failure
     finally:
         if own_conn:
             conn.close()

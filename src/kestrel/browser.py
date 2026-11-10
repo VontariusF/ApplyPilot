@@ -18,7 +18,8 @@ _BROWSER_HINT = (
 
 
 def sync_playwright():
-    """Return ``playwright.sync_api.sync_playwright``, or exit with guidance.
+    """Return a Playwright context manager from ``playwright.sync_api``, or
+    exit with guidance.
 
     SystemExit (not a raised exception) matches the codebase's fatal-setup
     convention (config.py's tier gate): the message lands on stderr with no
@@ -28,4 +29,4 @@ def sync_playwright():
         from playwright.sync_api import sync_playwright
     except ImportError:
         raise SystemExit(_BROWSER_HINT)
-    return sync_playwright
+    return sync_playwright()

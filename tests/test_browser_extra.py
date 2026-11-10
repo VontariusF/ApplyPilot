@@ -8,6 +8,7 @@ lazy-import path all direct-Playwright modules share.
 
 import importlib.metadata
 import sys
+import types
 
 import pytest
 
@@ -59,10 +60,39 @@ class TestLazyImportGuard:
         with pytest.raises(SystemExit, match="coding agent"):
             browser.sync_playwright()
 
-    def test_guard_returns_real_sync_playwright_when_installed(self):
-        # Dev installs carry the extra — the guard hands back the genuine
-        # playwright entry point.
-        assert browser.sync_playwright().__name__ == "sync_playwright"
+    def test_guard_returns_usable_context_manager_when_installed(self):
+        # Dev installs carry the extra — the guard hands back a genuine
+        # playwright context manager: enterable, and never the raw
+        # sync_playwright factory function.
+        guard_result = browser.sync_playwright()
+        assert callable(getattr(guard_result, "__enter__", None))
+
+    def test_guard_calls_the_stubbed_factory(self, monkeypatch):
+        # Regression (dogfood 2026-11-09): the guard returned the imported
+        # sync_playwright FUNCTION instead of calling it, so every caller's
+        # `with sync_playwright() as p:` got a bare function — no __enter__.
+        class FakeContextManager:
+            def __enter__(self):
+                return object()
+
+            def __exit__(self, *args):
+                return None
+
+        def fake_sync_playwright():
+            return FakeContextManager()
+
+        fake_api = types.ModuleType("playwright.sync_api")
+        fake_api.sync_playwright = fake_sync_playwright
+        fake_root = types.ModuleType("playwright")
+        fake_root.sync_api = fake_api
+
+        monkeypatch.setitem(sys.modules, "playwright", fake_root)
+        monkeypatch.setitem(sys.modules, "playwright.sync_api", fake_api)
+
+        result = browser.sync_playwright()
+        assert isinstance(result, FakeContextManager)
+        with browser.sync_playwright() as p:
+            assert p is not None
 
 
 class TestLazySitesRouteThroughGuard:
