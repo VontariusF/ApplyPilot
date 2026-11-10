@@ -533,12 +533,23 @@ def refresh_company_identity(conn: sqlite3.Connection | None = None) -> int:
     Runs at every init_db so the mirror cannot drift from jobs.
     Everything it writes is derived data — recomputed from the identity
     columns on each run; the NULL-only never-overwrite contract protects
-    the jobs rows, not this mirror. Returns the number of keys upserted.
+    the jobs rows, not this mirror. Companies whose fit rows are gone
+    (job deletion removes rows — sweep art_Izev3UNN finding 6) are
+    deleted from the mirror too: an upsert-only refresh left a ghost
+    high-match company that `--company` discovery kept scanning against
+    a stale MAX fit. Returns the number of keys upserted.
     """
     if conn is None:
         conn = get_connection()
     now = _utc_now()
     aggregates = company_fit_aggregates(conn=conn)
+    live_keys = {agg["company_key"] for agg in aggregates}
+    for row in conn.execute(
+        "SELECT company_key FROM company_identity").fetchall():
+        if row["company_key"] not in live_keys:
+            conn.execute(
+                "DELETE FROM company_identity WHERE company_key = ?",
+                (row["company_key"],))
     for agg in aggregates:
         conn.execute(
             "INSERT INTO company_identity (company_key, display_name, domain, "
