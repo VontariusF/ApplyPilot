@@ -31,6 +31,7 @@ from kestrel.discovery.hiring_leads import (
     NO_PROVIDER_KEY,
     PROVIDER_UNSUPPORTED,
     QUOTA_EXHAUSTED,
+    SOURCE_DISABLED,
     SOURCE_RETIRED,
     FirecrawlClient,
     FirecrawlPageSource,
@@ -487,7 +488,9 @@ def test_firecrawl_is_off_by_default(app_dir):
     conn = init_db()
     with pytest.raises(LeadsRefusal) as refused:
         discover_hiring_leads(conn, sources=("firecrawl",), now=NOW)
-    assert refused.value.code == NO_PROVIDER_KEY
+    # A switched-off source is a config state, not a missing key — the
+    # refusal names it distinctly (sweep art_Izev3UNN suggestion 7).
+    assert refused.value.code == SOURCE_DISABLED
     assert refused.value.details["required_env"] == ["FIRECRAWL_API_KEY"]
     assert refused.value.details["config"] == "leads.yaml firecrawl.enabled"
 

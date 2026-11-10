@@ -23,9 +23,9 @@ Guardrails are structural, not conventional (spec locked decisions):
   the store's terminal-captcha policy.
 
 Typed refusals (LeadsRefusal) surface through the agent verbs as _fail
-envelopes: no_provider_key, provider_unsupported, quota_exhausted,
-no_high_match_companies, source_retired, company_unresolved,
-config_invalid.
+envelopes: no_provider_key, source_disabled, provider_unsupported,
+quota_exhausted, no_high_match_companies, source_retired,
+company_unresolved, config_invalid.
 """
 
 from __future__ import annotations
@@ -81,6 +81,7 @@ _TIMEOUT_SECONDS = 30.0
 # ---------------------------------------------------------------------------
 
 NO_PROVIDER_KEY = "no_provider_key"
+SOURCE_DISABLED = "source_disabled"
 PROVIDER_UNSUPPORTED = "provider_unsupported"
 QUOTA_EXHAUSTED = "quota_exhausted"
 NO_HIGH_MATCH_COMPANIES = "no_high_match_companies"
@@ -90,6 +91,7 @@ CONFIG_INVALID = "config_invalid"
 
 ALL_REFUSALS = (
     NO_PROVIDER_KEY,
+    SOURCE_DISABLED,
     PROVIDER_UNSUPPORTED,
     QUOTA_EXHAUSTED,
     NO_HIGH_MATCH_COMPANIES,
@@ -990,8 +992,13 @@ class FirecrawlPageSource:
         if enabled is None:
             enabled = config.firecrawl_enabled()
         if not enabled:
+            # A distinct reason: "no provider key" is a different fix
+            # (export the key) than "the source is switched off" (opt in
+            # via leads.yaml) — conflating them sent hosts hunting for a
+            # key that was not the problem (sweep art_Izev3UNN
+            # suggestion 7).
             raise LeadsRefusal(
-                NO_PROVIDER_KEY,
+                SOURCE_DISABLED,
                 "Firecrawl is disabled — set firecrawl.enabled: true in "
                 "leads.yaml and export FIRECRAWL_API_KEY to opt in",
                 {"required_env": ["FIRECRAWL_API_KEY"],
