@@ -308,6 +308,38 @@ def test_company_unresolved_refusal(conn, monkeypatch, no_network):
     assert payload["error"]["details"]["company_key"] == "nowhere.example"
 
 
+def test_bad_leads_yaml_is_the_config_invalid_refusal_not_internal_error(
+        app_dir, conn, monkeypatch, no_network):
+    """A malformed leads.yaml value used to raise a bare ValueError that
+    _verb turned into internal_error — breaking even the read-only
+    leads-list verb (sweep art_Izev3UNN suggestion 2). The documented
+    typed refusal instead."""
+    (app_dir / "leads.yaml").write_text("daily_discovery_cap: not-a-number\n")
+    monkeypatch.setenv("TAVILY_API_KEY", SERP_KEY)
+
+    listing = run("leads-list")
+    assert listing.exit_code == 1
+    payload = payload_of(listing)
+    assert payload["error"]["code"] == "config_invalid"
+    assert "leads.yaml" in payload["error"]["message"]
+
+    discover = run("leads-discover")
+    assert discover.exit_code == 1
+    assert payload_of(discover)["error"]["code"] == "config_invalid"
+
+
+def test_bad_leads_yaml_depth_refuses_at_source_build(app_dir, conn,
+                                                      monkeypatch,
+                                                      no_network):
+    (app_dir / "leads.yaml").write_text(
+        "tavily:\n  search_depth: deepest\n")
+    monkeypatch.setenv("TAVILY_API_KEY", SERP_KEY)
+
+    with pytest.raises(hl.LeadsRefusal) as refused:
+        hl.discover_hiring_leads(conn)
+    assert refused.value.code == "config_invalid"
+
+
 def test_quota_exhausted_refusal_with_utc_cap(conn, monkeypatch, no_network,
                                               app_dir):
     (app_dir / "leads.yaml").write_text("daily_discovery_cap: 1\n",

@@ -24,7 +24,8 @@ Guardrails are structural, not conventional (spec locked decisions):
 
 Typed refusals (LeadsRefusal) surface through the agent verbs as _fail
 envelopes: no_provider_key, provider_unsupported, quota_exhausted,
-no_high_match_companies, source_retired, company_unresolved.
+no_high_match_companies, source_retired, company_unresolved,
+config_invalid.
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ import sqlite3
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
+from typing import TypeVar
 from urllib.parse import urlparse
 
 import httpx
@@ -76,6 +78,7 @@ QUOTA_EXHAUSTED = "quota_exhausted"
 NO_HIGH_MATCH_COMPANIES = "no_high_match_companies"
 SOURCE_RETIRED = "source_retired"
 COMPANY_UNRESOLVED = "company_unresolved"
+CONFIG_INVALID = "config_invalid"
 
 ALL_REFUSALS = (
     NO_PROVIDER_KEY,
@@ -84,6 +87,7 @@ ALL_REFUSALS = (
     NO_HIGH_MATCH_COMPANIES,
     SOURCE_RETIRED,
     COMPANY_UNRESOLVED,
+    CONFIG_INVALID,
 )
 
 
@@ -1164,6 +1168,25 @@ def retire_source(name: str, reason: str,
 # ---------------------------------------------------------------------------
 
 
+_T = TypeVar("_T")
+
+
+def _leads_config(read: Callable[[], _T]) -> _T:
+    """Read one leads.yaml setting as the typed config_invalid refusal.
+
+    A malformed value (a typo'd cap, a bad depth) raises the config
+    layer's LeadsConfigError — a bare ValueError, which would die as an
+    internal_error and even break the read-only leads-list verb (sweep
+    art_Izev3UNN suggestion 2). Converted here so every discovery-path
+    read refuses with the documented envelope instead.
+    """
+    try:
+        return read()
+    except config.LeadsConfigError as exc:
+        raise LeadsRefusal(
+            CONFIG_INVALID, str(exc), {"config": "leads.yaml"}) from exc
+
+
 def discover_hiring_leads(conn: sqlite3.Connection | None = None,
                           *,
                           company_key: str | None = None,
@@ -1197,7 +1220,7 @@ def discover_hiring_leads(conn: sqlite3.Connection | None = None,
     if sources:
         requested = tuple(sources)
     else:
-        provider = config.leads_provider()
+        provider = _leads_config(config.leads_provider)
         if provider not in SOURCE_BUILDERS:
             raise LeadsRefusal(
                 PROVIDER_UNSUPPORTED,
@@ -1209,7 +1232,7 @@ def discover_hiring_leads(conn: sqlite3.Connection | None = None,
 
     # Everything checkable without the network is checked first: cap,
     # provider keys/config gates, retirements, company identity.
-    cap = config.leads_daily_discovery_cap()
+    cap = _leads_config(config.leads_daily_discovery_cap)
     used = discovery_runs_used(now)
     if used >= cap:
         raise LeadsRefusal(
@@ -1222,7 +1245,10 @@ def discover_hiring_leads(conn: sqlite3.Connection | None = None,
     unavailable: list[LeadsRefusal] = []
     for name in requested:
         try:
-            instances.append(build_source(name))
+            # Source constructors read leads.yaml (results-per-query,
+            # depth, the Firecrawl gate) — the same typed conversion.
+            instances.append(_leads_config(
+                lambda name=name: build_source(name)))
         except LeadsRefusal as exc:
             unavailable.append(exc)
     if not instances:
@@ -1261,10 +1287,10 @@ def discover_hiring_leads(conn: sqlite3.Connection | None = None,
                 {"company_key": company_key})
         companies = [dict(row)]
     else:
-        companies = high_match_companies(conn, min_fit)
+        effective_min_fit = (min_fit if min_fit is not None
+                             else _leads_config(config.leads_min_company_fit))
+        companies = high_match_companies(conn, effective_min_fit)
         if not companies:
-            effective_min_fit = (config.leads_min_company_fit()
-                                 if min_fit is None else min_fit)
             orphaned = conn.execute(
                 "SELECT COUNT(*) FROM jobs "
                 "WHERE fit_score IS NOT NULL AND company IS NULL"
