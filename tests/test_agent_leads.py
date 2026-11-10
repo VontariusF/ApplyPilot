@@ -691,3 +691,25 @@ def test_invalid_min_fit_and_limit_refusals(conn):
     result = run("leads-discover", "--limit=-3")
     assert result.exit_code == 1
     assert payload_of(result)["error"]["code"] == "invalid_limit"
+
+
+# ---------------------------------------------------------------------------
+# Hint contract — the 'next' pointers name the installed CLI
+# ---------------------------------------------------------------------------
+
+
+def test_verb_next_hints_name_the_installed_cli(conn, monkeypatch, no_network):
+    """Regression: the 'next' hints must say `kestrel ...` — the command
+    the user can actually run. `kestrel-agent` is only the pip package
+    name, so hinting it tells the agent to run a command that does not
+    exist (bug reported against main at 7b5295a)."""
+    _patch_build_source(monkeypatch, _FakeSource([dict(_LEAD)], []))
+
+    discover = payload_of(run("leads-discover"))
+    listing = payload_of(run("leads-list"))
+
+    assert "`kestrel leads-list`" in discover["next"]
+    assert "`kestrel leads-list --reveal`" in listing["next"]
+    # And never the package name dressed up as a command.
+    assert "kestrel-agent" not in discover["next"]
+    assert "kestrel-agent" not in listing["next"]
