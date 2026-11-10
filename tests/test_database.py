@@ -12,7 +12,6 @@ import pytest
 from kestrel.database import (
     LEAD_SOURCE_SERP,
     init_db,
-    mark_hiring_lead,
     refresh_company_identity,
     upsert_hiring_lead,
 )
@@ -43,6 +42,8 @@ def _seed_scored_job(conn, url, company, domain, fit):
 def test_refresh_drops_companies_whose_fit_rows_are_gone(conn):
     _seed_scored_job(conn, "https://jobs.acme-robotics.com/posting/1",
                      "Acme Robotics", "acme-robotics.com", 90)
+    _seed_scored_job(conn, "https://jobs.acme-robotics.com/posting/3",
+                     "Acme Robotics", "acme-robotics.com", 80)
     _seed_scored_job(conn, "https://jobs.boltlabs.com/posting/2",
                      "Bolt Labs", "boltlabs.com", 85)
     refresh_company_identity(conn)
@@ -60,6 +61,7 @@ def test_refresh_drops_companies_whose_fit_rows_are_gone(conn):
         "SELECT fit_score FROM company_identity WHERE company_key = ?",
         ("acme-robotics.com",)).fetchone()
     assert acme is not None
+    assert acme["fit_score"] == 80
 
     # Deleting the last member job must remove the company — an
     # upsert-only refresh left a ghost high-match row that --company
@@ -90,3 +92,60 @@ def test_deleted_company_is_no_longer_discoverable_by_key(conn,
     with pytest.raises(LeadsRefusal) as refused:
         discover_hiring_leads(conn, company_key="acme-robotics.com")
     assert refused.value.code == "company_unresolved"
+# ---------------------------------------------------------------------------
+# Finding 7: profile-URL variants of one person are one lead row
+# ---------------------------------------------------------------------------
+
+_JANE = {"full_name": "Jane Doe",
+         "title": "Jane Doe - Head of Talent - Acme Robotics",
+         "company_key": "acme-robotics.com"}
+
+
+def _upsert_jane(conn, profile_url, **overrides):
+    fields = {**_JANE, **overrides}
+    return upsert_hiring_lead(
+        conn, profile_url=profile_url, source=LEAD_SOURCE_SERP,
+        discovered_at=NOW, **fields)
+
+
+def test_upsert_hiring_lead_dedupes_url_variants(conn):
+    assert _upsert_jane(conn, "https://linkedin.com/in/jane-doe") is True
+    # The same person via www/host-case/trailing-slash variants of the
+    # one profile: still one row — the raw spellings stored three rows
+    # for one person before the normalization (sweep finding 7).
+    assert _upsert_jane(conn, "https://www.linkedin.com/in/jane-doe") is False
+    assert _upsert_jane(conn, "https://LinkedIn.com/in/jane-doe/") is False
+    rows = conn.execute("SELECT profile_url FROM hiring_leads").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["profile_url"] == "https://linkedin.com/in/jane-doe"
+
+
+def test_upsert_reconciliation_preserves_decided_state(conn):
+    """Collapsing duplicates never silently drops a decision: the
+    surviving row carries the most-decided status of the variants."""
+    assert _upsert_jane(conn, "https://linkedin.com/in/jane-doe") is True
+    # A legacy store that keyed on raw spellings holds the duplicate as
+    # its own row — one the person has already decided on.
+    conn.execute(
+        "INSERT INTO hiring_leads (profile_url, full_name, title, "
+        "company_key, source, last_status, discovered_at, decided_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("https://www.linkedin.com/in/jane-doe", _JANE["full_name"],
+         _JANE["title"], _JANE["company_key"], LEAD_SOURCE_SERP,
+         "connected", NOW, NOW))
+    conn.commit()
+
+    # A later write of a third spelling reconciles the duplicate rows
+    # into one, and the connected decision transfers deliberately.
+    assert _upsert_jane(conn, "https://LinkedIn.com/in/jane-doe/") is False
+    rows = conn.execute(
+        "SELECT profile_url, last_status FROM hiring_leads").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["last_status"] == "connected"
+
+
+def test_upsert_still_inserts_a_distinct_person(conn):
+    assert _upsert_jane(conn, "https://linkedin.com/in/jane-doe") is True
+    assert _upsert_jane(conn, "https://linkedin.com/in/john-smith",
+                        full_name="John Smith",
+                        title="John Smith - Recruiter") is True
