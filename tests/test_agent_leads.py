@@ -220,6 +220,19 @@ def test_leads_discover_honors_company_and_limit(conn, monkeypatch, no_network):
     assert len(calls) == 1  # highest fit first (Acme, 90)
 
 
+def test_leads_discover_refuses_limit_zero_without_recording_a_run(
+        conn, monkeypatch, no_network):
+    _patch_build_source(monkeypatch, _FakeSource([dict(_LEAD)], []))
+    result = run("leads-discover", "--limit=0")
+    assert result.exit_code == 1
+    payload = payload_of(result)
+    assert payload["error"]["code"] == "invalid_limit"
+    # A run that reaches no provider must not count against the daily
+    # cap — a zero company scan is a refusal, not a spend (sweep
+    # art_Izev3UNN suggestion 1).
+    assert hl.discovery_runs_used() == 0
+
+
 # ---------------------------------------------------------------------------
 # The guardrails block rides every payload (spec criterion A7)
 # ---------------------------------------------------------------------------

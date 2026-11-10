@@ -1666,8 +1666,8 @@ def _lead_block(row: dict, reveal: bool) -> dict:
 def _validated_leads_limit(limit_raw: str | None) -> int | None:
     if limit_raw is None:
         return None
-    if not re.fullmatch(r"\d+", limit_raw.strip()):
-        _fail("invalid_limit", f"--limit must be a non-negative integer, "
+    if not re.fullmatch(r"[1-9]\d*", limit_raw.strip()):
+        _fail("invalid_limit", f"--limit must be a positive integer, "
               f"got {limit_raw!r}", {"limit": limit_raw})
     return int(limit_raw)
 
