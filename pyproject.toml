@@ -39,11 +39,6 @@ portal = [
     "jinja2>=3.1",
     "python-multipart>=0.0.9",
 ]
-# [browser]: the built-in Playwright fallback engine — headless Chromium for
-# page scraping (smart-extract, detail enrichment) and PDF rendering. An
-# agent-driven install doesn't need it: the host agent's own browser covers
-# page fetching. Kept in `dev` so the suite still exercises it.
-browser = ["playwright>=1.40"]
 # Optional tooling for the Composio discovery source. The discovery source
 # itself talks to Composio's REST API over httpx (a base dependency) per the
 # live-verified spike recipe; composio-core ships for users who want the
@@ -52,7 +47,6 @@ composio = ["composio-core>=0.7.21"]
 dev = [
     "pytest>=7.0",
     "ruff>=0.1",
-    "playwright>=1.40",
     "fastapi>=0.104",
     "uvicorn>=0.27",
     "sse-starlette>=1.6",
@@ -94,9 +88,4 @@ select = ["E", "F", "W"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = [
-    # Browser E2E (tests/e2e/): needs the Playwright Chromium binary
-    # (`playwright install chromium`). CI installs it; locally the suite
-    # skips these when the binary is missing.
-    "e2e: browser end-to-end tests driven by Playwright Chromium",
-]
+

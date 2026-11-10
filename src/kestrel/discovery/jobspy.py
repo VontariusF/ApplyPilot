@@ -40,11 +40,6 @@ def parse_proxy(proxy_str: str) -> dict:
             "user": user,
             "pass": passwd,
             "jobspy": f"{user}:{passwd}@{host}:{port}",
-            "playwright": {
-                "server": f"http://{host}:{port}",
-                "username": user,
-                "password": passwd,
-            },
         }
     elif len(parts) == 2:
         host, port = parts
@@ -54,7 +49,6 @@ def parse_proxy(proxy_str: str) -> dict:
             "user": None,
             "pass": None,
             "jobspy": f"{host}:{port}",
-            "playwright": {"server": f"http://{host}:{port}"},
         }
     else:
         # S3: never echo the raw proxy -- user:pass would propagate into

@@ -161,7 +161,7 @@ class TestPageCaptureVerb:
 
 
 # ---------------------------------------------------------------------------
-# The pure builders: the same intel dict the Playwright collector produced
+# The pure builders: the same intel dict the deleted browser collector produced
 # ---------------------------------------------------------------------------
 
 class TestBuildIntelFromHtml:

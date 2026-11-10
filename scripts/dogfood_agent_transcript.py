@@ -38,8 +38,10 @@ Rig (the deterministic stub-provider rig of the merged suites, art_M7Xt2rnH):
 - Discovery and enrichment are stubbed at their network seams (the same
   seams tests/test_agent_journey.py pins): the stage code runs for real,
   the scrapers do not touch the network.
-- Chromium (Playwright's) renders the PDFs and serves as the apply
-  worker browser via CHROME_PATH.
+- The apply worker drives your own Chrome/Chromium (CHROME_PATH or the
+  system install) — Kestrel ships no browser of its own.
+- Tailor and cover-letter output is styled HTML; the host agent prints PDF
+  with its own browser when wanted.
 
 Everything runs in throwaway directories; nothing outside the run dir is
 touched. The transcript lands at $DOGFOOD_OUT (default: stdout + run dir).
@@ -69,11 +71,21 @@ BIN_DIR = RUN_DIR / "bin"
 BIN_DIR.mkdir(exist_ok=True)
 os.environ["PATH"] = f"{BIN_DIR}{os.pathsep}{os.environ.get('PATH', '')}"
 
-_CHROME_CANDIDATES = sorted(
-    Path.home().glob(".cache/ms-playwright/chromium-*/chrome-linux*/chrome"))
-if not _CHROME_CANDIDATES:
-    sys.exit("no Playwright Chromium found — run: playwright install chromium")
-os.environ["CHROME_PATH"] = str(_CHROME_CANDIDATES[-1])
+_CHROME_CANDIDATES = [
+    p for p in (
+        Path("/usr/bin/google-chrome"),
+        Path("/usr/bin/google-chrome-stable"),
+        Path("/usr/bin/chromium"),
+        Path("/usr/bin/chromium-browser"),
+        Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+    ) if p.exists()
+]
+_chrome = os.environ.get("CHROME_PATH") or (
+    str(_CHROME_CANDIDATES[0]) if _CHROME_CANDIDATES else None)
+if not _chrome:
+    sys.exit("no Chrome found — the apply worker drives your own "
+             "Chrome/Chromium; install it or set CHROME_PATH")
+os.environ["CHROME_PATH"] = _chrome
 os.environ.setdefault("NO_COLOR", "1")
 os.environ.setdefault("TERM", "dumb")
 os.environ.setdefault("COLUMNS", "100")
@@ -391,7 +403,7 @@ def main() -> int:
     t.note(f"Product head under test: `{_git(['merge-base', 'origin/main', 'HEAD'])}` "
            f"(origin/main — the harness adds scripts only). Branch head: `{_git_head()}`.")
     t.note(f"Run directory (throwaway): `{RUN_DIR}` · fake claude: `{fake}` · "
-           f"LLM stub: `{llm_url}` · Chromium: `{os.environ['CHROME_PATH']}`")
+           f"LLM stub: `{llm_url}` · Chrome: `{os.environ['CHROME_PATH']}`")
     t.note("")
     t.note("Rig boundaries, disclosed up front (the deterministic stub-provider rig,")
     t.note("the same seams tests/test_agent_journey.py pins):")
@@ -402,7 +414,7 @@ def main() -> int:
     t.note("  localhost OpenAI-compatible stub server (`LLM_PROVIDER=custom`).")
     t.note("- Discovery and enrichment are stubbed at their network seams; the stage")
     t.note("  code, DB writes, and scoring run for real.")
-    t.note("- PDFs render through Playwright Chromium; the apply run drives the real")
+    t.note("- Tailor and cover letters are styled HTML (no built-in renderer); the apply run drives the real")
     t.note("  launcher (Chrome worker + engine subprocess) with the fake engine")
     t.note("  emitting stream-json and the pinned RESULT verdicts.")
     t.note("- Every protocol verb below is the real CLI in a fresh invocation surface;")
@@ -643,13 +655,13 @@ def main() -> int:
     letters = sorted(p.name for p in config.COVER_LETTER_DIR.glob("*"))
     t.check("tailored resumes written", len(tailored) >= 2, ", ".join(tailored))
     t.check("cover letters written", len(letters) >= 2, ", ".join(letters))
-    pdfs = sorted(p.name for p in (config.TAILORED_DIR.rglob("*.pdf")))
-    pdfs += sorted(p.name for p in (config.COVER_LETTER_DIR.rglob("*.pdf")))
-    t.check("PDFs rendered", len(pdfs) >= 2, ", ".join(pdfs))
-    for pdf in (list(config.TAILORED_DIR.rglob("*.pdf"))
-                + list(config.COVER_LETTER_DIR.rglob("*.pdf"))):
-        header = pdf.read_bytes()[:5]
-        t.check(f"{pdf.name} is a real PDF", header == b"%PDF-", str(header))
+    htmls = sorted(p.name for p in (config.TAILORED_DIR.rglob("*.html")))
+    htmls += sorted(p.name for p in (config.COVER_LETTER_DIR.rglob("*.html")))
+    t.check("styled HTML written (the PDF stage's output)", len(htmls) >= 2, ", ".join(htmls))
+    for html in (list(config.TAILORED_DIR.rglob("*.html"))
+                 + list(config.COVER_LETTER_DIR.rglob("*.html"))):
+        head = html.read_text(encoding="utf-8")[:200].lower()
+        t.check(f"{html.name} is styled HTML", "<html" in head, head[:60])
     conn2 = database.get_connection()
     paths = {r["url"]: dict(r) for r in conn2.execute(
         "SELECT url, tailored_resume_path, cover_letter_path FROM jobs").fetchall()}

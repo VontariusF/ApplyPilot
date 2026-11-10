@@ -187,7 +187,7 @@ def _run_pdf(url: str | None = None) -> dict:
 
     With `url` (single-job runs), only that job's document converts: a
     one-job run must not spend its pass rendering up to 50 unrelated
-    pending jobs through Chromium (P3-3).
+    pending jobs (P3-3).
     """
     try:
         from kestrel.scoring.pdf import batch_convert
