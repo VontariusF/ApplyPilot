@@ -205,7 +205,7 @@ def store_web3_jobs(conn: sqlite3.Connection, raw_jobs: list[dict],
             log.warning("Skipping malformed Composio listing: %s", exc)
             skipped += 1
             continue
-        if not _location_ok(job["location"], accept_locs, reject_locs):
+        if not _location_ok(job["location"], accept_locs, reject_locs, url=job["url"]):
             filtered += 1
             continue
 

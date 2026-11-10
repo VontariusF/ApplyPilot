@@ -453,9 +453,14 @@ def test_store_applies_location_filter(isolated_db):
     # A non-empty accept list without a matching pattern filters it out.
     new, _, _, filtered = store_web3_jobs(conn, [COINLIST_JOB], accept_locs=["canada"], reject_locs=[])
     assert (new, filtered) == (0, 1)
-    # Remote jobs always pass.
+    # Pure-remote jobs always pass. A remote-tagged job with a geographic
+    # remainder is filtered by that remainder (2026-11-10: "France, Remote"
+    # leaked past a US accept list via the old remote-marker early return).
     new, _, _, filtered = store_web3_jobs(conn, [KEYROCK_JOB], accept_locs=["canada"], reject_locs=[])
-    assert (new, filtered) == (1, 0)
+    assert (new, filtered) == (0, 1)  # "Belgium Brussels Belgium (Remote)": geo remainder fails
+    remote_only = {**KEYROCK_JOB, "location": "Remote"}
+    new, _, _, filtered = store_web3_jobs(conn, [remote_only], accept_locs=["canada"], reject_locs=[])
+    assert (new, filtered) == (1, 0)  # nothing geographic left -> always passes
 
 
 # ---------------------------------------------------------------------------

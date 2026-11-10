@@ -243,7 +243,7 @@ def search_employer(
         for j in postings:
             loc = j.get("locationsText", "")
             if location_filter and accept_locs is not None and reject_locs is not None:
-                if not _location_ok(loc, accept_locs, reject_locs):
+                if not _location_ok(loc, accept_locs, reject_locs, url=j.get("externalPath")):
                     continue
 
             all_jobs.append({
