@@ -329,6 +329,21 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             decided_at    TEXT
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS page_captures (
+            -- One row per smart-extract site URL the host agent was asked to
+            -- capture (Playwright-removal spec art_VGFSMgRh). status
+            -- 'pending' = JS shell over HTTP, awaiting `kestrel agent
+            -- page-capture`; 'captured' = host-submitted intelligence
+            -- stored as JSON, consumed by the next smart-extract run.
+            -- Dedupe rides on url exactly as jobs does.
+            url          TEXT PRIMARY KEY,
+            status       TEXT NOT NULL DEFAULT 'pending',
+            intel        TEXT,
+            requested_at TEXT,
+            captured_at  TEXT
+        )
+    """)
     conn.commit()
 
     # Run migrations for any columns added after initial schema
@@ -1986,3 +2001,65 @@ def reset_job_tailoring(conn: sqlite3.Connection, url: str,
     cur = conn.execute(f"UPDATE jobs SET {', '.join(sets)} WHERE url = ?", params)
     conn.commit()
     return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Page captures: the smart-extract browser_needed queue (spec art_VGFSMgRh)
+# ---------------------------------------------------------------------------
+
+def record_capture_needed(conn: sqlite3.Connection, url: str) -> None:
+    """Mark a smart-extract site URL as awaiting a host page-capture.
+
+    Idempotent upsert: a re-run of a JS-shell site re-stamps the request so
+    requested_at reflects the latest escalation.
+    """
+    conn.execute(
+        "INSERT INTO page_captures (url, status, requested_at) VALUES (?, 'pending', ?) "
+        "ON CONFLICT(url) DO UPDATE SET status = 'pending', requested_at = excluded.requested_at",
+        (url, _utc_now()),
+    )
+    conn.commit()
+
+
+def record_page_capture(conn: sqlite3.Connection, url: str, intel: dict) -> None:
+    """Persist host-submitted page intelligence for one site URL.
+
+    The intel dict is the same shape collect_page_intelligence used to
+    return, serialized as JSON — the smart-extract pipeline consumes it in
+    place of an HTTP fetch it cannot render.
+    """
+    now = _utc_now()
+    conn.execute(
+        "INSERT INTO page_captures (url, status, intel, requested_at, captured_at) "
+        "VALUES (?, 'captured', ?, ?, ?) "
+        "ON CONFLICT(url) DO UPDATE SET status = 'captured', intel = excluded.intel, "
+        "captured_at = excluded.captured_at",
+        (url, json.dumps(intel), now, now),
+    )
+    conn.commit()
+
+
+def get_page_capture(conn: sqlite3.Connection, url: str) -> dict | None:
+    """One page_captures row for a URL, with its intel JSON decoded; None
+    when the site has never been captured or escalated."""
+    row = conn.execute("SELECT * FROM page_captures WHERE url = ?", (url,)).fetchone()
+    if row is None:
+        return None
+    capture = dict(zip(row.keys(), row))
+    if capture.get("intel"):
+        try:
+            capture["intel"] = json.loads(capture["intel"])
+        except ValueError:
+            capture["intel"] = None
+    return capture
+
+
+def get_pending_captures(conn: sqlite3.Connection, limit: int = 10) -> list[dict]:
+    """Site URLs awaiting capture, oldest request first — the queue the
+    page-capture verb's next-action payload serves from."""
+    rows = conn.execute(
+        "SELECT url, requested_at FROM page_captures WHERE status = 'pending' "
+        "ORDER BY requested_at, rowid LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(zip(row.keys(), row)) for row in rows]

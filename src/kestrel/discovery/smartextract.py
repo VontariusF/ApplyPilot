@@ -4,10 +4,18 @@
 Two-phase approach:
   Phase 1: Lightweight intelligence (JSON-LD, API responses, data-testids, DOM stats)
            -> LLM picks the best extraction strategy
-  Phase 2: Only for CSS selectors -- Playwright finds repeating card elements,
-           extracts 2-3 examples, sends focused HTML to LLM for selector generation.
+  Phase 2: Only for CSS selectors -- the LLM sees cleaned page HTML and
+           generates selectors; they run over the stored HTML.
 
 JSON-LD and API strategies execute directly from stored data -- no LLM needed.
+
+Acquisition has two lanes and Kestrel never launches a browser (spec
+art_VGFSMgRh):
+  Lane 1 -- the host agent captures pages in its own browser and posts them
+  back through `kestrel agent page-capture`; submitted intelligence is
+  stored (page_captures) and consumed by this pipeline.
+  Lane 2 -- pure HTTP (httpx + BeautifulSoup) for static pages; a JS shell
+  escalates to a typed browser_needed hand-off pointing at Lane 1.
 
 Sites are loaded from config/sites.yaml, with {query_encoded} and {location_encoded}
 placeholders replaced from the user's search configuration.
@@ -29,9 +37,15 @@ import yaml
 from bs4 import BeautifulSoup
 
 from kestrel import config
-from kestrel.browser import sync_playwright
 from kestrel.config import CONFIG_DIR
-from kestrel.database import get_connection, init_db, store_jobs, get_stats
+from kestrel.database import (
+    get_connection,
+    get_page_capture,
+    get_stats,
+    init_db,
+    record_capture_needed,
+    store_jobs,
+)
 from kestrel.discovery.filters import location_filters, location_ok as _location_ok
 from kestrel.llm import get_client
 
@@ -107,11 +121,26 @@ def _store_jobs_filtered(
     return new, existing
 
 
-# -- Page intelligence collector ---------------------------------------------
+# -- Page intelligence collector (pure functions over fetched HTML) ----------
 
-def collect_page_intelligence(url: str, headless: bool = True) -> dict:
-    """Load a page with Playwright and collect every signal a scraping engineer
-    would look at in DevTools. Returns a structured intelligence report."""
+# JS-shell detection contract: a page whose cleaned HTML carries fewer than
+# this many characters is a client-rendered shell — over HTTP it has no job
+# content, so it escalates to the host agent's browser (Lane 1) instead of
+# any Kestrel-side relaunch. 5000 was the old headful-retry threshold; the
+# enrichment side's browser-needed hand-off uses the same vocabulary.
+_JS_SHELL_MIN_CLEANED_CHARS = 5000
+
+_CAPTCHA_SIGNALS = ["captcha", "are you a human", "verify you", "unusual requests",
+                    "access denied", "please verify", "bot detection"]
+
+
+def build_intel_from_html(url: str, html: str) -> dict:
+    """Build the same intelligence dict the old browser collector produced,
+    from any HTML string — HTTP-fetched or host-submitted via
+    `kestrel agent page-capture`. Pure function over its inputs: JSON-LD,
+    __NEXT_DATA__, data-testid inventory, DOM stats, card candidates, and
+    the raw HTML the CSS-selector phase needs.
+    """
     intel: dict = {
         "url": url,
         "json_ld": [],
@@ -120,163 +149,138 @@ def collect_page_intelligence(url: str, headless: bool = True) -> dict:
         "page_title": "",
         "dom_stats": {},
         "card_candidates": [],
+        "full_html": html or "",
+    }
+    if not html:
+        return intel
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    if soup.title and soup.title.string:
+        intel["page_title"] = soup.title.string.strip()
+
+    # 1. JSON-LD
+    for el in soup.find_all("script", type="application/ld+json"):
+        try:
+            intel["json_ld"].append(json.loads(el.string or ""))
+        except (ValueError, TypeError):
+            continue
+
+    # 2. __NEXT_DATA__
+    next_data = soup.find("script", id="__NEXT_DATA__")
+    if next_data:
+        try:
+            intel["next_data"] = json.loads(next_data.string or "")
+        except (ValueError, TypeError):
+            pass
+
+    # 3. data-testid attributes
+    for el in soup.select("[data-testid]")[:50]:
+        intel["data_testids"].append({
+            "testid": el.get("data-testid", ""),
+            "tag": el.name,
+            "text": el.get_text(" ", strip=True)[:80],
+        })
+
+    # 4. DOM stats
+    intel["dom_stats"] = _dom_stats(soup)
+
+    # 5. Repeating card-like elements
+    intel["card_candidates"] = _card_candidates(soup)
+
+    return intel
+
+
+def _dom_stats(soup: BeautifulSoup) -> dict:
+    """Element counts the strategy briefing reports (ported from the old
+    in-browser evaluate)."""
+    body = soup.body if soup.body else soup
+    return {
+        "total_elements": len(body.find_all(True)),
+        "links": len(body.select("a[href]")),
+        "headings": len(body.select("h1,h2,h3,h4")),
+        "lists": len(body.select("ul,ol")),
+        "tables": len(body.select("table")),
+        "articles": len(body.select("article")),
+        "has_data_ids": len(body.select("[data-id]")),
     }
 
-    captured_responses: list[dict] = []
 
-    def on_response(response):
-        ct = response.headers.get("content-type", "")
-        rurl = response.url
-        if any(ext in rurl for ext in [".js", ".css", ".png", ".jpg", ".svg", ".woff", ".ico", ".gif", ".webp"]):
-            return
-        if "json" in ct or "/api/" in rurl or "algolia" in rurl or "graphql" in rurl:
-            try:
-                body = response.text()
-                try:
-                    data = json.loads(body)
-                except Exception:
-                    data = None
-                captured_responses.append({
-                    "url": rurl,
-                    "status": response.status,
-                    "size": len(body),
-                    "data": data,
-                })
-            except Exception:
-                pass
+def _selector_for(tag, classes: list[str] | None) -> str:
+    """tag + #id + up to 3 short classes — the selector shape the old
+    in-browser card detector emitted."""
+    selector = tag.name
+    if tag.get("id"):
+        return selector + "#" + tag["id"]
+    short = [c for c in (classes or []) if len(c) < 30][:3]
+    if short:
+        selector += "." + ".".join(short)
+    return selector
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
-        page = browser.new_page(user_agent=UA)
-        page.on("response", on_response)
 
-        page.goto(url, timeout=60000)
-        page.wait_for_load_state("networkidle")
+def _card_candidates(soup: BeautifulSoup, max_candidates: int = 3) -> list[dict]:
+    """Find repeating card-like element groups (ported from the old in-browser
+    evaluate): parents whose dominant child tag repeats enough to be a list."""
+    from collections import Counter
 
-        intel["page_title"] = page.title()
+    candidates: list[dict] = []
+    for parent in soup.find_all(True):
+        children = parent.find_all(recursive=False)
+        if len(children) < 3:
+            continue
 
-        # 1. JSON-LD
-        for el in page.query_selector_all('script[type="application/ld+json"]'):
-            try:
-                data = json.loads(el.inner_text())
-                intel["json_ld"].append(data)
-            except Exception:
-                pass
+        tag, count = Counter(c.name for c in children).most_common(1)[0]
+        if count < 3:
+            continue
 
-        # 2. __NEXT_DATA__
-        next_data = page.query_selector("script#__NEXT_DATA__")
-        if next_data:
-            try:
-                intel["next_data"] = json.loads(next_data.inner_text())
-            except Exception:
-                pass
+        repeating = [c for c in children if c.name == tag]
+        with_text = [c for c in repeating if len(c.get_text(strip=True)) > 20]
+        if len(with_text) < 3:
+            continue
 
-        # 3. data-testid attributes
-        intel["data_testids"] = page.evaluate("""
-            () => {
-                const els = document.querySelectorAll('[data-testid]');
-                const results = [];
-                els.forEach(el => {
-                    results.push({
-                        testid: el.getAttribute('data-testid'),
-                        tag: el.tagName.toLowerCase(),
-                        text: el.innerText?.slice(0, 80) || ''
-                    });
-                });
-                return results.slice(0, 50);
-            }
-        """)
+        with_links = [c for c in with_text if c.find("a", href=True)]
+        score = len(with_links) * 2 + len(with_text)
 
-        # 4. DOM stats
-        intel["dom_stats"] = page.evaluate("""
-            () => {
-                const body = document.body;
-                return {
-                    total_elements: body.querySelectorAll('*').length,
-                    links: body.querySelectorAll('a[href]').length,
-                    headings: body.querySelectorAll('h1,h2,h3,h4').length,
-                    lists: body.querySelectorAll('ul,ol').length,
-                    tables: body.querySelectorAll('table').length,
-                    articles: body.querySelectorAll('article').length,
-                    has_data_ids: body.querySelectorAll('[data-id]').length,
-                };
-            }
-        """)
+        parent_classes = parent.get("class") or []
+        child_classes = with_text[0].get("class") or []
+        examples = []
+        for card in with_text[:3]:
+            clone = BeautifulSoup(str(card), "html.parser")
+            for el in clone.find_all(["script", "style", "svg", "noscript"]):
+                el.decompose()
+            card_html = str(clone)
+            examples.append(card_html if len(card_html) <= 5000
+                            else card_html[:5000] + "...")
 
-        # 5. Find repeating card-like elements
-        intel["card_candidates"] = page.evaluate("""
-            () => {
-                const candidates = [];
-                const allParents = document.querySelectorAll('*');
+        candidates.append({
+            "parent_selector": _selector_for(parent, parent_classes),
+            "child_selector": _selector_for(with_text[0], child_classes),
+            "child_tag": tag,
+            "total_children": len(repeating),
+            "with_text": len(with_text),
+            "with_links": len(with_links),
+            "score": score,
+            "examples": examples,
+        })
 
-                for (const parent of allParents) {
-                    const children = Array.from(parent.children);
-                    if (children.length < 3) continue;
+    candidates.sort(key=lambda c: c["score"], reverse=True)
+    return candidates[:max_candidates]
 
-                    const tagCounts = {};
-                    children.forEach(c => {
-                        const key = c.tagName;
-                        tagCounts[key] = (tagCounts[key] || 0) + 1;
-                    });
 
-                    const dominant = Object.entries(tagCounts).sort((a,b) => b[1]-a[1])[0];
-                    if (!dominant || dominant[1] < 3) continue;
-
-                    const repeatingChildren = children.filter(c => c.tagName === dominant[0]);
-                    const withText = repeatingChildren.filter(c => c.innerText?.trim().length > 20);
-                    if (withText.length < 3) continue;
-
-                    const withLinks = withText.filter(c => c.querySelector('a[href]'));
-                    const score = withLinks.length * 2 + withText.length;
-
-                    const parentId = parent.id ? '#' + parent.id : '';
-                    const parentClasses = Array.from(parent.classList).filter(c => c.length < 30).slice(0, 3).join('.');
-                    const parentTag = parent.tagName.toLowerCase();
-                    const parentSelector = parentTag + (parentId || (parentClasses ? '.' + parentClasses : ''));
-
-                    const childTag = dominant[0].toLowerCase();
-                    const sampleChild = withText[0];
-                    const childClasses = Array.from(sampleChild.classList).filter(c => c.length < 30).slice(0, 3).join('.');
-                    const childSelector = childTag + (childClasses ? '.' + childClasses : '');
-
-                    const examples = withText.slice(0, 3).map(c => {
-                        const clone = c.cloneNode(true);
-                        clone.querySelectorAll('script,style,svg,noscript').forEach(el => el.remove());
-                        const html = clone.outerHTML;
-                        return html.length > 5000 ? html.slice(0, 5000) + '...' : html;
-                    });
-
-                    candidates.push({
-                        parent_selector: parentSelector,
-                        child_selector: childSelector,
-                        child_tag: childTag,
-                        total_children: repeatingChildren.length,
-                        with_text: withText.length,
-                        with_links: withLinks.length,
-                        score: score,
-                        examples: examples,
-                    });
-                }
-
-                candidates.sort((a,b) => b.score - a.score);
-                return candidates.slice(0, 3);
-            }
-        """)
-
-        # Capture full rendered HTML
-        intel["full_html"] = page.content()
-
-        browser.close()
-
-    # Process API responses
-    for resp in captured_responses:
-        summary: dict = {
-            "url": resp["url"][:200],
-            "status": resp["status"],
-            "size": resp["size"],
-            "_raw_data": resp.get("data"),
-        }
+def summarize_api_responses(captured: list[dict]) -> list[dict]:
+    """Reduce raw captured responses ({url, status, size, data}) into the
+    summary shape the strategy briefing and execute_api_response consume.
+    Pure function — the same processing the old in-browser collector ran on
+    its intercepted responses, now applied to host-submitted captures too."""
+    summaries: list[dict] = []
+    for resp in captured:
         data = resp.get("data")
+        summary: dict = {
+            "url": resp.get("url", "")[:200],
+            "status": resp.get("status", "?"),
+            "size": resp.get("size", len(json.dumps(data)) if data else 0),
+            "_raw_data": data,
+        }
         if data:
             if isinstance(data, list) and data:
                 summary["type"] = f"array[{len(data)}]"
@@ -317,9 +321,23 @@ def collect_page_intelligence(url: str, headless: bool = True) -> dict:
                         elif isinstance(val, dict) and depth < 3:
                             _explore_nested(val, path, depth + 1)
                 _explore_nested(data, "")
-        intel["api_responses"].append(summary)
+        summaries.append(summary)
+    return summaries
 
-    return intel
+
+def collect_page_intelligence(url: str) -> dict:
+    """Fetch a page over plain HTTP (Lane 2) and collect every signal the
+    static HTML carries: JSON-LD, __NEXT_DATA__, data-testids, DOM stats,
+    card candidates. XHR-backed API data is invisible to this lane — a
+    caller that needs it gets it from a host page-capture instead. Kestrel
+    launches no browser here or anywhere else: a JS-rendered shell comes
+    back with nearly-empty intel and the caller escalates browser_needed.
+    """
+    response = httpx.get(url, headers={"User-Agent": UA},
+                         timeout=60.0, follow_redirects=True)
+    response.raise_for_status()
+    return build_intel_from_html(url, response.text)
+
 
 
 # -- Judge: filter API responses ---------------------------------------------
@@ -831,34 +849,56 @@ def execute_css_selectors(intel: dict) -> tuple[dict, list[dict]]:
 
 # -- Main per-site extraction ------------------------------------------------
 
+def _is_js_shell(intel: dict) -> bool:
+    """True when the fetched HTML is a client-rendered shell: nearly no
+    cleaned content and no CAPTCHA interstitial explaining why. Such a page
+    escalates to the host agent's browser — never a Kestrel-side relaunch."""
+    full_html = intel.get("full_html", "")
+    if not full_html:
+        return True
+    if any(s in full_html.lower() for s in _CAPTCHA_SIGNALS):
+        # Blocked, not a shell — no point asking the host agent to render it.
+        log.warning("CAPTCHA/rate-limit detected — not escalating to page-capture")
+        return False
+    cleaned = clean_page_html(full_html)
+    return len(cleaned) < _JS_SHELL_MIN_CLEANED_CHARS
+
+
 def _run_one_site(name: str, url: str) -> dict:
     """Run full smart extraction pipeline on one site URL."""
     log.info("=" * 60)
     log.info("%s: %s", name, url)
 
-    # Step 1: Collect intelligence
-    log.info("[1] Collecting page intelligence...")
-    t0 = time.time()
-    intel = collect_page_intelligence(url)
-    collect_time = time.time() - t0
-    log.info("Done in %.1fs | JSON-LD: %d | API: %d | testids: %d | cards: %d",
-             collect_time, len(intel["json_ld"]), len(intel["api_responses"]),
-             len(intel["data_testids"]), len(intel["card_candidates"]))
-
-    # Headful retry if page content is tiny
-    full_html = intel.get("full_html", "")
-    cleaned_check = clean_page_html(full_html) if full_html else ""
-    _captcha_signals = ["captcha", "are you a human", "verify you", "unusual requests",
-                        "access denied", "please verify", "bot detection"]
-    _is_captcha = any(s in full_html.lower() for s in _captcha_signals) if full_html else False
-    if len(cleaned_check) < 5000 and full_html and not _is_captcha:
-        log.info("Cleaned HTML only %s chars -- retrying headful...", f"{len(cleaned_check):,}")
-        intel = collect_page_intelligence(url, headless=False)
-        collect_time = time.time() - t0
-        log.info("Headful done in %.1fs | JSON-LD: %d | API: %d",
-                 collect_time, len(intel["json_ld"]), len(intel["api_responses"]))
-    elif _is_captcha:
-        log.warning("CAPTCHA/rate-limit detected -- skipping headful retry")
+    # Step 1: Intelligence — a persisted agent page-capture wins; otherwise
+    # fetch over HTTP (Lane 2). A JS shell escalates browser_needed and
+    # records the URL in the pending-capture queue for the host agent.
+    conn = get_connection()
+    capture = get_page_capture(conn, url)
+    if capture and capture.get("intel"):
+        intel = capture["intel"]
+        log.info("[1] Using agent page-capture intelligence (json-ld: %d, api: %d)",
+                 len(intel.get("json_ld", [])), len(intel.get("api_responses", [])))
+    else:
+        log.info("[1] Collecting page intelligence over HTTP...")
+        try:
+            intel = collect_page_intelligence(url)
+        except httpx.HTTPError as e:
+            log.error("FETCH_ERROR: %s", e)
+            return {"name": name, "status": "FETCH_ERROR", "error": str(e)}
+        log.info("Done | JSON-LD: %d | API: %d | testids: %d | cards: %d",
+                 len(intel["json_ld"]), len(intel["api_responses"]),
+                 len(intel["data_testids"]), len(intel["card_candidates"]))
+        if _is_js_shell(intel):
+            record_capture_needed(conn, url)
+            hint = f"kestrel agent page-capture --url {url}"
+            log.warning("JS shell over HTTP — browser_needed; capture the page "
+                        "with '%s'", hint)
+            return {
+                "name": name,
+                "status": "BROWSER_NEEDED",
+                "error": f"browser-needed: JS-rendered page — capture it with "
+                         f"'{hint}' and re-run",
+            }
 
     # Step 1.5: Judge filters API responses
     if intel["api_responses"]:

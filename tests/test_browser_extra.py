@@ -112,7 +112,10 @@ class TestLazySitesRouteThroughGuard:
     def test_smartextract(self):
         from kestrel.discovery import smartextract
 
-        assert smartextract.sync_playwright is browser.sync_playwright
+        # Playwright removal (spec art_VGFSMgRh, piece 2): smart-extract no
+        # longer routes through the browser guard — HTTP plus host page-
+        # captures only, so the module never imports the guard.
+        assert "sync_playwright" not in vars(smartextract)
 
     def test_detail_enrichment(self):
         from kestrel.enrichment import detail
