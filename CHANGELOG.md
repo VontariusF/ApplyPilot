@@ -16,6 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Salary, Posted, short URL) — every dropped column remains available via
   `--json`, `--urls`, and the existing filter flags.
 
+### Fixed
+
+- **Location accept/reject patterns no longer match inside words.** The
+  derived pattern `NY` (from a "New York, NY" config) substring-matched
+  inside `Munich, Germany`, so out-of-area jobs passed a US accept list.
+  Patterns must now start at a token boundary; the documented lexical
+  looseness (a standalone `NY` token still matches `Buffalo, NY`) is
+  unchanged.
+
 ## [0.1.0] - 2026-11-09
 
 First public release of Kestrel, the open-source job-search and application

@@ -142,3 +142,62 @@ def test_remote_with_empty_accept_and_reject_unchanged():
 )
 def test_parametrized_baseline(location, accept, reject, expected):
     assert location_ok(location, accept, reject) is expected
+
+
+# -- F1: accept patterns never match inside a word -----------------------------
+#
+# Dogfood 2026-11-09: 8 Intel jobs in Munich, Germany passed a "New York, NY"
+# accept list because the derived pattern "NY" substring-matched inside
+# "germany". Patterns must now start at a token boundary; the documented
+# lexical looseness (word-start matches may extend) is unchanged.
+
+
+def _new_york_accept() -> list[str]:
+    from kestrel.discovery.filters import location_filters
+
+    accept, _ = location_filters({"locations": [{"location": "New York, NY", "remote": False}]})
+    return accept
+
+
+def test_f1_derived_ny_rejects_munich_germany():
+    accept = _new_york_accept()
+    assert "NY" in accept  # the derived two-letter pattern is the one that leaked
+    assert location_ok("Munich, Germany", accept, []) is False
+
+
+def test_f1_new_york_jobs_still_accepted():
+    accept = _new_york_accept()
+    assert location_ok("New York, NY", accept, []) is True
+    assert location_ok("New York, NY, USA", accept, []) is True
+    assert location_ok("Brooklyn, NY", accept, []) is True
+
+
+def test_f1_explicit_flat_key_behavior_unchanged():
+    from kestrel.discovery.filters import location_filters
+
+    accept, reject = location_filters(
+        {"location_accept": ["New York, NY"], "location_reject_non_remote": ["Boston"]}
+    )
+    assert accept == ["New York, NY"]  # flat key used verbatim, no derivation
+    assert location_ok("New York, NY", accept, reject) is True
+    assert location_ok("Munich, Germany", accept, reject) is False
+    assert location_ok("Boston, MA", accept, reject) is False  # reject still applies
+
+
+def test_f1_two_letter_pattern_inside_a_longer_word():
+    # Class-of-bugs guard beyond the Munich case: "MA" must not match
+    # inside "Germantown".
+    assert location_ok("Germantown, MD", ["MA"], []) is False
+
+
+def test_f1_interior_reject_match_no_longer_fires():
+    # Same shape on the reject side: "or" used to reject "Norway" (and
+    # "Oregon" via its interior). Interior matches are gone...
+    assert location_ok("Oslo, Norway", [], ["or"]) is True
+    # ...while a word-start match keeps the lexical looseness.
+    assert location_ok("Portland, OR", [], ["or"]) is False
+
+
+def test_f1_word_start_prefix_looseness_unchanged():
+    # The pinned B11 looseness: derived "NY" still matches "Remote — NYC".
+    assert location_ok("Remote — NYC", _new_york_accept(), []) is True
