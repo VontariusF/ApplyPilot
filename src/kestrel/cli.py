@@ -6,6 +6,7 @@ import json
 import logging
 import os
 from typing import Optional
+from urllib.parse import urlparse
 
 import typer
 from rich.console import Console
@@ -587,6 +588,9 @@ def status(
     summary.add_row("Pending tailoring (7+)", str(stats["untailored_eligible"]))
     summary.add_row("Cover letters", str(stats["with_cover_letter"]))
     summary.add_row("Ready to apply", str(stats["ready_to_apply"]))
+    # F4: the human-confirmation gate gets its own row — a prepared job
+    # stays a separate lens from ready_to_apply, not a silent merge.
+    summary.add_row("Awaiting approval (prepared)", str(stats["prepared"]))
     summary.add_row("Applied", str(stats["applied"]))
     summary.add_row("Captcha blocked", str(stats["captcha"]))
     # S4: the other terminal apply statuses, so every row is accounted.
@@ -962,6 +966,20 @@ def _parse_rescored_since(raw: str) -> str:
     return cutoff.isoformat()
 
 
+def _short_url(url: str | None) -> str:
+    """Host + path form of a job URL for the pruned filter table (F5).
+
+    The scheme and query are presentation noise at table width; the full
+    URL stays one --json/--urls call away.
+    """
+    if not url:
+        return "—"
+    parsed = urlparse(url)
+    host = parsed.netloc.removeprefix("www.")
+    path = parsed.path.rstrip("/")
+    return f"{host}{path}" if host else url
+
+
 def _predicates_from_flags(
     *, posted_within: Optional[str], location: Optional[str],
     remote: Optional[bool], seniority: Optional[str], min_salary: Optional[float],
@@ -1098,7 +1116,7 @@ def jobs_filter(
              "score_delta (spec Layer 3).",
     ),
     sort: str = typer.Option(
-        "discovered", "--sort",
+        "score", "--sort",
         help="Sort key: score|date|salary|discovered (descending by default).",
     ),
     ascending: bool = typer.Option(False, "--asc", help="Sort ascending."),
@@ -1151,28 +1169,29 @@ def jobs_filter(
             typer.echo(job["url"])
         return
 
+    # F5: a triage view is score-ranked by intent — the score column is
+    # what the human sorts the queue by, so it must not jump around.
+    # `--sort discovered` (the previous default) and every other key keep
+    # working; the change is a visible behavior change (CHANGELOG note).
     table = Table(title=f"{len(jobs)} matching jobs")
-    for column in ("URL", "Title", "Location", "Remote", "Seniority",
-                   "Salary", "Score", "Posted", "Stale", "Rescored"):
-        table.add_column(column)
+    table.add_column("Score", justify="right")
+    table.add_column("Title", max_width=40, overflow="ellipsis", no_wrap=True)
+    table.add_column("Location", max_width=20, overflow="ellipsis", no_wrap=True)
+    table.add_column("Salary")
+    table.add_column("Posted")
+    table.add_column("URL", max_width=30, overflow="ellipsis", no_wrap=True)
     for job in jobs:
-        remote_label = {1: "remote", 0: "on-site"}.get(job["is_remote"], "—")
-        rescored = (
-            f"{job['prev_score']}→{job['fit_score']}"
-            if job["rescored_at"] and job["prev_score"] is not None
-            and job["fit_score"] is not None else ""
-        )
+        # Pruned to the triage set (rerank precedent): Remote, Seniority,
+        # Stale, and Rescored stay behind --json/--urls and their own
+        # filter flags instead of wrapping the table unreadably at ~120
+        # columns.
         table.add_row(
-            job["url"] or "—",
+            "—" if job["fit_score"] is None else str(job["fit_score"]),
             job["title"] or "—",
             job["location"] or "—",
-            remote_label,
-            job["seniority"] or "—",
             job["salary"] or "—",
-            "—" if job["fit_score"] is None else str(job["fit_score"]),
             (job["date_posted"] or "")[:10] or "—",
-            "yes" if job["stale"] else "",
-            rescored,
+            _short_url(job["url"]),
         )
     console.print(table)
 

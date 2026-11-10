@@ -5,6 +5,17 @@ All notable changes to Kestrel will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- `kestrel jobs filter` now defaults to `--sort score` (fit score descending),
+  so the triage view is ordered by the score a human sorts by; pass
+  `--sort discovered` to restore the previous discovery-order default. The
+  default table is also pruned to the triage columns (Score, Title, Location,
+  Salary, Posted, short URL) — every dropped column remains available via
+  `--json`, `--urls`, and the existing filter flags.
+
 ## [0.1.0] - 2026-11-09
 
 First public release of Kestrel, the open-source job-search and application
