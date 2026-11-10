@@ -14,12 +14,14 @@ The plan-then-confirm contract for externally driven batches:
   launcher's own acquire/lock paths. The token is consumed on use: one
   plan, one batch, never replayed, and an edited or drifted job set
   refuses with a structured error.
-- Externally driven batches default to the smallest automation preset's
-  daily cap (automation.DAILY_CAP_CHOICES[0] == 5); only an explicit
-  --daily-cap lifts it. The cap rides into launcher.main's live-from-DB
-  guard, so concurrent protocol, portal, and manual starts share one
-  accounting (PR #50 semantics) — this module adds no counting of its
-  own.
+- Externally driven batches are uncapped unless a cap was requested
+  (spec art_NcNShMYR): an explicit --daily-cap, an apply.yaml
+  daily_cap, or — for portal runs — a preset the user picked. With no
+  cap requested the payload reports ``cap: null`` and the batch is
+  sized to the eligible queue. When a cap IS requested it rides into
+  launcher.main's live-from-DB guard, so concurrent protocol, portal,
+  and manual starts share one accounting (PR #50 semantics) — this
+  module adds no counting of its own.
 
 The staged token lives next to the other app state (0600 via
 config.write_secret_text) and carries job URLs, never credentials.
@@ -35,11 +37,6 @@ from typing import Optional
 
 from kestrel import config
 from kestrel.database import count_applications_on
-
-# Gate 3: the default daily cap for externally driven batches — the
-# smallest preset the portal's Automation page offers. An explicit
-# --daily-cap on the planning invocation is the only way past it.
-AGENT_DEFAULT_DAILY_CAP = 5
 
 STAGED_PLAN_FILE = "apply-plan.json"
 
@@ -88,6 +85,10 @@ class PlanDriftError(PlanError):
     code = "plan_drift"
 
 
+class PlanConfigError(PlanError):
+    code = "config_invalid"
+
+
 # ---------------------------------------------------------------------------
 # Token mechanics: hash, staging, consumption
 # ---------------------------------------------------------------------------
@@ -126,6 +127,23 @@ def _estimate_seconds() -> int:
     return int(config.DEFAULTS["apply_timeout"])
 
 
+def requested_daily_cap(explicit_cap: Optional[int]) -> Optional[int]:
+    """The cap the individual asked for, or None for no cap.
+
+    Priority order: an explicit --daily-cap flag, then the apply.yaml
+    config value (config.apply_daily_cap), then None — the launcher
+    treats None as uncapped. A user who never touched the setting gets
+    None. A malformed config value is the documented typed
+    config_invalid refusal, not a silent default.
+    """
+    if explicit_cap is not None:
+        return explicit_cap
+    try:
+        return config.apply_daily_cap()
+    except config.ApplyConfigError as exc:
+        raise PlanConfigError(str(exc), details={"config": "apply.yaml"}) from exc
+
+
 def stage_batch_plan(min_score: int, limit: Optional[int],
                      explicit_cap: Optional[int]) -> dict:
     """Derive the batch read-only, stage the token, return the payload.
@@ -134,12 +152,14 @@ def stage_batch_plan(min_score: int, limit: Optional[int],
     SELECT (launcher.derive_batch) and the only file touched is the token.
 
     B2: a None limit — the CLI's omitted --limit — sizes the batch to
-    everything the daily cap allows, min(headroom, eligible_total),
-    instead of silently truncating to the apply run's default of 1 (the
-    apply RUN default is untouched). The payload carries limit_applied,
-    eligible_total, and per-reason exclusion counts (S3), so truncation
-    and exclusion are never silent — an operator reading the plan can
-    tell "only one job is eligible" from "the batch was capped".
+    everything the requested cap allows — min(headroom, eligible_total)
+    when a cap was requested, the whole eligible queue when none was
+    (spec art_NcNShMYR) — instead of silently truncating to the apply
+    run's default of 1 (the apply RUN default is untouched). The
+    payload carries limit_applied, eligible_total, and per-reason
+    exclusion counts (S3), so truncation and exclusion are never
+    silent — an operator reading the plan can tell "only one job is
+    eligible" from "the batch was capped".
     """
     from kestrel.apply.launcher import (
         count_eligible,
@@ -147,16 +167,17 @@ def stage_batch_plan(min_score: int, limit: Optional[int],
         derive_batch,
     )
 
-    cap, cap_source = ((explicit_cap, "explicit") if explicit_cap is not None
-                       else (AGENT_DEFAULT_DAILY_CAP, "default"))
+    cap = requested_daily_cap(explicit_cap)
+    cap_source = "explicit" if cap is not None else "none"
     day = utc_today()
     applied_today = count_applications_on(day)
-    headroom = max(cap - applied_today, 0)
+    headroom = max(cap - applied_today, 0) if cap is not None else None
     eligible_total = count_eligible(min_score=min_score)
     excluded = count_queue_exclusions(min_score)
     # An explicit --limit is honored exactly, even when it over-requests
     # (derive_batch's LIMIT simply returns what exists).
-    limit_applied = min(headroom, eligible_total) if limit is None else limit
+    limit_applied = (min(headroom, eligible_total) if cap is not None
+                     else eligible_total) if limit is None else limit
 
     batch = derive_batch(min_score=min_score, limit=limit_applied)
     if not batch:

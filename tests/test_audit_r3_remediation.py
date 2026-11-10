@@ -34,7 +34,7 @@ import pytest
 from typer.testing import CliRunner
 
 from kestrel import config, database
-from kestrel.apply import launcher, planning
+from kestrel.apply import launcher
 from kestrel.cli import app
 from kestrel.discovery import jobspy
 from kestrel.enrichment import detail
@@ -323,9 +323,10 @@ def test_host_enrich_refuses_a_non_url_application_url(queue, seeded_profile):
 # ---------------------------------------------------------------------------
 
 
-def test_plan_without_limit_sizes_to_min_headroom_eligible(queue):
-    """B2: an omitted --limit plans everything the cap allows — never the
-    apply run's silent default of 1."""
+def test_plan_without_limit_sizes_to_eligible_total_when_uncapped(queue):
+    """B2 + spec art_NcNShMYR: with no cap requested, an omitted --limit
+    plans the whole eligible queue — never the apply run's silent default
+    of 1, and no headroom math because there is no cap."""
     for i in range(1, 4):
         _seed_job(queue, f"https://x.com/jobs/{i}", fit_score=8)
 
@@ -334,17 +335,19 @@ def test_plan_without_limit_sizes_to_min_headroom_eligible(queue):
     assert payload["batch_size"] == 3
     assert payload["limit_applied"] == 3
     assert payload["eligible_total"] == 3
-    assert payload["headroom"] == planning.AGENT_DEFAULT_DAILY_CAP
+    assert payload["cap"] is None
+    assert payload["headroom"] is None
 
 
 def test_plan_without_limit_respects_the_cap_headroom(queue):
+    """When a cap IS requested, the omitted --limit sizes to its headroom."""
     for i in range(1, 4):
         _seed_job(queue, f"https://x.com/jobs/{i}", fit_score=8)
     for i in range(1, 5):
         _seed_job(queue, f"https://x.com/jobs/applied-{i}", fit_score=8)
         launcher.mark_job(f"https://x.com/jobs/applied-{i}", "applied")
 
-    payload = json.loads(_plan().stdout)
+    payload = json.loads(_plan("--daily-cap", "5").stdout)
 
     assert payload["headroom"] == 1  # cap 5 - 4 applied today
     assert payload["limit_applied"] == 1

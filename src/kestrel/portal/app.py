@@ -1628,7 +1628,9 @@ def _preset_form_updates(preset: str, form) -> dict:
         raw_cap = str(form.get("daily_cap", "")).strip()
         try:
             min_score = int(raw_score) if raw_score else automation_mod.MIN_SCORE_CHOICES[0]
-            daily_cap = int(raw_cap) if raw_cap else automation_mod.DAILY_CAP_CHOICES[1]
+            # An empty/absent cap means no cap (spec art_NcNShMYR) — the
+            # old forced DAILY_CAP_CHOICES[1] default is gone.
+            daily_cap = int(raw_cap) if raw_cap else None
         except ValueError as e:
             raise runner.ParamError("score and cap must be numbers") from e
         return {

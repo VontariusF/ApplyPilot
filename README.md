@@ -39,11 +39,11 @@ The older routes still work, on top of the same core: **provider-backed mode** (
 | **3. Score** | Every job is rated 1–10 against your resume and preferences — by your driving agent, or by a configured LLM in provider mode. Only jobs above your threshold proceed. |
 | **4. Tailor** | Your resume is reworked per job — reorganized, relevant experience emphasized, keywords incorporated. Your declared resume facts are preserved exactly; a typed fabrication guard refuses anything not in the resume. |
 | **5. Cover letter** | A targeted letter per job, referencing the specific company, role, and your mapped experience. |
-| **6. Apply** | Applications are bookkept by Kestrel: a per-job apply lock, a plan-then-confirm gate in front of every real submission, and a daily application cap. Your agent (or the built-in engine) drives the browser; nothing is submitted until a human confirms. |
+| **6. Apply** | Applications are bookkept by Kestrel: a per-job apply lock, a plan-then-confirm gate in front of every real submission, and a daily application cap only if you asked for one. Your agent (or the built-in engine) drives the browser; nothing is submitted until a human confirms. |
 
 Each stage is independent: run all six, or pick the ones you want.
 
-**Human-gated by design.** Real submissions require an explicit plan-then-confirm step (`kestrel apply --plan` → `--i-confirm <hash>`, or the `prepared` outcome on the agent route), a per-day application cap, and terminal CAPTCHA handling that never retries blocked applications.
+**Human-gated by design.** Real submissions require an explicit plan-then-confirm step (`kestrel apply --plan` → `--i-confirm <hash>`, or the `prepared` outcome on the agent route), a per-day application cap whenever you request one (`--daily-cap`, an `apply.yaml` `daily_cap`, or a portal preset — none is imposed by default), and terminal CAPTCHA handling that never retries blocked applications.
 
 ## Requirements
 

@@ -7,11 +7,12 @@ own acquire/lock paths, and the token is consumed on use — never
 replayable, and an edited or drifted job set refuses with a structured
 error envelope.
 
-Gate 3 — the cap defaults to 5/day for externally driven batches (the
-smallest automation preset, automation.DAILY_CAP_CHOICES[0]) and only an
-explicit --daily-cap lifts it; the count is the launcher's live-from-DB
-guard, shared with portal and manual starts (PR #50 semantics) — these
-tests exercise the real count, never a snapshot.
+Gate 3 — the cap is REQUESTED, never mandatory (spec art_NcNShMYR):
+externally driven batches are uncapped unless the individual asked for
+one (an explicit --daily-cap, an apply.yaml daily_cap, or a portal
+preset); the count is the launcher's live-from-DB guard, shared with
+portal and manual starts (PR #50 semantics) — these tests exercise the
+real count, never a snapshot.
 """
 
 import json
@@ -36,6 +37,13 @@ runner = CliRunner()
 def queue(app_dir):
     database.init_db()
     return database.get_connection()
+
+
+@pytest.fixture()
+def apply_yaml_cap(app_dir):
+    """A requested cap via the config seam: apply.yaml daily_cap = 5."""
+    config.write_secret_text(config.APP_DIR / "apply.yaml",
+                             "daily_cap: 5\n")
 
 
 @pytest.fixture()
@@ -99,10 +107,11 @@ def test_plan_prints_batch_and_commits_nothing(queue):
     assert result.exit_code == 0
     payload = json.loads(result.stdout)  # one pure-JSON document, nothing else
     assert payload["commits_nothing"] is True
-    assert payload["cap"] == planning.AGENT_DEFAULT_DAILY_CAP
-    assert payload["cap_source"] == "default"
+    # No cap requested: the payload says so honestly (spec art_NcNShMYR).
+    assert payload["cap"] is None
+    assert payload["cap_source"] == "none"
     assert payload["applied_today"] == 0
-    assert payload["headroom"] == payload["cap"] - payload["applied_today"]
+    assert payload["headroom"] is None
     # Worker order (fit_score DESC, url), with per-job estimates attached.
     assert [job["url"] for job in payload["jobs"]] == [
         "https://x.com/jobs/2", "https://x.com/jobs/1"]
@@ -152,11 +161,55 @@ def test_plan_hash_tracks_the_batch(queue):
     assert third["plan_hash"] != first["plan_hash"]  # new batch, new token
 
 
-def test_plan_explicit_daily_cap_lifts_the_default(queue):
+def test_plan_without_a_cap_sizes_to_eligible_total(queue):
+    """Spec art_NcNShMYR: omitting --daily-cap sizes the batch to the
+    whole eligible queue — cap null, cap_source 'none', headroom null."""
+    for i in range(41):
+        _seed_job(queue, f"https://x.com/jobs/{i}", fit_score=8)
+
+    payload = json.loads(_plan().stdout)
+
+    assert payload["cap"] is None
+    assert payload["cap_source"] == "none"
+    assert payload["headroom"] is None
+    assert payload["eligible_total"] == 41
+    assert payload["limit_applied"] == 41
+    assert payload["batch_size"] == 41
+
+
+def test_plan_explicit_daily_cap_is_honored(queue):
     _seed_job(queue, "https://x.com/jobs/1")
     payload = json.loads(_plan("--daily-cap", "25").stdout)
     assert payload["cap"] == 25
     assert payload["cap_source"] == "explicit"
+
+
+def test_plan_explicit_daily_cap_sizes_headroom(queue):
+    """An explicit cap keeps the exact headroom math — no drift for
+    requested caps."""
+    for i in range(1, 4):
+        _seed_job(queue, f"https://x.com/jobs/{i}", fit_score=8)
+    for i in range(1, 5):
+        _seed_job(queue, f"https://x.com/jobs/applied-{i}", fit_score=8)
+        launcher.mark_job(f"https://x.com/jobs/applied-{i}", "applied")
+
+    payload = json.loads(_plan("--daily-cap", "5").stdout)
+
+    assert payload["cap"] == 5
+    assert payload["cap_source"] == "explicit"
+    assert payload["headroom"] == 1  # cap 5 - 4 applied today
+    assert payload["limit_applied"] == 1
+    assert payload["batch_size"] == 1
+
+
+def test_plan_config_daily_cap_is_honored(queue, apply_yaml_cap):
+    """An apply.yaml daily_cap the user set is the config request path —
+    reported as explicit (a cap WAS requested)."""
+    _seed_job(queue, "https://x.com/jobs/1")
+    payload = json.loads(_plan().stdout)
+    assert payload["cap"] == 5
+    assert payload["cap_source"] == "explicit"
+    assert payload["headroom"] == 5
 
 
 # ---------------------------------------------------------------------------
@@ -191,9 +244,9 @@ def test_confirm_runs_the_planned_batch_and_consumes_the_token(
     assert len(calls) == 1
     call = calls[0]
     # The run is the planned batch: pinned URLs, the plan's size, and the
-    # staged cap — Gate 3's 5/day default when no --daily-cap was passed.
+    # staged cap — None (uncapped) when no cap was requested.
     assert call["limit"] == 2
-    assert call["daily_cap"] == planning.AGENT_DEFAULT_DAILY_CAP
+    assert call["daily_cap"] is None
     assert call["allowed_urls"] == {"https://x.com/jobs/1", "https://x.com/jobs/2"}
     assert call["continuous"] is False
     # Per-batch token: consumed on use, never replayable.
@@ -275,10 +328,10 @@ def test_confirm_refuses_when_flags_select_a_different_set(queue, tier_ok):
 
 def test_confirm_refuses_a_cap_disagreement(queue, tier_ok):
     _seed_job(queue, "https://x.com/jobs/1")
-    payload = json.loads(_plan().stdout)  # staged cap: the 5/day default
+    payload = json.loads(_plan().stdout)  # staged cap: None (uncapped)
     error = _error_of(_confirm(payload["plan_hash"], "--daily-cap", "25"))
     assert error["code"] == "plan_cap_mismatch"
-    assert error["details"]["staged_cap"] == planning.AGENT_DEFAULT_DAILY_CAP
+    assert error["details"]["staged_cap"] is None
 
 
 def test_confirm_passes_an_explicit_cap_through(queue, seeded_profile, tier_ok,
@@ -299,9 +352,10 @@ def test_confirm_passes_an_explicit_cap_through(queue, seeded_profile, tier_ok,
 # ---------------------------------------------------------------------------
 
 
-def test_cap_stops_the_batch_at_five_by_default(queue, monkeypatch):
-    """Acceptance 3: with no --daily-cap, a confirmed batch's run stops at
-    the 5/day default — the launcher's live guard over the real count."""
+def test_cap_stops_the_batch_when_requested(queue, monkeypatch):
+    """Acceptance: a REQUESTED cap still stops the batch — the launcher's
+    live guard over the real count (spec art_NcNShMYR: only the
+    mandatory default died, not the cap machinery)."""
     urls = [f"https://x.com/jobs/{i}" for i in range(8)]
     for url in urls:
         _seed_job(queue, url, fit_score=5)
@@ -312,7 +366,7 @@ def test_cap_stops_the_batch_at_five_by_default(queue, monkeypatch):
     assert launcher._daily_cap_reached(6) is False
 
     def _no_acquire(**kwargs):
-        raise AssertionError("the 5/day default must stop the batch before acquisition")
+        raise AssertionError("the requested cap must stop the batch before acquisition")
 
     monkeypatch.setattr(launcher, "acquire_job", _no_acquire)
     events: list[str] = []
@@ -320,7 +374,7 @@ def test_cap_stops_the_batch_at_five_by_default(queue, monkeypatch):
 
     applied, failed = launcher.worker_loop(
         limit=3, min_score=1, dry_run=True,
-        daily_cap=planning.AGENT_DEFAULT_DAILY_CAP)
+        daily_cap=5)
 
     assert (applied, failed) == (0, 0)
     assert any("Daily cap reached" in event for event in events)

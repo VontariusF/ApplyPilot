@@ -1311,18 +1311,19 @@ _TERMINAL_APPLY_STATUSES = TERMINAL_APPLY_STATUSES
 
 
 def _apply_progress() -> dict:
-    """The cap block every apply verb carries: the external-driver daily
-    cap (planning.AGENT_DEFAULT_DAILY_CAP, 5 — not liftable at the verb,
-    by the guardrail), live-from-DB applied count, and the headroom."""
-    from kestrel.apply.planning import AGENT_DEFAULT_DAILY_CAP
+    """The cap block every apply verb carries: the requested daily cap
+    (config.apply_daily_cap — None when the individual set no cap,
+    spec art_NcNShMYR), the live-from-DB applied count, and the
+    headroom (also None when uncapped — honest reporting either way)."""
     from kestrel.database import count_applications_on
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     applied_today = count_applications_on(today)
+    cap = config.apply_daily_cap()
     return {
-        "cap": AGENT_DEFAULT_DAILY_CAP,
+        "cap": cap,
         "applied_today": applied_today,
-        "headroom": max(AGENT_DEFAULT_DAILY_CAP - applied_today, 0),
+        "headroom": max(cap - applied_today, 0) if cap is not None else None,
     }
 
 
@@ -1371,7 +1372,7 @@ def _host_apply_acquire(min_score_raw: str | None, reveal: bool) -> dict:
 
     min_score = _validated_min_score(min_score_raw, default=7)
 
-    if _daily_cap_reached_planning_cap():
+    if _daily_cap_reached_configured():
         _fail("cap_reached",
               "the daily application cap is reached — no lock is taken; "
               "real submissions are also human-gated upstream by the "
@@ -1423,12 +1424,20 @@ def _host_apply_acquire(min_score_raw: str | None, reveal: bool) -> dict:
     return payload
 
 
-def _daily_cap_reached_planning_cap() -> bool:
-    """The live daily-cap recheck against the external-driver default."""
-    from kestrel.apply.launcher import _daily_cap_reached
-    from kestrel.apply.planning import AGENT_DEFAULT_DAILY_CAP
+def _daily_cap_reached_configured() -> bool:
+    """The live daily-cap recheck against the REQUESTED cap.
 
-    return _daily_cap_reached(AGENT_DEFAULT_DAILY_CAP)
+    No cap requested (no apply.yaml daily_cap) → False: nothing stops
+    the batch (spec art_NcNShMYR). A malformed apply.yaml value is the
+    documented typed config_invalid refusal, not an internal_error.
+    """
+    from kestrel.apply.launcher import _daily_cap_reached
+
+    try:
+        cap = config.apply_daily_cap()
+    except config.ApplyConfigError as exc:
+        _fail("config_invalid", str(exc), {"config": "apply.yaml"})
+    return cap is not None and _daily_cap_reached(cap)
 
 
 def _validated_min_score(min_score_raw: str | None, default: int) -> int:
@@ -1526,7 +1535,7 @@ def _host_apply_result(url: str, status: str, reason: str | None,
     # cap_reached says which constraint the empty list reflects. The
     # entries share _job_block with apply-acquire and the stage payloads:
     # one job shape across the whole apply stage family.
-    cap_reached = _daily_cap_reached_planning_cap()
+    cap_reached = _daily_cap_reached_configured()
     next_rows = [] if cap_reached else derive_batch(min_score=min_score, limit=1)
     return {
         "stage": "apply",

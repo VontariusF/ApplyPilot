@@ -109,6 +109,10 @@ def test_adjust_disclosures_offer_buttons_and_selects_only(portal_client):
         assert f'name="min_score" value="{score}"' in r.text
     for cap in ("5", "10", "25"):
         assert f'name="daily_cap" value="{cap}"' in r.text
+    # No cap is the first, default-checked choice (spec art_NcNShMYR).
+    assert 'name="daily_cap" value=""' in r.text
+    assert "> No cap<" in r.text
+    assert 'name="daily_cap" value="" checked' in r.text
     assert 'name="keep_going"' in r.text
     for block in re.findall(r'<details class="adjust">.*?</details>', r.text,
                             re.DOTALL):
@@ -141,7 +145,8 @@ def test_start_button_runs_the_preset(portal_client, real_spawns):
 
 
 def test_start_button_refuses_when_daily_cap_is_spent(portal_client, real_spawns):
-    seed_applied(10)  # default cap 10
+    automation.update({"presets": {"apply_matches": {"daily_cap": 10}}})
+    seed_applied(10)  # fills the requested cap of 10
     client, _ = portal_client
     r = client.post("/automation/start", data={"preset": "apply_matches"},
                     follow_redirects=False)
@@ -295,7 +300,8 @@ def test_cap_pause_reason_shows_on_the_card(portal_client):
     client.post("/automation/toggle",
                 data={"name": "auto_apply_enabled", "value": "on"},
                 follow_redirects=False)
-    seed_applied(10)  # fills the default cap of 10
+    automation.update({"presets": {"apply_matches": {"daily_cap": 10}}})
+    seed_applied(10)  # fills the requested cap of 10
     outcome = automation.run_tick()
     assert outcome["paused"]  # the scheduler recorded the pause + reason
     r = client.get("/automation")
@@ -306,6 +312,11 @@ def test_cap_pause_reason_shows_on_the_card(portal_client):
 def test_cap_usage_line_shows_used_of_cap(portal_client):
     seed_applied(4)
     client, _ = portal_client
+    # No cap requested: the line says so plainly (spec art_NcNShMYR).
+    r = client.get("/automation")
+    assert "No daily cap — 4 applications used today." in r.text
+
+    automation.update({"presets": {"apply_matches": {"daily_cap": 10}}})
     r = client.get("/automation")
     assert "4 of 10 applications used today." in r.text
 
@@ -571,7 +582,7 @@ def test_agent_flips_toggle_and_reports_status(portal_client, real_spawns,
     fake_llm.respond('{"action": "status"}')
     seed_applied(4)
     r = client.post("/automation/ask", data={"text": "where do things stand?"})
-    assert "auto-apply is on, capped at 10/day; 4 used today" in r.text
+    assert "auto-apply is on, uncapped (no daily cap set); 4 used today" in r.text
 
 
 def test_agent_stop_reports_when_nothing_ran(portal_client, agent_panel, fake_llm):
