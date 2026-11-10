@@ -1103,6 +1103,118 @@ def enrich_cmd(
 
 
 # ---------------------------------------------------------------------------
+# Page-capture (the smart-extract browser lane, host-driven; spec art_VGFSMgRh)
+# ---------------------------------------------------------------------------
+
+def _parse_json_flag(raw: str, code: str, flag: str, url: str):
+    """Parse one JSON-carrying verb flag, or refuse it with the typed code."""
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        _fail(code, f"{flag} is not valid JSON — submit the captured value "
+              "verbatim, unmodified",
+              {"url": url})
+
+
+def _host_page_capture(url: str, html: str | None, json_ld_raw: str | None,
+                       api_responses_raw: str | None) -> dict:
+    """Persist one host-captured page's intelligence, then serve the next
+    pending capture as the next action.
+
+    The write goes through database.record_page_capture — the page_captures
+    row is the exact channel the smart-extract pipeline reads a JS-shell
+    site's intelligence from (spec: no parallel schema for host data). The
+    returned payload carries counts and identity only: submitted page
+    content stays out of the protocol output the way every long capture
+    does, because it lands in the host chat's session logs.
+    """
+    from kestrel.database import get_connection, get_pending_captures, record_page_capture
+    from kestrel.discovery.smartextract import build_intel_from_html, summarize_api_responses
+
+    if not any((html, json_ld_raw, api_responses_raw)):
+        _fail("invalid_capture",
+              "nothing to capture — pass --html, --json-ld, or --api-responses "
+              "(at least one captured signal is required)",
+              {"url": url})
+
+    html_text = (html or "").strip()
+    if html is not None and not html_text:
+        _fail("invalid_html",
+              "--html carries no content — submit the page's full rendered "
+              "HTML, or omit the flag when nothing rendered",
+              {"url": url})
+
+    json_ld_entries = None
+    if json_ld_raw is not None:
+        parsed = _parse_json_flag(json_ld_raw, "invalid_json_ld", "--json-ld", url)
+        if not isinstance(parsed, list):
+            parsed = [parsed]
+        json_ld_entries = parsed
+
+    api_summaries = None
+    if api_responses_raw is not None:
+        parsed = _parse_json_flag(api_responses_raw, "invalid_api_responses",
+                                  "--api-responses", url)
+        if not isinstance(parsed, list) or not all(isinstance(r, dict) for r in parsed):
+            _fail("invalid_api_responses",
+                  "--api-responses must be a JSON array of captured response "
+                  "objects ({url, status, size, data})",
+                  {"url": url})
+        api_summaries = summarize_api_responses(parsed)
+
+    # With no --html, the capture is metadata-only (e.g. XHR bodies the page
+    # itself does not render) — build_intel_from_html over empty HTML yields
+    # exactly that shape.
+    intel = build_intel_from_html(url, html_text)
+    if json_ld_entries is not None:
+        intel["json_ld"] = json_ld_entries
+    if api_summaries is not None:
+        intel["api_responses"] = api_summaries
+
+    conn = get_connection()
+    record_page_capture(conn, url, intel)
+
+    pending = get_pending_captures(conn)
+    next_url = next((row["url"] for row in pending if row["url"] != url), None)
+    return {
+        "verb": "page-capture",
+        "url": url,
+        "captured": {
+            "json_ld_entries": len(intel["json_ld"]),
+            "api_responses": len(intel["api_responses"]),
+            "page_title": intel["page_title"],
+            "data_testids": len(intel["data_testids"]),
+            "card_candidates": len(intel["card_candidates"]),
+            "full_html_chars": len(intel.get("full_html") or ""),
+        },
+        "next_capture": {"url": next_url} if next_url else None,
+    }
+
+
+@agent_app.command("page-capture")
+def page_capture_cmd(
+    url: Optional[str] = typer.Option(
+        None, "--url",
+        help="Site URL from a browser_needed smart-extract escalation."),
+    html: Optional[str] = typer.Option(
+        None, "--html",
+        help="The page's full rendered HTML, captured in your own browser."),
+    json_ld: Optional[str] = typer.Option(
+        None, "--json-ld",
+        help="JSON-LD script contents as a JSON value (object or array)."),
+    api_responses: Optional[str] = typer.Option(
+        None, "--api-responses",
+        help="Captured XHR/fetch responses as a JSON array of "
+             "{url, status, size, data} objects."),
+) -> None:
+    """Persist captured page intelligence for one smart-extract site; the next pending capture is returned."""
+    _prepare_db()
+    if not url:
+        _fail("invalid_usage", "--url is required")
+    _verb(lambda: _host_page_capture(url, html, json_ld, api_responses))
+
+
+# ---------------------------------------------------------------------------
 # Tailor (local validator + assembler; the LLM judge is skipped)
 # ---------------------------------------------------------------------------
 
