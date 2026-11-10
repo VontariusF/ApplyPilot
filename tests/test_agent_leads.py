@@ -382,6 +382,17 @@ def test_concurrent_run_recording_loses_no_counts(app_dir):
     assert hl.discovery_runs_used(NOW) == 8
 
 
+def test_unknown_source_name_is_the_typed_refusal(conn, no_network):
+    """An explicitly requested unknown source must come back as the
+    documented typed refusal, not a bare ValueError that _verb turns
+    into internal_error (sweep art_Izev3UNN suggestion 8)."""
+    with pytest.raises(hl.LeadsRefusal) as refused:
+        hl.discover_hiring_leads(conn, sources=("nonsense",))
+    assert refused.value.code == "provider_unsupported"
+    assert "nonsense" in str(refused.value)
+    assert "tavily" in refused.value.details["known_providers"]
+
+
 def test_quota_exhausted_refusal_with_utc_cap(conn, monkeypatch, no_network,
                                               app_dir):
     (app_dir / "leads.yaml").write_text("daily_discovery_cap: 1\n",

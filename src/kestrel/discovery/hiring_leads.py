@@ -1045,9 +1045,15 @@ def build_source(name: str, *, client=None,
     try:
         builder = SOURCE_BUILDERS[name]
     except KeyError:
-        raise ValueError(
-            f"unknown lead source {name!r}; known: {sorted(SOURCE_BUILDERS)}"
-        ) from None
+        # The documented typed refusal, not a bare ValueError — an
+        # explicitly requested unknown source must degrade to the
+        # refusal envelope, not internal_error (sweep art_Izev3UNN
+        # suggestion 8).
+        raise LeadsRefusal(
+            PROVIDER_UNSUPPORTED,
+            f"unknown lead source {name!r}; known: {sorted(SOURCE_BUILDERS)}",
+            {"provider": name,
+             "known_providers": sorted(SOURCE_BUILDERS)}) from None
     return builder(client, sleep=sleep)
 
 
