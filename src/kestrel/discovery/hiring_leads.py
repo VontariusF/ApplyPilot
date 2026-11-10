@@ -121,6 +121,25 @@ class HiringLeadsError(Exception):
     """
 
 
+class DiscoveryScanError(HiringLeadsError):
+    """A provider error that aborted a scan already in progress.
+
+    The failure reached the provider-scan stage, so the run counts
+    against the daily cap (the scan loop's finally records it — sweep
+    art_Izev3UNN finding 3), and the counts accumulated before the
+    failure ride the exception: leads already upserted from earlier
+    companies are stored, and the source_error envelope reports them
+    instead of dropping them.
+    """
+
+    def __init__(self, message: str, *, discovered: int,
+                 skipped_existing: int, sources_used: list[str]):
+        super().__init__(message)
+        self.discovered = discovered
+        self.skipped_existing = skipped_existing
+        self.sources_used = sources_used
+
+
 # ---------------------------------------------------------------------------
 # LinkedIn boundaries — the structural half of the no-scraping guardrail
 # ---------------------------------------------------------------------------
@@ -212,9 +231,10 @@ def clean_profile_title(raw_title: object) -> str | None:
 
 
 # The mask for --reveal-gated personal data (the spec §5 payload shape).
-# It lives here — not in the agent layer — so the masked verb output and
-# the store's title-repair backfill (backfill_lead_title_privacy) replace
-# names with the identical token: two surfaces, one contract.
+# It lives here — not in the agent layer — so every masked surface
+# (the verb JSON blocks, the portal's masked reads) replaces names with
+# the identical token: many surfaces, one contract. The store itself
+# keeps the raw title — masking happens at output only.
 LEADS_REDACTED = "--reveal-gated--"
 
 
@@ -1166,7 +1186,10 @@ def discover_hiring_leads(conn: sqlite3.Connection | None = None,
     provider is the typed provider_unsupported refusal. Unavailable
     requested sources are skipped with a warning when at least one
     other source can run; the typed refusals raise LeadsRefusal
-    otherwise. Returns the payload dict the agent verb prints.
+    otherwise. A provider error that aborts a scan mid-run still
+    counts the run against the cap (it reached the provider-scan
+    stage) and raises DiscoveryScanError carrying the partial
+    counts. Returns the payload dict the agent verb prints.
     """
     if conn is None:
         conn = get_connection()
@@ -1256,27 +1279,44 @@ def discover_hiring_leads(conn: sqlite3.Connection | None = None,
         companies = companies[:max(0, limit)]
 
     # Scan. A mid-run bot-wall retires that source terminally and the
-    # run continues honestly with the remaining sources.
+    # run continues honestly with the remaining sources. A provider
+    # error that aborts the scan still reached the provider-scan
+    # stage, so the finally records the run — an uncounted failure
+    # would burn provider spend the daily cap can never see, and every
+    # retry would rescan all companies from the top (sweep
+    # art_Izev3UNN finding 3).
     discovered = skipped_existing = 0
     used_sources: list[str] = []
     retired_now: dict[str, str] = {}
-    for source in active:
-        used_sources.append(source.name)
-        for company in companies:
-            try:
-                leads = source.discover_for_company(company)
-            except SourceRetired as exc:
-                retire_source(source.name, str(exc), now=now)
-                retired_now[source.name] = str(exc)
-                log.warning("Source %s retired: %s", source.name, exc)
-                break
-            for lead in leads:
-                if upsert_hiring_lead(conn, **lead):
-                    discovered += 1
-                else:
-                    skipped_existing += 1
-
-    used_after = _record_discovery_run(now)
+    used_after: int
+    try:
+        for source in active:
+            used_sources.append(source.name)
+            for company in companies:
+                try:
+                    leads = source.discover_for_company(company)
+                except SourceRetired as exc:
+                    retire_source(source.name, str(exc), now=now)
+                    retired_now[source.name] = str(exc)
+                    log.warning("Source %s retired: %s", source.name, exc)
+                    break
+                for lead in leads:
+                    if upsert_hiring_lead(conn, **lead):
+                        discovered += 1
+                    else:
+                        skipped_existing += 1
+    except HiringLeadsError as exc:
+        # The partial counts ride the error: the leads upserted from
+        # the companies scanned before the failure are stored, and the
+        # source_error envelope reports them.
+        raise DiscoveryScanError(
+            str(exc),
+            discovered=discovered,
+            skipped_existing=skipped_existing,
+            sources_used=list(used_sources),
+        ) from exc
+    finally:
+        used_after = _record_discovery_run(now)
     without_domain = sum(1 for c in companies if not c.get("domain"))
     return {
         "sources_requested": list(requested),
