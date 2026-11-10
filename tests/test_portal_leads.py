@@ -110,6 +110,21 @@ def test_leads_route_matched_role_absent_when_no_taxonomy_hit(
     assert queries.matched_role("Chief People Officer") is None
 
 
+def test_matched_role_whole_word_matches_the_attribution_gate():
+    """The badge must use the attribution gate's whole-word rule: a
+    fused token like 'Salesforce Engineer' is not a 'Sales' hit, while
+    a whole-word term still badges regardless of surrounding
+    punctuation (sweep art_Izev3UNN suggestion 6)."""
+    assert queries.matched_role(
+        "Salesforce Engineer", ("Sales",)) is None
+    assert queries.matched_role(
+        "Talented Intern", ("Talent",)) is None
+    assert queries.matched_role(
+        "Talent Partner - Acme", ("Talent Partner",)) == "Talent Partner"
+    assert queries.matched_role(
+        "Talent@Acme", ("Talent",)) == "Talent"
+
+
 def test_leads_table_route_renders_board_partial(portal_client, seeded_profile):
     client, _ = portal_client
     seed_company()
