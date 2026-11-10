@@ -962,7 +962,7 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
             total, by_site, pending_detail, with_description, undescribed,
             scored, scored_fresh, score_failed, unscored, pending_score,
             tailored, untailored_eligible, with_cover_letter, applied,
-            score_distribution
+            prepared, score_distribution
 
     Accounting (S2): `unscored`, `scored_fresh` and `score_failed` are
     disjoint and partition the described rows —
@@ -1153,6 +1153,15 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
         f"AND {APPLY_URL_VALID_SQL} "
         "AND fit_score >= ?",
         (config.DEFAULTS["min_score"],),
+    ).fetchone()[0]
+
+    # F4: prepared is the human-confirmation checkpoint (apply-result
+    # --status prepared; applied_at stays NULL). Additive beside
+    # ready_to_apply — each row stays an independent lens (S2-style), so
+    # the awaiting-approval gate is visible accounting instead of a job
+    # silently merging into the ready bucket (or dropping out of view).
+    stats["prepared"] = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE apply_status = 'prepared'"
     ).fetchone()[0]
 
     return stats

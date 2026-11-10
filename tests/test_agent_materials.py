@@ -507,3 +507,81 @@ def test_job_next_enrich_and_cover_reveal_carry_facts(seeded_store):
         assert revealed["resume_facts"]["preserved_projects"] == \
             [f"Built {FACTS_MARKER}"]
         assert "profile" not in revealed  # the tailor slice is tailor-only
+
+
+# ---------------------------------------------------------------------------
+# F2: `@file` arguments — tailor --data and cover --text read from disk
+# ---------------------------------------------------------------------------
+
+def test_tailor_data_at_file_persists(seeded_store, tmp_path):
+    """README-documented `--data @template.json` works: the file's
+    contents flow through the unchanged validation path and persist."""
+    _score(seeded_store, "https://jobs/stranded")
+    template = tmp_path / "template.json"
+    template.write_text(GOOD_TAILOR_DATA, encoding="utf-8")
+
+    result = run("tailor", "--url", "https://jobs/stranded",
+                 "--data", f"@{template}")
+    assert result.exit_code == 0, result.stdout
+    assert _row(seeded_store, "https://jobs/stranded")["tailored_resume_path"]
+
+
+def test_tailor_missing_file_is_typed_usage_refusal(seeded_store, tmp_path):
+    """An unreadable @path is an invalid_usage envelope, not a traceback —
+    and nothing is persisted."""
+    _score(seeded_store, "https://jobs/stranded")
+    result = run("tailor", "--url", "https://jobs/stranded",
+                 "--data", f"@{tmp_path / 'missing.json'}")
+    assert result.exit_code != 0
+    envelope = payload_of(result)
+    assert envelope["error"]["code"] == "invalid_usage"
+    assert _row(seeded_store, "https://jobs/stranded")["tailored_resume_path"] is None
+
+
+def test_tailor_malformed_file_keeps_invalid_resume_data(seeded_store, tmp_path):
+    """A readable file with bad JSON keeps the existing refusal semantics —
+    post-read validation is unchanged (F2)."""
+    _score(seeded_store, "https://jobs/stranded")
+    template = tmp_path / "malformed.json"
+    template.write_text("not json at all", encoding="utf-8")
+
+    result = run("tailor", "--url", "https://jobs/stranded",
+                 "--data", f"@{template}")
+    assert result.exit_code != 0
+    envelope = payload_of(result)
+    assert envelope["error"]["code"] == "invalid_resume_data"
+    assert envelope["error"]["details"]["retryable"] is True
+
+
+def test_tailor_inline_data_passes_through_unchanged(seeded_store):
+    """Regression: an inline value (no @ prefix) behaves exactly as before."""
+    _score(seeded_store, "https://jobs/stranded")
+    result = run("tailor", "--url", "https://jobs/stranded",
+                 "--data", GOOD_TAILOR_DATA)
+    assert result.exit_code == 0, result.stdout
+    assert _row(seeded_store, "https://jobs/stranded")["tailored_resume_path"]
+
+
+def test_cover_text_at_file_persists(seeded_store, tmp_path):
+    """The same @file vocabulary on cover --text — a long letter is the
+    other payload you do not want to inline."""
+    _score(seeded_store, "https://jobs/stranded")
+    first = run("tailor", "--url", "https://jobs/stranded", "--data", GOOD_TAILOR_DATA)
+    assert first.exit_code == 0, first.stdout
+
+    letter = tmp_path / "letter.txt"
+    letter.write_text(GOOD_COVER, encoding="utf-8")
+    result = run("cover", "--url", "https://jobs/stranded", "--text", f"@{letter}")
+    assert result.exit_code == 0, result.stdout
+    assert _row(seeded_store, "https://jobs/stranded")["cover_letter_path"]
+
+
+def test_cover_missing_file_is_typed_usage_refusal(seeded_store, tmp_path):
+    _score(seeded_store, "https://jobs/stranded")
+    first = run("tailor", "--url", "https://jobs/stranded", "--data", GOOD_TAILOR_DATA)
+    assert first.exit_code == 0, first.stdout
+
+    result = run("cover", "--url", "https://jobs/stranded",
+                 "--text", f"@{tmp_path / 'missing.txt'}")
+    assert result.exit_code != 0
+    assert payload_of(result)["error"]["code"] == "invalid_usage"

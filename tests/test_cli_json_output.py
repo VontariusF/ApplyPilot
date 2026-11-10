@@ -35,6 +35,7 @@ STATS = {
     "with_cover_letter": 1,
     "cover_exhausted": 0,
     "ready_to_apply": 1,
+    "prepared": 0,
     "applied": 0,
     "captcha": 1,
     "apply_errors": 0,

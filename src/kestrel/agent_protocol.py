@@ -226,6 +226,31 @@ def _verb(body: Callable[[], dict]) -> None:
               {"exception_type": type(exc).__name__})
 
 
+def _maybe_read_arg(value: str) -> str:
+    """Resolve an `@path` argument to the file's contents; pass through.
+
+    F2: the README documents `--data @template.json` — a multi-hundred-byte
+    JSON blob is quoting-hostile to inline in a shell command. Values not
+    starting with `@` are returned unchanged, so every existing inline
+    caller behaves exactly as before. JSON values never start with `@`
+    (only `{`, `[`, `"`, digit, `t`/`f`/`n`), so the prefix cannot collide
+    with a literal payload.
+    """
+    if not value.startswith("@"):
+        return value
+    path = value[1:]
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+    except OSError as exc:
+        # A missing/unreadable file is a typed usage refusal, not a
+        # traceback — the post-read validation path (extract_json and
+        # friends) is unchanged and still owns the contents' shape.
+        _fail("invalid_usage",
+              f"cannot read {path!r}: {exc.strerror or exc}",
+              {"path": path})
+
+
 # ---------------------------------------------------------------------------
 # The next payload (one authoritative shape, spec art_A71wyYS4)
 # ---------------------------------------------------------------------------
@@ -1182,7 +1207,8 @@ def tailor_cmd(
         None, "--url", help="Job URL from the job-next --stage tailor payload."),
     data: Optional[str] = typer.Option(
         None, "--data", help="The tailored resume as a JSON object (the "
-        "data_template shape; validated leniently, judge skipped)."),
+        "data_template shape; validated leniently, judge skipped). "
+        "@path reads the JSON from a file instead of an inline value."),
     reveal: bool = typer.Option(
         False, "--reveal",
         help="Include the resume text, resume_facts, and the profile slice "
@@ -1194,6 +1220,9 @@ def tailor_cmd(
         _fail("invalid_usage", "--url is required")
     if not data:
         _fail("invalid_usage", "--data is required")
+    # F2: `--data @file` reads the template from disk; inline JSON passes
+    # through unchanged.
+    data = _maybe_read_arg(data)
     _verb(lambda: _host_tailor(url, data, reveal))
 
 
@@ -1273,7 +1302,8 @@ def cover_cmd(
         None, "--url", help="Job URL from the job-next --stage cover payload."),
     text: Optional[str] = typer.Option(
         None, "--text", help="The cover letter text (starts with 'Dear "
-        "Hiring Manager,'; validated leniently)."),
+        "Hiring Manager,'; validated leniently). @path reads the text "
+        "from a file instead of an inline value."),
     reveal: bool = typer.Option(
         False, "--reveal",
         help="Include the resume text and resume_facts in the returned next payload."),
@@ -1284,6 +1314,8 @@ def cover_cmd(
         _fail("invalid_usage", "--url is required")
     if not text:
         _fail("invalid_usage", "--text is required")
+    # F2: `--text @file` — same @file vocabulary as tailor --data.
+    text = _maybe_read_arg(text)
     _verb(lambda: _host_cover(url, text, reveal))
 
 # ---------------------------------------------------------------------------

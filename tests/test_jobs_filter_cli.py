@@ -334,6 +334,86 @@ def test_cli_nonpositive_limit_is_typed_error(seeded):
     assert result.exit_code == 2
 
 
+# ---------------------------------------------------------------------------
+# F5: pruned triage table, score-desc default sort
+# ---------------------------------------------------------------------------
+
+def test_cli_default_sort_is_score_desc(seeded):
+    """No flags: rows ordered by fit_score DESC (NULLs last) — the score
+    column is the triage key and must not jump around."""
+    result = runner.invoke(app, ["jobs", "filter", "--urls"])
+    assert result.exit_code == 0, result.output
+    assert result.output.split() == [
+        "https://jobs.example/j2", "https://jobs.example/j1",
+        "https://jobs.example/j3", "https://jobs.example/j4",
+        "https://jobs.example/j5",
+    ]
+
+
+def test_cli_sort_discovered_still_works(seeded):
+    """Only the default moved: the old default key remains one flag away
+    (discovered_at ties break by url ASC)."""
+    result = runner.invoke(
+        app, ["jobs", "filter", "--sort", "discovered", "--urls"])
+    assert result.exit_code == 0, result.output
+    assert result.output.split() == seeded["urls"]
+
+
+def test_cli_default_table_fits_one_line_per_record_at_120_cols(seeded,
+                                                                monkeypatch):
+    """The dogfood failure in miniature: a 5-job render at a normal
+    120-column terminal draws exactly one line per record (no_wrap +
+    ellipsis) and nothing exceeds the console width."""
+    import io
+
+    from rich.console import Console
+
+    import kestrel.cli as cli
+
+    buf = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(width=120, file=buf))
+    result = runner.invoke(app, ["jobs", "filter"])
+    assert result.exit_code == 0, result.output
+    assert "5 matching jobs" in buf.getvalue()
+
+    lines = buf.getvalue().splitlines()
+    assert all(len(line) <= 120 for line in lines)
+    # Every record renders as exactly one line: its URL appears whole,
+    # once — a wrapped row would fragment it.
+    data_lines = [line for line in lines if "jobs.example" in line]
+    assert len(data_lines) == 5
+
+
+def test_cli_default_table_shows_only_the_triage_set(seeded, monkeypatch):
+    """The pruned default table: triage columns in, rerank/flag metadata
+    out — all of it one --json/--urls call away."""
+    from rich.console import Console
+
+    import kestrel.cli as cli
+
+    # A normal-width console, so no column is squeezed into a truncated
+    # header (the 80-col CliRunner default squeezes Score to 'Scor…').
+    monkeypatch.setattr(cli, "console", Console(width=120))
+    result = runner.invoke(app, ["jobs", "filter"])
+    assert result.exit_code == 0, result.output
+    for header in ("Score", "Title", "Location", "Salary", "Posted", "URL"):
+        assert header in result.output
+    for dropped in ("Remote", "Seniority", "Stale", "Rescored"):
+        assert dropped not in result.output
+
+
+def test_cli_json_still_emits_all_job_fields(seeded):
+    """Column pruning is presentation-only: --json fidelity untouched."""
+    from kestrel.cli import _JSON_JOB_FIELDS
+
+    result = runner.invoke(app, ["jobs", "filter", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["count"] == 5
+    for job in payload["jobs"]:
+        assert set(job) == set(_JSON_JOB_FIELDS)
+
+
 def test_cli_currency_without_min_salary_is_typed_error(seeded):
     result = runner.invoke(app, ["jobs", "filter", "--currency", "USD"])
     assert result.exit_code == 2
@@ -373,7 +453,10 @@ def test_cli_on_site_flag_selects_non_remote_rows(seeded):
 
 
 def test_cli_remote_flag_selects_remote_rows(seeded):
-    result = runner.invoke(app, ["jobs", "filter", "--remote", "--urls"])
+    # --sort discovered pins the order so the test stays about the flag,
+    # not the (F5) score-desc default sort.
+    result = runner.invoke(
+        app, ["jobs", "filter", "--remote", "--sort", "discovered", "--urls"])
     assert result.exit_code == 0, result.output
     assert result.output.splitlines() == [
         "https://jobs.example/j1", "https://jobs.example/j2",
@@ -382,7 +465,8 @@ def test_cli_remote_flag_selects_remote_rows(seeded):
 
 
 def test_cli_without_remote_flags_returns_both(seeded):
-    result = runner.invoke(app, ["jobs", "filter", "--urls"])
+    result = runner.invoke(
+        app, ["jobs", "filter", "--sort", "discovered", "--urls"])
     assert result.exit_code == 0, result.output
     assert result.output.splitlines() == [
         "https://jobs.example/j1", "https://jobs.example/j2",

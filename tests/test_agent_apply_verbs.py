@@ -450,6 +450,64 @@ def test_stale_prepared_checkpoint_is_reclaimable(seeded_apply_store):
     assert _row(conn, url)["apply_status"] == "in_progress"
 
 
+# ---------------------------------------------------------------------------
+# F4: prepared jobs surface in kestrel status
+# ---------------------------------------------------------------------------
+
+def test_prepared_job_counts_in_status(seeded_apply_store):
+    """seed → prepare: the awaiting-approval gate is visible accounting
+    (prepared == 1); the final applied report drains it (prepared == 0,
+    applied == 1). ready_to_apply is untouched — the rows are independent
+    lenses, additive by design."""
+    acquire = payload_of(run("apply-acquire"))
+    claim, url = acquire["claim"], acquire["job"]["url"]
+    ready_before = database.get_stats()["ready_to_apply"]
+
+    result = run("apply-result", "--url", url, "--status", "prepared",
+                 "--claim", claim)
+    assert result.exit_code == 0, result.stdout
+    stats = database.get_stats()
+    assert stats["prepared"] == 1
+    # Additive lens: the prepared row is neither subtracted from nor merged
+    # into ready_to_apply — the count is exactly what it was before.
+    assert stats["ready_to_apply"] == ready_before
+
+    # status --json serializes the raw get_stats dict, so the key follows
+    # automatically — pinned here so it cannot silently regress.
+    result = runner.invoke(app, ["status", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["prepared"] == 1
+
+    result = run("apply-result", "--url", url, "--status", "applied",
+                 "--claim", claim)
+    assert result.exit_code == 0, result.stdout
+    stats = database.get_stats()
+    assert stats["prepared"] == 0
+    assert stats["applied"] == 1
+
+
+def test_stale_prepared_reclaim_drops_prepared_count(seeded_apply_store):
+    """A stale-lock reclaim of a prepared job moves the row back to
+    in_progress — the prepared count drops with it."""
+    conn = seeded_apply_store
+    acquire = payload_of(run("apply-acquire"))
+    claim, url = acquire["claim"], acquire["job"]["url"]
+    assert run("apply-result", "--url", url, "--status", "prepared",
+               "--claim", claim).exit_code == 0
+    assert database.get_stats()["prepared"] == 1
+
+    from datetime import timedelta
+    stale_minutes = config.DEFAULTS["apply_stale_lock_minutes"]
+    stale = (datetime.now(timezone.utc)
+             - timedelta(minutes=stale_minutes + 1)).isoformat()
+    conn.execute("UPDATE jobs SET last_attempted_at = ? WHERE url = ?",
+                 (stale, url))
+    conn.commit()
+
+    assert payload_of(run("apply-acquire"))["job"]["url"] == url  # reclaimed
+    assert database.get_stats()["prepared"] == 0
+
+
 def test_captcha_is_terminal_and_never_requeued(app_dir, isolated_db):
     """A captcha outcome is recorded with the attempts ban and the queue
     predicate keeps the job out — reset_failed never requeues it either."""
