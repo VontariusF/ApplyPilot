@@ -239,18 +239,19 @@ def persist_cover_letter(conn, job: dict, letter: str,
     cl_path = Path(claim.file_path)
     cl_path.write_text(letter, encoding="utf-8")
 
-    # Generate PDF (best-effort)
-    pdf_path = None
+    # Generate styled HTML (best-effort) — the host agent prints the PDF
+    # with its own browser when wanted (spec art_VGFSMgRh).
+    html_path = None
     try:
         from kestrel.scoring.pdf import convert_to_pdf
-        pdf_path = str(convert_to_pdf(cl_path))
+        html_path = str(convert_to_pdf(cl_path))
     except Exception:
-        log.debug("PDF generation failed for %s", cl_path, exc_info=True)
+        log.debug("HTML generation failed for %s", cl_path, exc_info=True)
 
     result = {
         "url": job["url"],
         "path": str(cl_path),
-        "pdf_path": pdf_path,
+        "html_path": html_path,
         "title": job["title"],
         "site": job["site"],
         "status": validation_status,
@@ -321,7 +322,7 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
         except Exception as e:
             result = {
                 "url": job["url"], "title": job["title"], "site": job["site"],
-                "path": None, "pdf_path": None, "error": str(e), "version_id": None,
+                "path": None, "html_path": None, "error": str(e), "version_id": None,
                 # P1-1: infra failures (provider down/timeout/5xx) must not
                 # burn the job's attempt budget — classified here, exempted
                 # in the persist loop below.

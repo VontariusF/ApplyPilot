@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Text-to-PDF conversion for tailored resumes and cover letters.
+"""Styled HTML rendering for tailored resumes and cover letters.
 
-Parses the structured text resume format, renders via an HTML/CSS template,
-and exports to PDF using headless Chromium via Playwright.
+Kestrel writes print-ready styled HTML and never launches a browser or
+renders a PDF itself (spec art_VGFSMgRh): the host agent prints the HTML
+to PDF with its own browser when a PDF is wanted. Any path still asking
+for a PDF gets the typed ``PdfRenderSteer`` — a steer to print the HTML,
+never a browser launch and never a silent fallback.
 """
 
 import logging
@@ -339,62 +342,148 @@ li {{
 </html>"""
 
 
-# ── PDF Renderer ─────────────────────────────────────────────────────────
+# ── Cover Letter HTML ────────────────────────────────────────────────────
 
-def render_pdf(html: str, output_path: str) -> None:
-    """Render HTML to PDF using Playwright's headless Chromium.
+def build_cover_letter_html(letter_text: str) -> str:
+    """Build letter-styled HTML from cover letter text.
+
+    A letter is freeform prose, not the ALL-CAPS section format, so this
+    is a separate builder from :func:`build_html`: blank-line-separated
+    blocks become paragraphs (single newlines inside a block — the
+    "Sincerely,\\nName" sign-off — become line breaks). The sign-off's
+    final line, when it reads as a bare name, headlines the letter.
 
     Args:
-        html: Complete HTML string.
-        output_path: Path to write the PDF file.
+        letter_text: Full cover letter text.
+
+    Returns:
+        Complete HTML string, print-ready for the host agent's browser.
     """
-    from kestrel.browser import sync_playwright
+    blocks = [b.strip() for b in letter_text.strip().split("\n\n") if b.strip()]
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch()
-        page = browser.new_page()
-        page.set_content(html, wait_until="networkidle")
-        page.pdf(
-            path=output_path,
-            format="Letter",
-            margin={"top": "0", "right": "0", "bottom": "0", "left": "0"},
-            print_background=True,
+    sign_off = ""
+    if blocks:
+        last_line = blocks[-1].splitlines()[-1].strip()
+        # A bare name: short, no greeting punctuation, no digits.
+        if last_line and len(last_line.split()) <= 4 \
+                and not any(c in last_line for c in ",:0123456789"):
+            sign_off = last_line
+
+    paragraphs = "\n".join(
+        "<p>"
+        + "<br>".join(line.strip() for line in block.splitlines())
+        + "</p>\n"
+        for block in blocks
+    )
+    header_html = f'<div class="letter-name">{sign_off}</div>' if sign_off else ""
+    title = f"Cover Letter — {sign_off}" if sign_off else "Cover Letter"
+
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>{title}</title>
+<style>
+@page {{
+    size: letter;
+    margin: 1in;
+}}
+* {{
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}}
+body {{
+    font-family: 'Calibri', 'Segoe UI', Arial, sans-serif;
+    font-size: 11pt;
+    line-height: 1.45;
+    color: #1a1a1a;
+}}
+.letter {{
+    max-width: 7in;
+    margin: 0 auto;
+    padding: 0.5in;
+}}
+.letter-name {{
+    font-size: 13pt;
+    font-weight: 600;
+    color: #1a3a5c;
+    margin-bottom: 12px;
+    padding-bottom: 6px;
+    border-bottom: 1.5px solid #2a7ab5;
+}}
+p {{
+    margin-bottom: 12px;
+}}
+</style>
+</head>
+<body>
+<div class="letter">
+{header_html}
+{paragraphs}
+</div>
+</body>
+</html>"""
+
+
+# ── Conversion Entry Point ────────────────────────────────────────────────
+
+class PdfRenderSteer(Exception):
+    """A PDF was requested; Kestrel renders styled HTML only.
+
+    The message is the steer: print the styled HTML to PDF with the host
+    agent's own browser. No pure-Python renderer exists and none is added
+    (spec art_VGFSMgRh — the host does this natively).
+    """
+
+    def __init__(self, html_path: Path):
+        self.html_path = html_path
+        super().__init__(
+            "PDF rendering was removed — Kestrel writes styled HTML only. "
+            f"Print the HTML to PDF with the host agent's browser: {html_path}"
         )
-        browser.close()
 
-
-# ── Public API ───────────────────────────────────────────────────────────
 
 def convert_to_pdf(
-    text_path: Path, output_path: Path | None = None, html_only: bool = False
+    text_path: Path,
+    output_path: Path | None = None,
+    html_only: bool = True,
+    kind: str | None = None,
 ) -> Path:
-    """Convert a text resume/cover letter to PDF.
+    """Convert a text resume/cover letter to styled HTML.
 
     Args:
         text_path: Path to the .txt file to convert.
         output_path: Optional override for the output path. Defaults to same
-            name with .pdf extension.
-        html_only: If True, output HTML instead of PDF.
+            name with .html extension.
+        html_only: HTML is the only output Kestrel writes (spec
+            art_VGFSMgRh); the default True is the contract. Passing False
+            raises :class:`PdfRenderSteer` — print the HTML with the host
+            agent's browser instead.
+        kind: "resume" or "cover_letter". Defaults to inferring from the
+            filename (``_CL.txt`` stems are cover letters).
 
     Returns:
-        Path to the generated PDF (or HTML) file.
+        Path to the generated HTML file.
     """
     text_path = Path(text_path)
+    doc_kind = kind or (
+        "cover_letter" if text_path.name.endswith("_CL.txt") else "resume"
+    )
+
+    # Compute the output path before building: the steer must name the
+    # file it is steering toward even when HTML was never written.
+    out = Path(output_path) if output_path else text_path.with_suffix(".html")
+    if not html_only:
+        raise PdfRenderSteer(out)
+
     text = text_path.read_text(encoding="utf-8")
-    resume = parse_resume(text)
-    html = build_html(resume)
-
-    if html_only:
-        out = output_path or text_path.with_suffix(".html")
-        out = Path(out)
-        out.write_text(html, encoding="utf-8")
-        log.info("HTML generated: %s", out)
-        return out
-
-    out = output_path or text_path.with_suffix(".pdf")
-    out = Path(out)
-    render_pdf(html, str(out))
-    log.info("PDF generated: %s", out)
+    if doc_kind == "cover_letter":
+        html = build_cover_letter_html(text)
+    else:
+        html = build_html(parse_resume(text))
+    out.write_text(html, encoding="utf-8")
+    log.info("HTML generated: %s", out)
     return out
 
 
@@ -423,9 +512,9 @@ def _settle_job_pdf_states(convert_budget: int | None = None) -> int:
     settles that state — otherwise a row whose .txt never changes keeps
     the count above zero and the pdf stage busy-loops. Three settle paths:
 
-      - a matching PDF already exists on disk (including one this pass
-        just generated): mark pdf_generated_at — the work is done;
-      - the source .txt exists but has no PDF (e.g. outside the
+      - a matching styled HTML already exists on disk (including one this
+        pass just generated): mark pdf_generated_at — the work is done;
+      - the source .txt exists but has no HTML (e.g. outside the
         TAILORED_DIR scan): convert it here, so the row settles
         wherever the file lives;
       - the source .txt has vanished: burn one pdf attempt so the row
@@ -433,10 +522,10 @@ def _settle_job_pdf_states(convert_budget: int | None = None) -> int:
         tailor and cover stages use.
 
     Args:
-        convert_budget: Maximum number of renders this reconciliation may
+        convert_budget: Maximum number of conversions this reconciliation may
             attempt (None = unbounded). Bookkeeping-only updates — marking
-            an existing PDF generated, burning an attempt for a vanished
-            source — always run; only renders consume budget. Rows beyond
+            an existing HTML generated, burning an attempt for a vanished
+            source — always run; only conversions consume budget. Rows beyond
             the budget simply stay pending for the next pass.
 
     Returns:
@@ -451,21 +540,21 @@ def _settle_job_pdf_states(convert_budget: int | None = None) -> int:
         "AND tailored_resume_path LIKE '%.txt' "
         "AND pdf_generated_at IS NULL "
         # Cap parity with pipeline._PENDING_SQL: an exhausted row is not
-        # pending, so reconciliation must not re-render it either (it
-        # would re-invoke Chromium for a known poison input forever).
+        # pending, so reconciliation must not re-convert it either (it
+        # would convert a known poison input forever).
         f"AND COALESCE(pdf_attempts, 0) < {PDF_MAX_ATTEMPTS}"
     ).fetchall()
 
     # Pass 1 — classify rows and do all filesystem work BEFORE any DB
-    # write: an open SQLite write transaction held across a Chromium
-    # render would block other stages' writes for the render's duration.
+    # write: an open SQLite write transaction held across a file
+    # conversion would block other stages' writes for its duration.
     generated: list[tuple[str, Path]] = []
     failed: list[tuple[str, Path]] = []
     conversions: list[tuple[str, Path]] = []
     for row in rows:
         txt = Path(row["tailored_resume_path"])
-        pdf = txt.with_suffix(".pdf")
-        if pdf.exists():
+        html = txt.with_suffix(".html")
+        if html.exists():
             generated.append((row["url"], txt))
         elif txt.exists():
             if convert_budget is not None and len(conversions) >= convert_budget:
@@ -492,9 +581,9 @@ def _settle_job_pdf_states(convert_budget: int | None = None) -> int:
     settled = 0
     for url, txt in generated:
         # Re-verify at write time: with history off a concurrent
-        # reset_job_tailoring deletes the stale .pdf — invalidating this
+        # reset_job_tailoring deletes the stale .html — invalidating this
         # mark keeps the row pending so the regenerated text converts.
-        if not txt.with_suffix(".pdf").exists():
+        if not txt.with_suffix(".html").exists():
             continue
         cur = conn.execute(
             "UPDATE jobs SET pdf_generated_at = ? "
@@ -513,10 +602,12 @@ def _settle_job_pdf_states(convert_budget: int | None = None) -> int:
 
 
 def batch_convert(limit: int = 50, url: str | None = None) -> int:
-    """Convert .txt files in TAILORED_DIR that don't have corresponding PDFs.
+    """Convert .txt files in TAILORED_DIR that lack their styled HTML.
 
-    Scans for .txt files (excluding _JOB.txt and _REPORT.json), checks if a
-    .pdf with the same stem already exists, and converts any that are missing.
+    Scans for .txt files (excluding _JOB.txt and _REPORT.json), checks if an
+    .html with the same stem already exists, and converts any that are missing.
+    Output is print-ready styled HTML — the host agent prints PDFs with its
+    own browser (spec art_VGFSMgRh); nothing here launches one.
 
     Afterwards, reconciles the jobs table's PDF bookkeeping with the
     filesystem (see _settle_job_pdf_states) so the streaming pipeline's
@@ -527,12 +618,12 @@ def batch_convert(limit: int = 50, url: str | None = None) -> int:
         limit: Maximum number of files to convert.
         url: When set, convert only that job's tailored document (P3-3): a
             single-job run must not spend its pass rendering up to `limit`
-            unrelated pending jobs through Chromium. Reconciliation stays
+            unrelated pending jobs through conversion. Reconciliation stays
             global — it is cheap filesystem/DB bookkeeping and settles
             stale accounting that would otherwise keep rows pending.
 
     Returns:
-        Number of PDFs generated.
+        Number of styled HTML documents generated.
     """
     from kestrel.database import get_connection
 
@@ -547,8 +638,8 @@ def batch_convert(limit: int = 50, url: str | None = None) -> int:
 
     # Skip files whose job row has exhausted its pdf attempts (cap parity
     # with pipeline._PENDING_SQL): the pipeline no longer counts them as
-    # pending, so re-invoking Chromium for a known poison input on every
-    # call would defeat the bounded-retry semantics.
+    # pending, so converting a known poison input on every call would
+    # defeat the bounded-retry semantics.
     exhausted = {
         row["tailored_resume_path"]
         for row in conn.execute(
@@ -578,13 +669,13 @@ def batch_convert(limit: int = 50, url: str | None = None) -> int:
             if not f.name.endswith("_JOB.txt")
         ]
 
-    # Filter to those without a corresponding PDF
+    # Filter to those without a corresponding styled HTML
     to_convert: list[Path] = []
     for f in candidates:
         if str(f) in exhausted:
             continue
-        pdf_path = f.with_suffix(".pdf")
-        if not pdf_path.exists():
+        html_path = f.with_suffix(".html")
+        if not html_path.exists():
             to_convert.append(f)
         if len(to_convert) >= limit:
             break
@@ -592,28 +683,28 @@ def batch_convert(limit: int = 50, url: str | None = None) -> int:
     converted = 0
     attempted = 0
     if to_convert:
-        log.info("Converting %d files to PDF...", len(to_convert))
+        log.info("Converting %d files to styled HTML...", len(to_convert))
         for f in to_convert:
-            attempted += 1  # a failed render spends the Chromium budget too
+            attempted += 1  # a failed conversion spends the budget too
             try:
                 convert_to_pdf(f)
                 converted += 1
             except Exception as e:
                 log.error("Failed to convert %s: %s", f.name, e)
                 _record_pdf_failure(f)
-        log.info("Done: %d/%d PDFs generated in %s", converted, len(to_convert), TAILORED_DIR)
+        log.info("Done: %d/%d HTML documents generated in %s", converted, len(to_convert), TAILORED_DIR)
     else:
-        log.info("All text files already have PDFs.")
+        log.info("All text files already have styled HTML.")
 
     # Settle the jobs table's PDF bookkeeping so the streaming pipeline's
-    # pending count converges (rows whose PDF exists or whose source is
+    # pending count converges (rows whose HTML exists or whose source is
     # gone must not pend forever). Runs on every exit path — including
     # when nothing needed converting, which is exactly the stale-
     # accounting state that used to busy-loop the pdf stage. The
-    # reconciliation's render quota is whatever is left of this call's
-    # limit, counting failed renders — a poison file must not get a
-    # second Chromium call through the reconciliation pass.
+    # reconciliation's conversion quota is whatever is left of this call's
+    # limit, counting failed conversions — a poison file must not get a
+    # second conversion through the reconciliation pass.
     settled = _settle_job_pdf_states(convert_budget=limit - attempted)
     if settled:
-        log.info("Settled %d job(s) with PDFs already on disk.", settled)
+        log.info("Settled %d job(s) with styled HTML already on disk.", settled)
     return converted

@@ -1948,12 +1948,13 @@ def reset_job_tailoring(conn: sqlite3.Connection, url: str,
     Also clears the PDF bookkeeping: the new resume is a different document,
     so the stale pdf_generated_at/pdf_attempts of the previous one must not
     keep it out of the pdf stage's pending count. With history off the
-    regenerated resume overwrites the same .txt stem, so the previous .pdf
-    at that stem is deleted — it renders the OLD resume and PDF
+    regenerated resume overwrites the same .txt stem, so the previous
+    output at that stem is deleted — it renders the OLD resume and PDF
     reconciliation would otherwise mark the regenerated document as done
-    from the stale file. With history on the replacement lands at a fresh
-    _v{N} stem; the old .txt/.pdf pair stays on disk — history is never
-    deleted. Version rows also stay on disk in both modes.
+    from the stale file. The .pdf sibling is deleted too: legacy output
+    from the pre-HTML Chromium renderer. With history on the replacement
+    lands at a fresh _v{N} stem; the old pairs stay on disk — history is
+    never deleted. Version rows also stay on disk in both modes.
     Returns True when the job exists.
     """
     row = conn.execute(
@@ -1964,14 +1965,17 @@ def reset_job_tailoring(conn: sqlite3.Connection, url: str,
 
     old_path = row["tailored_resume_path"]
     if old_path and old_path.lower().endswith(".txt") and not history_enabled():
-        stale_pdf = Path(old_path).with_suffix(".pdf")
-        try:
-            stale_pdf.unlink()
-        except FileNotFoundError:
-            pass  # nothing to invalidate
-        except OSError as e:
-            log.warning("Could not remove stale PDF %s during re-tailor "
-                        "reset: %s", stale_pdf, e)
+        # .html is the current print-ready output, .pdf the legacy one —
+        # either settling on disk would mark the regenerated resume done.
+        for suffix in (".html", ".pdf"):
+            stale_out = Path(old_path).with_suffix(suffix)
+            try:
+                stale_out.unlink()
+            except FileNotFoundError:
+                pass  # nothing to invalidate
+            except OSError as e:
+                log.warning("Could not remove stale output %s during "
+                            "re-tailor reset: %s", stale_out, e)
 
     sets = ["tailored_resume_path = NULL", "tailored_at = NULL", "tailor_attempts = 0",
             "pdf_generated_at = NULL", "pdf_attempts = 0"]

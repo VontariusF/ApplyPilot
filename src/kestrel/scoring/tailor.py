@@ -557,20 +557,22 @@ def persist_tailored(conn, job: dict, tailored_text: str, report: dict) -> dict:
     report_path = txt_path.with_name(txt_path.stem + "_REPORT.json")
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
-    # Generate PDF for approved resumes (best-effort)
+    # Generate styled HTML for approved resumes (best-effort). The host
+    # agent prints the HTML to PDF with its own browser when a PDF is
+    # wanted (spec art_VGFSMgRh); nothing here launches a browser.
     # "approved_with_judge_warning" is also a success — resume was generated.
-    pdf_path = None
+    html_path = None
     if report["status"] in ("approved", "approved_with_judge_warning"):
         try:
             from kestrel.scoring.pdf import convert_to_pdf
-            pdf_path = str(convert_to_pdf(txt_path))
+            html_path = str(convert_to_pdf(txt_path))
         except Exception:
-            log.debug("PDF generation failed for %s", txt_path, exc_info=True)
+            log.debug("HTML generation failed for %s", txt_path, exc_info=True)
 
     return {
         "url": job["url"],
         "path": str(txt_path),
-        "pdf_path": pdf_path,
+        "html_path": html_path,
         "title": job["title"],
         "site": job["site"],
         "status": report["status"],
