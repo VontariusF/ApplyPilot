@@ -840,10 +840,12 @@ def test_name_variants_are_exact_prefixes_and_first_last_pair():
         "Julia Casey Az",   # exact — scrubbed first, longest first
         "Julia Casey",      # leading 2-token prefix (the live-run leak)
         "Julia Az",         # first+last pair (reordered headline)
+        "Az Julia",         # last+first pair (the reversed-order leak)
     ]
-    # A 2-token name: exact IS the 2-token prefix and the first+last
-    # pair — one variant, no duplicates.
-    assert hl.lead_title_name_variants("Jane Doe") == ["Jane Doe"]
+    # A 2-token name: the exact string IS the first+last pair, so only
+    # its reversed order is a distinct variant — the finding-1 leak
+    # shape for two-token names ('Green Anne' for 'Anne Green').
+    assert hl.lead_title_name_variants("Jane Doe") == ["Jane Doe", "Doe Jane"]
     # A single-token name has no trustworthy multi-token variant; the
     # exact string is all that may be scrubbed.
     assert hl.lead_title_name_variants("Cher") == ["Cher"]
