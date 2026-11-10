@@ -446,7 +446,7 @@ def backfill_seniority(conn: sqlite3.Connection) -> int:
 
 
 def backfill_company_identity(conn: sqlite3.Connection) -> int:
-    """Resolve company/company_domain for rows that have neither.
+    """Resolve company (and its domain) for rows that have no company.
 
     Resolution order (hiring-leads spec art_u0YGUqpk §1): JobSpy's
     parsed name (persisted at ingestion going forward), the Workday
@@ -459,6 +459,12 @@ def backfill_company_identity(conn: sqlite3.Connection) -> int:
     overwritten, and a row that defeats the resolvers today (e.g. a
     Workday slug missing from the registry) stays a candidate for a
     later run. Returns the number of rows that gained an identity.
+
+    There is deliberately no domain-only backfill: the resolver couples
+    the domain to a resolved name (domain_for_company runs only when a
+    name was found), so a row with a company but a NULL domain is not a
+    candidate — its domain was already derived-or-absent at write time.
+    Docstring and code aligned per sweep art_Izev3UNN suggestion 5.
     """
     from kestrel.company_identity import resolve_company_identity
     from kestrel.discovery.workday import load_employers

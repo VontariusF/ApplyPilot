@@ -11,6 +11,7 @@ import pytest
 
 from kestrel.database import (
     LEAD_SOURCE_SERP,
+    backfill_company_identity,
     company_fit_aggregates,
     init_db,
     refresh_company_identity,
@@ -150,6 +151,32 @@ def test_upsert_still_inserts_a_distinct_person(conn):
     assert _upsert_jane(conn, "https://linkedin.com/in/john-smith",
                         full_name="John Smith",
                         title="John Smith - Recruiter") is True
+
+
+# ---------------------------------------------------------------------------
+# Suggestion 5: no domain-only backfill — code and docstring agree
+# ---------------------------------------------------------------------------
+
+
+def test_backfill_leaves_company_set_rows_alone(conn):
+    """A row with a company but a NULL domain is not a backfill
+    candidate: the resolver couples the domain to a resolved name, so
+    no domain-only backfill exists — the docstring now says so
+    (sweep art_Izev3UNN suggestion 5)."""
+    conn.execute(
+        "INSERT INTO jobs (url, title, company, company_domain, fit_score, "
+        "discovered_at) VALUES (?, ?, ?, NULL, 90, ?)",
+        ("https://example.co/careers/engineer", "Engineer at Example Co",
+         "Example Co", NOW),
+    )
+    conn.commit()
+    assert backfill_company_identity(conn) == 0
+    row = conn.execute(
+        "SELECT company, company_domain FROM jobs "
+        "WHERE url = 'https://example.co/careers/engineer'"
+    ).fetchone()
+    assert row["company"] == "Example Co"
+    assert row["company_domain"] is None
 
 
 # ---------------------------------------------------------------------------
