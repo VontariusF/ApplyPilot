@@ -378,6 +378,31 @@ def test_leads_list_redacts_without_reveal_and_reveals_with_it(conn):
     assert lead["profile_url"] == "https://www.linkedin.com/in/jane-doe"
 
 
+def test_leads_list_masks_name_variant_in_title(conn):
+    # 2026-11-10 live run: the title carries 'Julia Casey' while the
+    # slug-parsed full_name is 'Julia Casey Az' — the exact-string
+    # scrubber missed it and the masked output leaked the name.
+    _seed_lead(conn, "https://www.linkedin.com/in/julia-casey-az",
+               full_name="Julia Casey Az",
+               title="Julia Casey - Senior Business Recruiter @ Brex "
+                     "| Strategic Talent")
+    conn.commit()
+
+    masked = payload_of(run("leads-list"))
+    lead = masked["leads"][0]
+    assert lead["title"].startswith(_LEADS_REDACTED)
+    assert "Julia" not in masked and "Casey" not in masked
+    assert "Julia" not in run("leads-list").stdout
+
+    # The repair pass runs at startup (init_db), so the stored title is
+    # already scrubbed by the time any later verb reads it — --reveal
+    # shows the repaired headline, not the leaky original.
+    revealed = payload_of(run("leads-list", "--reveal"))
+    assert revealed["leads"][0]["title"] == (
+        "--reveal-gated-- - Senior Business Recruiter @ Brex "
+        "| Strategic Talent")
+
+
 # ---------------------------------------------------------------------------
 # Flag validation — typed envelopes, never usage prose
 # ---------------------------------------------------------------------------

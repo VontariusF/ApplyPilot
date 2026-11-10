@@ -18,6 +18,7 @@ import pytest
 from kestrel import config
 from kestrel.database import (
     LEAD_SOURCES,
+    LEAD_SOURCE_TAVILY,
     LEAD_STATUSES,
     init_db,
     refresh_company_identity,
@@ -821,3 +822,134 @@ def test_provider_keys_join_the_redaction_boundary(monkeypatch):
     assert "serp-secret-value" in values
     assert "tavily-secret-value" in values
     assert "firecrawl-secret-value" in values
+
+
+# ---------------------------------------------------------------------------
+# Title name-variant scrubbing (privacy: 2026-11-10 live run)
+#
+# The stored full_name is slug-derived; provider titles often carry a
+# shorter variant of it ('Julia Casey' for parsed 'Julia Casey Az').
+# The scrubber replaced the exact string only — the variant leaked in
+# masked output and on disk. The contract now: mask the exact name and
+# its multi-token variants, whole-word and conservatively.
+# ---------------------------------------------------------------------------
+
+
+def test_name_variants_are_exact_prefixes_and_first_last_pair():
+    assert hl.lead_title_name_variants("Julia Casey Az") == [
+        "Julia Casey Az",   # exact — scrubbed first, longest first
+        "Julia Casey",      # leading 2-token prefix (the live-run leak)
+        "Julia Az",         # first+last pair (reordered headline)
+    ]
+    # A 2-token name: exact IS the 2-token prefix and the first+last
+    # pair — one variant, no duplicates.
+    assert hl.lead_title_name_variants("Jane Doe") == ["Jane Doe"]
+    # A single-token name has no trustworthy multi-token variant; the
+    # exact string is all that may be scrubbed.
+    assert hl.lead_title_name_variants("Cher") == ["Cher"]
+    assert hl.lead_title_name_variants("") == []
+
+
+def test_scrub_lead_title_masks_truncated_variant():
+    # The live-run shape: Tavily's title carries 'Julia Casey' while
+    # the parsed full_name is 'Julia Casey Az'.
+    assert hl.scrub_lead_title(
+        "Julia Casey - Senior Business Recruiter @ Brex | Strategic Talent",
+        "Julia Casey Az",
+    ) == ("--reveal-gated-- - Senior Business Recruiter @ Brex "
+          "| Strategic Talent")
+
+
+def test_scrub_lead_title_masks_exact_name_without_double_masking():
+    # Exact match is consumed first; a shorter variant can never
+    # fragment the mask into '<mask> Az'.
+    scrubbed = hl.scrub_lead_title("Julia Casey Az - Recruiter @ Brex",
+                                   "Julia Casey Az")
+    assert scrubbed == "--reveal-gated-- - Recruiter @ Brex"
+    assert hl.scrub_lead_title(scrubbed, "Julia Casey Az") == scrubbed
+
+
+def test_scrub_lead_title_masks_first_last_pair_in_reordered_headline():
+    assert hl.scrub_lead_title("Julia Az - Talent Partner",
+                               "Julia Casey Az") \
+        == "--reveal-gated-- - Talent Partner"
+
+
+def test_scrub_lead_title_leaves_unrelated_short_names_alone():
+    # Bare first names alone are never a variant: a coincidental
+    # 'Maria' (or a headline with no name at all) passes untouched.
+    for title, name in [
+        ("Maria - Recruiting at X", "Julia Casey Az"),
+        ("Talent @ Decagon", "Julia Casey Az"),
+        ("Senior Business Recruiter @ Brex", "Julia Casey Az"),
+        ("Julia - Senior Recruiter", "Julia Casey Az"),
+        ("Recruiter @ Brex", ""),
+    ]:
+        assert hl.scrub_lead_title(title, name) == title
+
+
+def test_scrub_lead_title_matches_whole_words_and_any_case():
+    # Whole-word only: a name fused into a longer token stays.
+    assert hl.scrub_lead_title("JuliaCasey Recruiting", "Julia Casey Az") \
+        == "JuliaCasey Recruiting"
+    # Case-insensitive: the provider's casing is not trusted.
+    assert hl.scrub_lead_title("JULIA CASEY - Recruiter @ Brex",
+                               "Julia Casey Az") \
+        == "--reveal-gated-- - Recruiter @ Brex"
+
+
+def _seed_leaky_lead(conn, profile_url="https://www.linkedin.com/in/julia-casey",
+                     full_name="Julia Casey Az",
+                     title="Julia Casey - Senior Business Recruiter @ Brex"):
+    assert upsert_hiring_lead(conn, profile_url=profile_url,
+                              full_name=full_name, title=title,
+                              company_key="name:brex",
+                              source=LEAD_SOURCE_TAVILY,
+                              discovered_at="2026-11-10T00:00:00+00:00")
+
+
+def test_backfill_lead_title_privacy_repairs_stored_rows(app_dir):
+    conn = init_db()
+    _seed_leaky_lead(conn)
+    from kestrel.database import backfill_lead_title_privacy
+
+    assert backfill_lead_title_privacy(conn) == 1
+    row = conn.execute(
+        "SELECT title FROM hiring_leads WHERE profile_url = ?",
+        ("https://www.linkedin.com/in/julia-casey",),
+    ).fetchone()
+    assert row["title"] == ("--reveal-gated-- - Senior Business "
+                            "Recruiter @ Brex")
+
+
+def test_backfill_lead_title_privacy_is_idempotent(app_dir):
+    conn = init_db()
+    _seed_leaky_lead(conn)
+    from kestrel.database import backfill_lead_title_privacy
+
+    assert backfill_lead_title_privacy(conn) == 1
+    # The second pass finds nothing to rewrite: a repaired title
+    # carries no name variant, so it compares equal and stays put.
+    assert backfill_lead_title_privacy(conn) == 0
+    row = conn.execute(
+        "SELECT title FROM hiring_leads WHERE profile_url = ?",
+        ("https://www.linkedin.com/in/julia-casey",),
+    ).fetchone()
+    assert row["title"] == ("--reveal-gated-- - Senior Business "
+                            "Recruiter @ Brex")
+
+
+def test_init_db_runs_the_title_repair_pass(app_dir):
+    # The pass is hooked beside backfill_company_identity in init_db:
+    # a store seeded with a leaky row is repaired on the next startup,
+    # no manual step.
+    conn = init_db()
+    _seed_leaky_lead(conn)
+    conn.close()
+    repaired = init_db()
+    row = repaired.execute(
+        "SELECT title FROM hiring_leads WHERE profile_url = ?",
+        ("https://www.linkedin.com/in/julia-casey",),
+    ).fetchone()
+    assert row["title"] == ("--reveal-gated-- - Senior Business "
+                            "Recruiter @ Brex")

@@ -1611,8 +1611,9 @@ def apply_result_cmd(
 # opts back in per call, the same contract as the resume text.
 # ---------------------------------------------------------------------------
 
-# The mask for --reveal-gated personal data (the spec §5 payload shape).
-_LEADS_REDACTED = "--reveal-gated--"
+# The mask for --reveal-gated personal data (the spec §5 payload shape)
+# now lives in the discovery module (LEADS_REDACTED) so the masked verb
+# output and the store's title-repair backfill use the identical token.
 
 
 def _leads_guardrails() -> dict:
@@ -1638,16 +1639,20 @@ def _lead_block(row: dict, reveal: bool) -> dict:
     The stored title is the LinkedIn headline, which embeds the
     person's name ("Jane Doe - Talent @ Acme") — redact the name from
     the title too, not just from the full_name field, or the mask is
-    defeated by the field beside it (live run 2026-11-09).
+    defeated by the field beside it (live run 2026-11-09). The stored
+    name is slug-derived, so the title often carries a truncated
+    variant of it ('Julia Casey' for parsed 'Julia Casey Az', live run
+    2026-11-10) — scrub_lead_title masks those variants too, whole-word
+    and conservative, with the same token the store's repair pass uses.
     """
+    from kestrel.discovery.hiring_leads import LEADS_REDACTED, scrub_lead_title
+
     title = str(row["title"] or "")
     if not reveal:
-        name = str(row["full_name"] or "").strip()
-        if name and name in title:
-            title = title.replace(name, _LEADS_REDACTED)
+        title = scrub_lead_title(title, str(row["full_name"] or ""))
     return {
-        "profile_url": row["profile_url"] if reveal else _LEADS_REDACTED,
-        "full_name": row["full_name"] if reveal else _LEADS_REDACTED,
+        "profile_url": row["profile_url"] if reveal else LEADS_REDACTED,
+        "full_name": row["full_name"] if reveal else LEADS_REDACTED,
         "title": title,
         "company_key": row["company_key"],
         "source": row["source"],

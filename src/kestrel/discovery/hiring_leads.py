@@ -211,6 +211,61 @@ def clean_profile_title(raw_title: object) -> str | None:
     return title or None
 
 
+# The mask for --reveal-gated personal data (the spec §5 payload shape).
+# It lives here — not in the agent layer — so the masked verb output and
+# the store's title-repair backfill (backfill_lead_title_privacy) replace
+# names with the identical token: two surfaces, one contract.
+LEADS_REDACTED = "--reveal-gated--"
+
+
+def lead_title_name_variants(full_name: str) -> list[str]:
+    """Whole-word name variants one parsed full name may surface as.
+
+    The provider title often truncates or reshapes the slug-derived
+    name (live run 2026-11-10: full_name 'Julia Casey Az' vs title
+    'Julia Casey - Senior Business Recruiter @ Brex'), so the exact
+    string alone under-scrubs. Variants, longest first:
+
+    - the exact full name,
+    - leading token prefixes of two or more tokens ('Julia Casey'),
+    - the first+last token pair ('Julia Az') for reordered headlines.
+
+    Deliberately NOT a variant: a bare first name alone. 'Talent @
+    Decagon' and a coincidental 'Maria' in an unrelated headline must
+    never be masked — only a multi-token match identifies the person.
+    """
+    tokens = str(full_name or "").split()
+    if len(tokens) < 2:
+        # A single-token name carries no trustworthy multi-token
+        # variant — the exact string is all we may scrub.
+        return [" ".join(tokens)] if tokens else []
+    variants = [" ".join(tokens)]
+    for n in range(len(tokens) - 1, 1, -1):
+        variants.append(" ".join(tokens[:n]))
+    first_last = f"{tokens[0]} {tokens[-1]}"
+    if first_last not in variants:
+        variants.append(first_last)
+    return variants
+
+
+def scrub_lead_title(title: str, full_name: str,
+                     mask: str = LEADS_REDACTED) -> str:
+    """Replace every whole-word name variant in a lead title with mask.
+
+    Pure and idempotent: whole-word case-insensitive matching only,
+    longest variant first so the exact name is consumed before a
+    shorter prefix of it can fragment the mask into
+    '<mask> Az'. A title that carries no variant (an already-scrubbed
+    one, or an unrelated headline) returns unchanged.
+    """
+    text = str(title or "")
+    for variant in lead_title_name_variants(str(full_name or "")):
+        pattern = re.compile(r"\b" + re.escape(variant) + r"\b",
+                             re.IGNORECASE)
+        text = pattern.sub(mask, text)
+    return text
+
+
 def map_search_result(*, link: str, title: object,
                       company_key: str,
                       source: str = LEAD_SOURCE_SERP) -> dict:
