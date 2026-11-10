@@ -699,17 +699,19 @@ def test_invalid_min_fit_and_limit_refusals(conn):
 
 
 def test_verb_next_hints_name_the_installed_cli(conn, monkeypatch, no_network):
-    """Regression: the 'next' hints must say `kestrel ...` — the command
-    the user can actually run. `kestrel-agent` is only the pip package
-    name, so hinting it tells the agent to run a command that does not
-    exist (bug reported against main at 7b5295a)."""
+    """Regression: the 'next' hints must name the full mounted command
+    path, `kestrel agent <verb>` — the agent verbs are a Typer sub-app
+    (cli.py add_typer(agent_app, name='agent')), so a bare `kestrel
+    leads-list` is not a runnable invocation (follow-up to 7b5295a)."""
     _patch_build_source(monkeypatch, _FakeSource([dict(_LEAD)], []))
 
     discover = payload_of(run("leads-discover"))
     listing = payload_of(run("leads-list"))
 
-    assert "`kestrel leads-list`" in discover["next"]
-    assert "`kestrel leads-list --reveal`" in listing["next"]
-    # And never the package name dressed up as a command.
+    assert "`kestrel agent leads-list`" in discover["next"]
+    assert "`kestrel agent leads-list --reveal`" in listing["next"]
+    # And never a bare or package-name invocation of an agent verb.
     assert "kestrel-agent" not in discover["next"]
     assert "kestrel-agent" not in listing["next"]
+    assert "`kestrel leads-" not in discover["next"]
+    assert "`kestrel leads-" not in listing["next"]
