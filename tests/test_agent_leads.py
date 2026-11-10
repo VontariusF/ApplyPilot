@@ -404,6 +404,81 @@ def test_leads_list_masks_name_variant_in_title(conn):
 
 
 # ---------------------------------------------------------------------------
+# Sweep art_Izev3UNN regressions: findings 1 and 5 (name variants in
+# scrub) and finding 2 (punctuation-tolerant attribution gate)
+# ---------------------------------------------------------------------------
+
+
+def test_leads_list_masks_reversed_name_order_in_title(conn):
+    # Sweep finding 1 (High): a provider headline that REVERSES the
+    # name ('Green Anne' for slug-parsed 'Anne Green') matched no
+    # variant — the First-Last pair only ever matches 'First Last'
+    # order — so the real name rode the masked JSON. The Last-First
+    # pair closes the leak.
+    _seed_lead(conn, "https://www.linkedin.com/in/anne-green",
+               full_name="Anne Green",
+               title="Green Anne | Head of Talent | LinkedIn")
+    conn.commit()
+
+    masked = payload_of(run("leads-list"))
+    lead = masked["leads"][0]
+    assert lead["title"].startswith(_LEADS_REDACTED)
+    assert "Anne" not in masked and "Green" not in masked
+
+
+def test_leads_list_masks_slug_separated_name_tokens_in_title(conn):
+    # Sweep finding 5 (Medium): display_name_from_slug reads [-_+] as
+    # token separators, but variant matching did not — a hyphenated
+    # headline kept the surname in the clear
+    # ('--reveal-gated---Smith - Talent').
+    _seed_lead(conn, "https://www.linkedin.com/in/jane-doe-smith",
+               full_name="Jane Doe Smith",
+               title="Jane-Doe-Smith - Talent Partner @ Brex")
+    conn.commit()
+
+    masked = payload_of(run("leads-list"))
+    lead = masked["leads"][0]
+    assert lead["title"].startswith(_LEADS_REDACTED)
+    assert "Doe" not in masked and "Smith" not in masked
+
+    # The docstring contract survives the separator widening: only a
+    # MULTI-token match identifies the person. A bare single token is
+    # never a variant (a coincidental 'Doe' passes untouched), and a
+    # token fused into a longer word is not whole-word.
+    assert hl.scrub_lead_title("Doe - Talent Partner @ Brex",
+                               "Jane Doe Smith") == \
+        "Doe - Talent Partner @ Brex"
+    assert hl.scrub_lead_title("JaneDoeSmith - Recruiter",
+                               "Jane Doe Smith") == \
+        "JaneDoeSmith - Recruiter"
+    # Pure and idempotent: scrubbing an already-scrubbed title is a
+    # no-op.
+    once = hl.scrub_lead_title("Jane-Doe-Smith - Talent Partner @ Brex",
+                               "Jane Doe Smith")
+    assert hl.scrub_lead_title(once, "Jane Doe Smith") == once
+
+
+def test_affiliation_gate_tolerates_trailing_punctuation_in_company_name():
+    # Sweep finding 2 (High): the needle built from 'Acme, Inc.' ended
+    # in a literal '.', and \b after a non-word char can never fire —
+    # every title was dropped as no-affiliation and the company
+    # yielded zero leads.
+    role = hl.title_affiliation_role(
+        title="Jane Doe - Head of Talent at Acme, Inc. | LinkedIn",
+        display_name="Acme, Inc.", domain=None,
+        taxonomy=("Head of Talent", "Recruiter"))
+    assert role == "Head of Talent"
+
+    # Whole-word semantics survive the normalization: 'inc' cannot
+    # complete inside a longer word.
+    role = hl.title_affiliation_role(
+        title="Jane Doe - Head of Talent at Acme, Incoming | LinkedIn",
+        display_name="Acme, Inc.", domain=None,
+        taxonomy=("Head of Talent", "Recruiter"))
+    assert role is None
+
+
+# ---------------------------------------------------------------------------
 # Flag validation — typed envelopes, never usage prose
 # ---------------------------------------------------------------------------
 

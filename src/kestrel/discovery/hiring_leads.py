@@ -228,7 +228,11 @@ def lead_title_name_variants(full_name: str) -> list[str]:
 
     - the exact full name,
     - leading token prefixes of two or more tokens ('Julia Casey'),
-    - the first+last token pair ('Julia Az') for reordered headlines.
+    - the first+last token pair ('Julia Az') AND its reversed
+      last+first order ('Az Julia') for reordered headlines — a
+      provider that flips the name ('Green Anne | Head of Talent' for
+      'Anne Green') contains neither order as a phrase, so both
+      directions are needed (sweep art_Izev3UNN finding 1).
 
     Deliberately NOT a variant: a bare first name alone. 'Talent @
     Decagon' and a coincidental 'Maria' in an unrelated headline must
@@ -242,10 +246,40 @@ def lead_title_name_variants(full_name: str) -> list[str]:
     variants = [" ".join(tokens)]
     for n in range(len(tokens) - 1, 1, -1):
         variants.append(" ".join(tokens[:n]))
-    first_last = f"{tokens[0]} {tokens[-1]}"
-    if first_last not in variants:
-        variants.append(first_last)
+    for pair in (f"{tokens[0]} {tokens[-1]}",
+                 f"{tokens[-1]} {tokens[0]}"):
+        if pair not in variants:
+            variants.append(pair)
     return variants
+
+
+# Slug-style token separators the provider titles hyphenate with —
+# the same set display_name_from_slug splits on (plus whitespace, its
+# canonical join). Between the tokens of a MULTI-token variant only.
+_VARIANT_SEPARATOR = r"[-_+\s]+"
+
+
+def _variant_pattern(variant: str) -> re.Pattern:
+    """Whole-word pattern for one name variant.
+
+    Multi-token variants match across slug-style separators too — a
+    provider title hyphenates ('Jane-Doe-Smith - Talent') where the
+    slug parser saw spaces, and only matching the space-separated form
+    left the tail in the clear (sweep art_Izev3UNN finding 5). Every
+    token stays whole-word: a fused 'JaneDoeSmith' and a bare single
+    token never match, and each token must be a complete word (no
+    'JaneDoe').
+    """
+    words = [w for w in re.split(_VARIANT_SEPARATOR, variant) if w]
+    if len(words) < 2:
+        # A single-token variant is whole-word only; the separator
+        # flexibility exists to reassemble a fragmented MULTI-token
+        # name, never to widen a lone token's footprint.
+        return re.compile(r"\b" + re.escape(variant.strip()) + r"\b",
+                          re.IGNORECASE)
+    return re.compile(
+        r"\b" + _VARIANT_SEPARATOR.join(re.escape(w) for w in words)
+        + r"\b", re.IGNORECASE)
 
 
 def scrub_lead_title(title: str, full_name: str,
@@ -255,14 +289,15 @@ def scrub_lead_title(title: str, full_name: str,
     Pure and idempotent: whole-word case-insensitive matching only,
     longest variant first so the exact name is consumed before a
     shorter prefix of it can fragment the mask into
-    '<mask> Az'. A title that carries no variant (an already-scrubbed
-    one, or an unrelated headline) returns unchanged.
+    '<mask> Az'. Multi-token variants also match across slug-style
+    separators (``Jane-Doe-Smith`` for 'Jane Doe Smith'); a single
+    token never widens its footprint that way. A title that carries
+    no variant (an already-scrubbed one, or an unrelated headline)
+    returns unchanged.
     """
     text = str(title or "")
     for variant in lead_title_name_variants(str(full_name or "")):
-        pattern = re.compile(r"\b" + re.escape(variant) + r"\b",
-                             re.IGNORECASE)
-        text = pattern.sub(mask, text)
+        text = _variant_pattern(variant).sub(mask, text)
     return text
 
 
@@ -319,6 +354,27 @@ def map_tavily_result(raw: dict, company_key: str) -> dict:
                              source=LEAD_SOURCE_TAVILY)
 
 
+# Company display names often end in punctuation ('Acme, Inc.'). A
+# literal '.' as the needle's last char can never satisfy the \b that
+# follows it — a non-word char sits on both sides — so the gate went
+# deaf for exactly those companies (sweep art_Izev3UNN finding 2):
+# zero leads, inflated dropped_no_affiliation.
+_NEEDLE_TRAILING_PUNCT_RE = re.compile(r"[.,;:!?\s]+$")
+
+
+def _affiliation_needle(name: object) -> str | None:
+    """Lowercased attribution needle with trailing punctuation stripped.
+
+    'Acme, Inc.' -> 'acme, inc': the words keep their whole-word \b
+    semantics; only the punctuation the needle ENDS in is normalized,
+    since that punctuation can never sit next to a word boundary.
+    Interior punctuation stays literal — the title text is expected to
+    carry the same 'Acme, Inc.' shape the display name does.
+    """
+    needle = _NEEDLE_TRAILING_PUNCT_RE.sub("", str(name or "").lower())
+    return needle or None
+
+
 def title_affiliation_role(*, title: object, display_name: str,
                            domain: str | None = None,
                            taxonomy: tuple[str, ...] | list[str] = (),
@@ -338,8 +394,8 @@ def title_affiliation_role(*, title: object, display_name: str,
     text = str(title or "").lower()
     if not text:
         return None
-    needles = [n for n in (str(display_name or "").lower(),
-                           str(domain or "").lower()) if n]
+    needles = [n for n in (_affiliation_needle(display_name),
+                           _affiliation_needle(domain)) if n]
     if not any(re.search(rf"\b{re.escape(n)}\b", text) for n in needles):
         return None
     for term in taxonomy:
